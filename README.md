@@ -19,5 +19,6 @@ Clean-room comparison workspace for selecting a proven five-account Home Village
 - `references/` — local pinned comparison checkouts; excluded from this workspace's Git history.
 - `research/runner-comparison.md` — evidence-based comparison and recommendation.
 - `research/integration-plan.md` — architecture for adding the Clash Rush policy engine and Builder Base.
+- `research/delivery-guardrails.md` — binding anti-regression, verification, privacy, and live-test gates.
 
 No automation will be run from this workspace until the comparison and architecture gate are approved.
