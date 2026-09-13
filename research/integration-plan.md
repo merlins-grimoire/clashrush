@@ -27,11 +27,11 @@ This avoids host memory/CPU pressure and removes cross-instance cursor/capture r
 
 ### Fair service schedule
 
-Use two lanes per account:
+Use two work queues per account:
 
 `Home[0], Builder[0], Home[1], Builder[1], …, Home[4], Builder[4]`
 
-Each turn permits at most one bounded transaction, except a transaction-specific continuation that is required to reach a safe stopping screen. Persist:
+Each account visit has a hard **10-minute** wall-clock budget. Within that visit, drain all immediately actionable Home and Builder work that can be completed safely. Reserve the first five minutes for Home and the remaining five minutes for Builder so one village cannot consume the other village's opportunity; unfinished work resumes on the next cycle. A transaction-specific continuation may exceed its lane boundary only to reach a safe stopping screen, never the ten-minute account deadline except for fail-closed cleanup. Persist:
 
 - next slot and village lane as one atomic `(slot, lane)` cursor;
 - per-slot readiness/defer time;
@@ -47,9 +47,11 @@ A battle must finish or reconcile before rotation. If no safe game screen can be
 
 For every slot, the normal path is exactly:
 
-`START(slot) → VERIFY_BINDING → HOME(slot) → BUILDER(slot) → SAFE_HOME → STOP(slot) → VERIFY_STOPPED → ADVANCE`
+`START(slot) → VERIFY_BINDING → HOME_DRAIN(slot, ≤5m) → BUILDER_DRAIN(slot, ≤5m) → SAFE_HOME → STOP(slot) → VERIFY_STOPPED → ADVANCE`
 
 - A recoverable Home failure that returns to proved Home still proceeds to the Builder lane.
+- Home drain checks the laboratory first, then uses every safely actionable free builder; Builder drain checks Star Laboratory first, then safely actionable named upgrades and bounded Baby Dragon attacks.
+- “Complete all” is best-effort inside the ten-minute cap. No account may extend its visit merely because more farming or upgrades remain.
 - An unknown/unsafe Home state prevents Builder navigation; persist `(slot, BUILDER)` as deferred, terminate the exact instance, and retry that lane on a later bounded run.
 - A Builder navigation/action failure must recover to proved Home or use the fail-closed process-tree stop above.
 - If a global limit expires between lanes, persist `(slot, BUILDER)`, stop the current instance, and resume there next run; do not replay Home.
@@ -260,12 +262,16 @@ Promote separately:
 4. second-stage detection/deployment;
 5. result/return recovery. Cart, chest, daily reward, and defense reward claims remain excluded.
 
+The first Builder Base release is limited to Baby Dragon attacks, Star Laboratory research, and named upgrades. New-building placement is a later separately approved slice.
+
 Each needs a synthetic test, exact-index privacy scan, independent review, and one bounded owner-approved live transaction.
 
 ### Slice 6 — five-account release candidate
 
 - All five slots and both lanes serviced.
 - Per slot: lab checked, builder count checked, planner decision recorded, outcome recorded.
+- Each account stops within ten minutes, with no Home or Builder lane starvation.
+- All immediately actionable work attempted within its lane budget; unfinished work remains durable for the next visit.
 - Every battle has a bounded finish/recovery path before rotation.
 - No full frames retained; no private identifiers in public artifacts.
 - Kill switch returns off after every exit.

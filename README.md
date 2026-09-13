@@ -11,6 +11,8 @@ Clean-room comparison workspace for selecting a proven five-account Home Village
 - Private account names, player tags, tag hashes, screenshots, calibration data, traces, and machine paths stay local and ignored.
 - Home Gold, Home Elixir, Builder Gold, and Builder Elixir each require explicit owner enablement, kill switches, bounded runs, and transaction verification. Dark Elixir and gems remain disabled.
 - Private files may be written only beneath ignored `private/` or `var/` roots; runtime path validation will reject every other destination.
+- Each account receives one bounded ten-minute visit. The runner completes as much immediately available Home and Builder work as possible, reserves time for both villages, then rotates.
+- The first Builder Base release includes Baby Dragon attacks, Star Laboratory research, and named building upgrades; new-building placement and reward claims remain excluded.
 
 ## Layout
 
