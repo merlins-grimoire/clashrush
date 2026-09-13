@@ -28,6 +28,8 @@ After two failed repair/review attempts, stop patching and reassess the architec
 
 ## 3. Prove transport before gameplay
 
+The operator contract requires Windows to remain logged in, unlocked, awake, and on a stable display configuration. Lock, sleep, display reconfiguration, near-black capture, or lost foreground binding fails closed.
+
 The first implementation spike must prove, on one reversible screen:
 
 - exact BlueStacks instance → PID → render HWND binding;

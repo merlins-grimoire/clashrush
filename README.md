@@ -13,6 +13,7 @@ Clean-room comparison workspace for selecting a proven five-account Home Village
 - Private files may be written only beneath ignored `private/` or `var/` roots; runtime path validation will reject every other destination.
 - Each account receives one bounded ten-minute visit. The runner completes as much immediately available Home and Builder work as possible, reserves time for both villages, then rotates.
 - The first Builder Base release includes Baby Dragon attacks, Star Laboratory research, and named building upgrades; new-building placement and reward claims remain excluded.
+- Unattended runs require Windows to remain logged in, unlocked, awake, and on a stable display configuration.
 
 ## Layout
 
