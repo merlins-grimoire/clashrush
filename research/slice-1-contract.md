@@ -41,7 +41,8 @@ Build the smallest production foundation that discovers exactly five operator-co
 - Start refuses any pre-existing player and any ambiguous/mismatched PID/HWND binding.
 - Slice 1 always skips graceful close and performs bounded Job-object termination; a later same-binding proof may authorize immediate identity-revalidated `WM_CLOSE`. Numeric-PID tree termination is forbidden.
 - Stop fails if any descendant survives or any bound HWND remains valid.
-- Lifecycle state advances only after verified stop; restart blocks on `ACTIVE` or `BLOCKED` and resumes only from `READY`.
+- Lifecycle state advances only after verified stop and successful retained-handle closure; restart blocks on `ACTIVE` and resumes only from `READY`.
+- A mutex-release failure after `READY` permanently disables the current process and requires abandoned-mutex reconciliation; it cannot roll the cursor backward.
 - Complete dry trace is `START0,STOP0,...,START4,STOP4` with no overlap.
 - Static source scan rejects ADB tokens and frame-write APIs in production modules.
 

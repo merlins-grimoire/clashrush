@@ -60,8 +60,10 @@ Job membership snapshots use `JOBOBJECT_BASIC_PROCESS_ID_LIST` with bounded buff
 4. Wait on the retained original process handle and poll Job accounting until active-process count is zero.
 5. Require every captured HWND to be invalid. HWND reuse remains a failure because `IsWindow` stays true.
 6. Re-enumerate all `HD-Player.exe` identities with complete Toolhelp termination validation. Any player blocks progression.
-7. Durably replace lifecycle state with `READY(next_slot)` using the protocol below, read it back, close process and Job handles, issue `StopRecord`, and release the mutex.
-8. Any API error, timeout, malformed identity, non-empty Job, surviving/reused HWND, unexpected player, or state-write failure leaves the last durable `ACTIVE` state or durably sets its `blocked_reason`. It never writes names, PIDs, HWNDs, tags, or raw exception text.
+7. After all stop proofs pass, close every retained member, process, thread, and Job handle. A close failure keeps `ACTIVE` and forbids advancement.
+8. Durably replace lifecycle state with `READY(next_slot)` using the protocol below, read it back, issue `StopRecord`, and release the mutex.
+9. Any error before the successful `READY` read-back leaves the last durable `ACTIVE` state or durably sets its `blocked_reason`. It never writes names, PIDs, HWNDs, tags, or raw exception text.
+10. A `ReleaseMutex` or mutex-handle close failure after `READY` is a sanitized resource-cleanup fault, not permission to rewrite an already committed cursor. The current process is permanently barred from another visit and must exit; another runner remains blocked until Windows releases the abandoned object and then must perform the required abandoned-mutex reconciliation.
 
 ### Crash-durable lifecycle state
 
