@@ -1,0 +1,6 @@
+references/
+private/
+artifacts/
+var/
+*.log
+.env
