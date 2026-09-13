@@ -4,3 +4,8 @@ artifacts/
 var/
 *.log
 .env
+/account*.json
+/calibration*.json
+/screenshot*
+/trace*.json*
+/config/local-*

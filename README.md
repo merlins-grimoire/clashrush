@@ -1,6 +1,6 @@
 # Clash Rush Rebuild
 
-Clean-room comparison workspace for selecting a proven five-account Home Village and Builder Base runner, then integrating the existing Clash Rush strategic-upgrade engine.
+Clean-room comparison workspace for selecting a proven five-account Home Village and Builder Base runner, then integrating the existing Clash Rush strategic-upgrade engine. The host runs one BlueStacks instance at a time and cycles deterministically through five configured slots.
 
 ## Non-negotiable constraints
 
@@ -9,7 +9,8 @@ Clean-room comparison workspace for selecting a proven five-account Home Village
 - Home Village and Builder Base must both be first-class modes.
 - Never spend gems, make purchases, claim irreversible rewards, use chat/clan/war/donations, switch Supercell accounts, evade detection, or bypass CAPTCHA.
 - Private account names, player tags, tag hashes, screenshots, calibration data, traces, and machine paths stay local and ignored.
-- Normal gold/elixir spending requires explicit owner enablement, kill switches, bounded runs, and transaction verification.
+- Home Gold, Home Elixir, Builder Gold, and Builder Elixir each require explicit owner enablement, kill switches, bounded runs, and transaction verification. Dark Elixir and gems remain disabled.
+- Private files may be written only beneath ignored `private/` or `var/` roots; runtime path validation will reject every other destination.
 
 ## Layout
 
