@@ -1,0 +1,50 @@
+# Scheduler contract and donor-reuse inventory
+
+## Donor inventory (completed before implementation)
+
+The scheduler remains a local seam. The pinned comparison found no complete donor scheduler compatible with the durable due-account, schema-v2 admission, dual-lane, and fail-closed lifecycle requirements. Therefore no third-party implementation is copied by this slice and no new notice is required.
+
+| Source seal and inspected candidate paths | Actual license status | Production caller/orchestration assumptions | Decision and concrete incompatibilities | Matching local proof |
+|---|---|---|---|---|
+| BasePilot `4ede1efd220ffc79a5b490cfd3788b44d2584da4` / tree `0553306bfd30a32e31e427a0b77ff22c41f55901`; application-level automation/recovery loops | MIT; attribution required for copied source | Single gameplay loop, its own navigation and timing, runtime observation/input dependencies | No scheduler seam reused: it does not provide the generation-bound durable due queue, Home/Builder pending lane, lifecycle nonce equality, restart-stable tie cursor, or yield barrier. Its guarded gameplay/recovery seams belong to later slices. | `test_limits_freeze_reconciliation_visit_lane_and_run_bounds`; transition and selection tests |
+| CoC_Bot `a5c943afed0ed3b9abedbbc228b0889145ecaf24` / tree `d79368fbe550036f1542883f18434e318016b279`; top-level bot/worker loops and existing named-instance seam | MIT; notice already preserved for the earlier registry adaptation | Independent workers, globals/caches, Android-debug transport, runtime process/device assumptions | Existing registry adaptation is not duplicated. Its scheduling shape conflicts with one host-wide serialized visit, one authoritative persisted deadline, schema-v2 `start_admitted`, and bounded dual-lane fairness. | Pure tests assert no donor runtime dependency and exact queue ordering/state behavior |
+| ClashAutomation `c41fe12a6df051e241c695b71b6859286e24c612` / tree `b549901e7ca8b871a17265517d730f0b3c84a618`; controller/main pass orchestration | MIT; attribution required for copied source | Long/recursive automation passes coupled to capture/controller/input and first-window assumptions | No compatible durable scheduler or crash-consistent admission seam. Controller geometry remains a later transport candidate only. | `test_stale_selection_and_stale_admission_fail_closed`; finite/boundary tests |
+| Published Clash Rush `949497bf0a543a43ec6ef39a8c897e366bc10362` / tree `12ded3ccdb9f27610d9f07fdc7a6ad5b9fd74cc0`; `cycle.py` and mechanically required model helpers | First-party historical source, not an MIT third-party donor | Historical slot/cycle and runtime orchestration; not configuration-generation or durable due-job based | Behavioral evidence only for this seam. Slot rotation cannot satisfy oldest-currently-eligible selection, equal-deadline-only cursor semantics, deferred yield sets, or dual-lane persistence. | `test_oldest_currently_eligible_order_and_restart_stable_equal_deadline_tie` |
+| Auto Farmer `0120019918758e45feddf84fd5522e31cc6fd578` / tree `acb9709289cc1030787dc87d554ff1c16562bde4`; `core/settings.py` scheduler tick/performance settings | MIT; attribution required for copied source | ADB-centered runtime; performance profiles mix polling/input/detection concerns | No code reused. Tick-rate configuration is not queue correctness and its ADB/runtime coupling is prohibited. Performance UX remains a later independent seam. | Limits test freezes correctness bounds independently of runtime performance |
+| `keshav-x/coc-bot` `69392ab8ca58cd9b7725bf4106e650dbcd5e73bd` / tree `542d2a9908bbb7f49559c5f29175a020b08cccb9`; worker/session loops | No verified source-code grant; study only | Runtime workers, random breaks/actions and device/input services | No copying permitted; random scheduling cannot define persisted deadline or deterministic fairness. | Deterministic deadline/tie tests |
+| NX-ClashClient `e4c79fd671912714d48fc04c2ff9ffb60e09ef50` / tree `dcfc43125e3e74dbca52ee00bb0b743a4e3c7fbd`; automation/dashboard loop concepts | No verified source-code grant; clean-room concepts only | PostMessage/ADB, UI/controller and private runtime state | No copying permitted and no compatible queue contract. Dashboard concepts do not supply admission or lifecycle authority. | Contract module has only standard-library and immutable configuration imports |
+
+The largest complete compatible licensed seam is consequently the already-local immutable schema-v2 identity seam: `AccountKey` and `ConfigurationGeneration` are reused directly rather than wrapped or duplicated. Scheduler state, ordering, and transitions are clean-room local contracts because the project donor map explicitly assigns “Scheduler, safety, audit” to local implementation.
+
+## Closed model
+
+`QueueState` is exactly `WAITING | ELIGIBLE | DEFERRED | QUARANTINED | ADMITTED`. `Lane` is exactly `HOME | BUILDER`. `ALLOWED_TRANSITIONS` is the complete transition graph, exposed through an immutable mapping whose values are frozen sets.
+
+Every `QueueJob` binds:
+
+- one stable `AccountKey` and immutable `ConfigurationGeneration`;
+- a positive `JobGeneration`;
+- the original 32-lowercase-hex `AvailabilityEvent` identity;
+- one finite `available_at` and one persisted finite `due_at` that cannot precede it;
+- the pending Home or Builder lane;
+- only state-appropriate reconciliation, yield, or quarantine metadata, with an exact prior state and no self-account or repeated-account yield tokens.
+
+Admission requires a currently due `ELIGIBLE` job and creates one immutable `VisitAdmission`: account/configuration/job generation, a positive visit generation, and the caller-injected exact 32-lowercase-hex visit nonce. An `AdmittedVisit` accepts only exact `QueueJob` and `VisitAdmission` values, requires the job to be `ADMITTED`, and requires exact account/configuration/job-generation agreement, including on direct construction. The nonce is generated by the future durable queue transaction and must be passed unchanged to schema-v2 `LifecycleSupervisor.start_admitted`; this module never creates a competing nonce. Sealed v1 `LifecycleSupervisor.start` is not imported, called, or modified.
+
+Completion consumes only an exact, cross-field-validated `AdmittedVisit`, never a directly constructed unbound `ADMITTED` job, into one fresh higher job generation. The successor carries its own original availability event and exactly one deadline. A future builder event's randomized offset is chosen and persisted by the future storage/orchestration layer before constructing the job; this contract never redraws it. A positively free builder uses visit finish as both availability and due time. Unknown state uses bounded deferral.
+
+## Ordering, deferral, and fairness
+
+Selection requires every tuple member to be an exact `QueueJob`, every account-order member and non-null tie cursor to be an exact `AccountKey`, considers only currently due `ELIGIBLE` jobs, and fails closed if more than one candidate belongs to the same account, even when their job generations or deadlines differ. It then selects by oldest persisted deadline. Only jobs sharing that oldest deadline use `tie_after` plus injected stable configuration order, making equal-deadline order restart-stable. Future, deferred, quarantined, and admitted jobs are ineligible.
+
+A deferral preserves account, configuration, job generation, original availability event, deadline, and pending lane. It accepts only exact `QueueJob` and `SchedulerLimits` values, and its injected `reconcile_at` must be inclusively 5–60 minutes after `now` and later than the original due deadline. Its immutable `yield_set` snapshots at most one exact competing `(account_key, job_generation)` per other account. Re-entry requires both the persisted time and an empty caller-resolved barrier; a persisted reconciliation deadline may already be overdue when loaded. The persistence layer may resolve a token only after that exact generation receives terminal admission or independently becomes waiting/quarantined. Eligibility, quarantine, release, admission, and completion helpers likewise reject subclasses and attribute-compatible fakes at their owned ingress. Quarantine preserves its exact restorable prior state and all deadline/lane metadata.
+
+## Frozen execution bounds
+
+`SchedulerLimits` freezes a 600-second visit, initial 300-second Home opportunity and 300-second Builder opportunity, inclusive 300–3600-second reconciliation, exactly 1000 total iterations, and exactly 3 consecutive failures; constructor overrides cannot narrow or widen these constants. These are admission-loop ceilings, not permission to overrun a safe cleanup. The future orchestrator must stop admitting when either run bound is reached and must inject clocks, generated identifiers, persisted jobs, cursor, and resolved yield tokens.
+
+## Isolation and downstream contract
+
+This model is pure and injected: no filesystem, SQLite, lifecycle, Win32/device, process, capture/input, spending, network/Discord, sleep, environment, or private/runtime-path access. It neither activates nor reconciles lifecycle state. The next scheduler slice owns persistence and orchestration under the lifecycle mutex, calls the separate schema-v2 admission boundary, and proves process absence before cursor/finalization. Existing production callers remain untouched.
+
+The matching tests are `tests/test_scheduler_contract.py`: immutable legal graph and admission-bound completion; illegal/stale transitions; exact helper and nested-value ingresses; malformed or mismatched direct admission/deferred/quarantine construction; non-finite and generation/nonce boundaries; one-deadline preservation; exact `QueueJob` selection ingress, duplicate-account rejection, oldest-due ordering, and exact restart-stable tie cursors; exact `SchedulerLimits` deferral ingress and 5/60-minute reconciliation boundaries; yield-set fairness; quarantine restoration; and exact lane, visit, and run limits.
