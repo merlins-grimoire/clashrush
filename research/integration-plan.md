@@ -200,7 +200,7 @@ Each intent executes through:
 
 The owner does not operate these gates by editing files. One-time Setup records explicit non-premium resource authorizations through a command/UI. Starting Run authorizes that bounded run; Stop revokes further transaction admission immediately and performs safe cleanup. Development-only `--owner-approved` flags do not define the release UX.
 
-The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. Each normal-resource type requires explicit owner enablement. `HOME_DARK_ELIXIR`, `GEMS`, real-money purchases, purchase fallbacks, reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA handling have no executor in the initial release. Donations and the daily resource cart are separate post-production slices in `research/production-backlog.md`, never recovery side effects.
+The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `HOME_DARK_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. Each resource type requires independent explicit owner enablement and a separately promoted transaction executor. First-release `HOME_DARK_ELIXIR` scope is limited to hero upgrades and laboratory research; pet upgrades remain deferred because their ordering is meta-dependent, and the current slice has no Dark Elixir executor. `GEMS`, real-money purchases, purchase fallbacks, reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA handling remain unimplemented and unauthorized. Donations and the daily resource cart are separate post-production slices in `research/production-backlog.md`, never recovery side effects.
 
 ### Observability and diagnostic mode
 

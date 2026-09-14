@@ -8,6 +8,7 @@ These gates exist to prevent the regression loops, hidden dependencies, unsafe l
 - Import source only from sealed donor commits recorded in `research/integration-plan.md`.
 - Never copy an uncommitted legacy file.
 - Copy the largest compatible complete behavioral seam that fits the frozen slice, including its caller assumptions and tests—not isolated helpers or unrelated donor subsystems.
+- Record the donor's exact revision, source path, license decision, and required attribution for every adapted seam. Copy only under verified compatible licensing; unlicensed sources are behavioral evidence only and require a clean-room implementation.
 
 ## 2. Freeze each vertical slice before coding
 
@@ -186,11 +187,12 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - `/quarantine` targets one immutable account key, preserves due/pending state, and prevents every new `INPUT_STARTED`; an admitted action finishes only reconciliation/release/safe stop before entering quarantine.
 - `/unquarantine` restores preserved eligibility but never starts Run or authorizes spending.
 - Each blocker generation exposes only a compiled class-specific action set. First authorized terminal response wins; unsupported, duplicate-conflicting, free-text, stale-generation, or unsafe retry requests fail closed.
+- The only Captain blocker responses are `ACKNOWLEDGE_KEEP_PAUSED`, `REOBSERVE_AFTER_HUMAN_CORRECTION`, and `QUARANTINE_ACCOUNT`. Re-observation is read-only and class-gated; no generic Retry exists.
 - Lifecycle, identity, CAPTCHA, stop-proof, and uncertain spend/deployment blockers cannot be resumed or retried through Discord.
 
 ## 17. Preserve safety policy in code structure
 
-Only explicitly enabled `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR` have executors. Dark Elixir, gems, purchases, fallbacks, rewards, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA behavior have no implementation—not merely disabled flags.
+Only an explicitly enabled resource class with a separately promoted transaction executor may spend. The approved classes are `HOME_GOLD`, `HOME_ELIXIR`, `HOME_DARK_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. First-release `HOME_DARK_ELIXIR` transaction scope is hero upgrades and laboratory research; pet upgrades are deferred because their policy ordering is meta-dependent. The current slice implements none of those executors. Gems, purchases, unauthorized currency fallbacks, rewards, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA behavior have no implementation—not merely disabled flags.
 
 ## Definition of done
 

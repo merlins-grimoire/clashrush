@@ -25,7 +25,7 @@ P1 observability/operator Setup is required before the first Home/Builder produc
 - Typed troop, spell, siege, and hero deployment plan with no random/blind fallback.
 - Hero abilities scheduled from each positively confirmed hero drop using monotonic per-hero deadlines; configurable delay does not start after unrelated spell/troop work.
 - Positive card identity, deployed/depleted state, valid-zone proof, postcondition, and unconditional release for every input.
-- Fail-closed smart loot filtering with typed `ACCEPT|REJECT|UNKNOWN`, fresh-frame agreement, scan budgets that defer/stop rather than force an attack, and no Dark Elixir requirement unless separately authorized.
+- Fail-closed smart loot filtering with typed `ACCEPT|REJECT|UNKNOWN`, fresh-frame agreement, and scan budgets that defer/stop rather than force an attack. Dark Elixir is first-release scope for hero upgrades and laboratory research, but remains unimplemented: its loot threshold and each spending path require an explicit independent setting, complete executor, transaction journal, and postcondition before use. Pet upgrades remain deferred because the Rush Bible's pet ordering is explicitly meta-dependent.
 - A dedicated Sneaky Goblin strategy only after generic scout/deployment safety passes: positively identified card, observed targets/deployable zones, deterministic batches, remaining-card evidence, and verified battle exit. No blind slot, jitter, or “anti-ban” claim.
 
 ## P4 — social donations

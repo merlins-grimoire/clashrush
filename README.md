@@ -9,7 +9,7 @@ Clean-room comparison workspace for selecting proven Home Village and Builder Ba
 - Home Village and Builder Base must both be first-class modes.
 - Never spend gems, make purchases, claim irreversible rewards, use chat/clan/war/donations, switch Supercell accounts, evade detection, or bypass CAPTCHA in the initial production release. Cart and donation automation remain separately governed backlog slices.
 - Private account names, player tags, BlueStacks instance names, tag hashes, calibration data, traces, and machine paths stay local and ignored. Names/tags/instance names may appear in the protected local operator log and bounded local Debug view, but never in Status, Discord summaries, support/public exports, crash reports, tests, or Git. Full frames remain memory-only except for the separately reviewed blocker-only Discord upload authorized in `research/discord-fleet-control-plan.md`.
-- Home Gold, Home Elixir, Builder Gold, and Builder Elixir each require explicit owner enablement, kill switches, bounded runs, and transaction verification. Dark Elixir and gems remain disabled.
+- Home Gold, Home Elixir, Home Dark Elixir, Builder Gold, and Builder Elixir each require independent owner enablement, kill switches, bounded runs, and transaction verification. Dark Elixir is first-release scope for hero upgrades and laboratory research; pet upgrades remain deferred because the Rush Bible makes their order meta-dependent. No Dark Elixir executor exists in the current slice; gems remain disabled.
 - Private files may be written only beneath ignored `private/` or `var/` roots; runtime path validation will reject every other destination.
 - Each account receives one bounded ten-minute visit. The runner completes as much immediately available Home and Builder work as possible, reserves time for both villages, then rotates.
 - The first Builder Base release includes Baby Dragon attacks, Star Laboratory research, and named building upgrades; new-building placement and reward claims remain excluded.
@@ -28,7 +28,7 @@ Behavioral mechanics are donor-first: inspect the pinned BasePilot, CoC_Bot, and
 
 ## Layout
 
-- `references/` — local pinned comparison checkouts; excluded from this workspace's Git history.
+- `references/` — tracked public policy-source index plus local pinned comparison checkouts; donor checkout contents remain excluded from Git.
 - `research/runner-comparison.md` — evidence-based comparison and recommendation.
 - `research/integration-plan.md` — architecture for donor-backed Home Village and Builder Base behavior.
 - `research/discord-fleet-control-plan.md` — multi-runner Discord commands, role scoping, private channel routing, and builder-due scheduling.

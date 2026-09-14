@@ -47,9 +47,10 @@ captain_user_ids = [
 # Setup labels these ordered assignments Captain 1, Captain 2, and Captain 3.
 
 [teams.resources]
-# Setup requires four independent explicit choices. Discord cannot change them.
+# Setup requires five independent explicit choices. Discord cannot change them.
 home_gold_enabled = false
 home_elixir_enabled = false
+home_dark_elixir_enabled = false # first-release hero/lab scope; unavailable until those executors are promoted
 builder_gold_enabled = false
 builder_elixir_enabled = false
 

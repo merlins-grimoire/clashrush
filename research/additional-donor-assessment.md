@@ -24,7 +24,7 @@ Do not copy or reproduce its behavior directly. Its max-skip path can force an a
 1. return a typed `ACCEPT | REJECT | UNKNOWN` decision;
 2. require all policy-required loot fields to be readable and agreed across fresh frames;
 3. treat scan-budget exhaustion as `DEFER/STOP`, never “attack anyway”;
-4. keep Dark Elixir disabled unless separately authorized;
+4. treat Dark Elixir as first-release scope for hero upgrades and laboratory research, requiring its own explicit policy field and separately promoted executors before use; pet upgrades remain deferred;
 5. bind the accepted loot observation to the same scout generation used by deployment.
 
 ### Sneaky Goblin farming

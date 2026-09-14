@@ -103,7 +103,7 @@ Setup validates that:
 5. the configured team key is unique;
 6. cardinality matches the active schema (exactly five for v1; 1–10 account entries for v2, default five) and every local binding is distinct;
 7. each account has one Setup-generated random 128-bit `account_ref`, distinct and not derived from its configured account name, player tag, slot, channel, or BlueStacks display name;
-8. Home Gold, Home Elixir, Builder Gold, and Builder Elixir each have an explicit boolean owner choice; Discord cannot mutate them;
+8. Home Gold, Home Elixir, Home Dark Elixir, Builder Gold, and Builder Elixir each have an explicit boolean owner choice; Discord cannot mutate them, and a resource choice grants no authority without a separately promoted transaction executor;
 9. no private identifier is written outside the ignored private root.
 
 Autocomplete displays configured team labels but command payloads use immutable private team keys. Ordinary Run, Pause, Resume, Stop, Status, and Debug never require editing source or JSON. Remote Debug is disabled by default in Setup; a local Debug button remains the primary control.
@@ -202,7 +202,7 @@ Every account event goes only to that account's explicitly mapped private channe
 - next persisted due time;
 - concise cycle/visit summary.
 
-Blockers are immutable generations with a class-specific action matrix. Safe responses may include `RETRY_OBSERVATION_ONCE`, `DEFER_ACCOUNT`, `QUARANTINE_ACCOUNT`, `STOP_TEAM`, `ACKNOWLEDGE_ONLY`, or `RESUME_FROM_PROVED_STATE`. Lifecycle ownership, stop-proof, identity mismatch, CAPTCHA, and uncertain action blockers never permit retry/resume. The first authorized terminal response wins atomically; later conflicting responses are rejected. Free text can explain but never authorize an action.
+Blockers are immutable generations with a class-specific action matrix. The Captain response vocabulary is closed to `ACKNOWLEDGE_KEEP_PAUSED`, `REOBSERVE_AFTER_HUMAN_CORRECTION`, and `QUARANTINE_ACCOUNT`; there is no generic Retry. Re-observation performs no transaction replay and is exposed only where the blocker class permits fresh read-only evidence after a declared human correction. Lifecycle ownership, stop-proof, identity mismatch, CAPTCHA, and uncertain action blockers allow only acknowledge/keep-paused or quarantine. The first authorized terminal response wins atomically; later conflicting responses are rejected. Free text can explain but never authorize an action.
 
 `/status` is ephemeral and creates no channel message. Team-wide state changes that do not identify an account are attached to the account currently being serviced; when no account is active, the runner records them locally and the command acknowledgement remains ephemeral.
 
@@ -240,7 +240,7 @@ This intentionally favors a missing alert over a duplicate indefinitely retained
 - Lost control connectivity pauses the runner after safe transaction cleanup.
 - A failed screenshot upload does not change the blocker state and never redirects the image.
 - A Discord outage cannot bypass local lifecycle, spending, lease, transaction, or privacy checks.
-- Central-service compromise cannot authorize gems, Dark Elixir, purchases, rewards, social actions, or account switching because no executor exists for them.
+- Central-service compromise cannot alter any local resource authorization, including Dark Elixir. First-release Dark Elixir scope is limited to separately promoted hero-upgrade and laboratory-research executors; pet upgrades are deferred, and the current slice has no Dark Elixir executor. Gems, purchases, rewards, social actions, and account switching remain unimplemented and unauthorized.
 
 ## Delivery sequence
 

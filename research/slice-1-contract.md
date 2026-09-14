@@ -50,6 +50,66 @@ Build the smallest production foundation that discovers exactly five operator-co
 
 Live execution is not authorized by this contract. After static tests, clean-export verification, privacy scan, and independent PASS, request explicit owner approval for one bounded reversible lifecycle/capture test. Native gesture tests are a later separately authorized transport spike.
 
+## `WINDOW_BINDING` diagnostic sub-slice
+
+The first inert compatibility trial ended in durable `ACTIVE(slot 0, blocked_reason=WINDOW_BINDING)`. Static diagnostic development is authorized; another BlueStacks launch and any reconciliation of that exact `ACTIVE` generation remain two separate owner approvals. This sub-slice does not weaken or bypass normal startup's rule that unresolved `ACTIVE` blocks ordinary launch.
+
+### Static scope and invariants
+
+- Keep `LifecycleSupervisor.start`, schema-v1 state encoding, retained-handle ownership, private non-breakaway Job containment, complete process enumeration, exact Job-membership proof, and stop proof unchanged.
+- Split window evaluation into testable root and render stages without selecting a fallback. A successful result still requires one exact root, one exact render, private-Job membership, exact creation-time process identity, root ancestry, positive geometry, visibility, and a unique result.
+- Diagnose before changing a predicate. Static review may identify hypotheses but cannot justify loosening title, process-identity, ancestry, uniqueness, visibility, geometry, or Job-membership requirements.
+- Preserve the existing blocked slot and nonce. Static commands may not write lifecycle state, create a process, acquire input authority, focus a window, capture pixels, or reconcile `ACTIVE`.
+- No mouse, keyboard, `PostMessage`, ADB, game navigation, gameplay, spending, reward, social, or account-switching surface may be imported or called.
+
+### Closed diagnostic output
+
+The pure evaluator accepts already validated synthetic/native facts and returns one immutable record. It processes at most 4096 top-level windows and at most 4096 children of the selected root; exceeding either bound, an incomplete enumeration, or an invalid native value returns `NATIVE_FACT_INVALID`. It reduces counts to `ZERO | ONE | MULTIPLE` and dimensions to a closed geometry class, so no numeric PID, HWND, count, or dimension enters output.
+
+Root evaluation starts from the complete top-level enumeration. An empty initial universe returns `ROOT_NONE`. Otherwise it applies these filters in this exact order: visible; exact expected title; `GA_ROOT == self`; exact launched-process identity. The record contains the reduced cardinality after each filter. A filter reason is returned only when that filter changes a previously nonempty survivor set to empty: respectively `ROOT_NOT_VISIBLE`, `ROOT_TITLE_MISMATCH`, `ROOT_ANCESTRY_MISMATCH`, or `ROOT_IDENTITY_MISMATCH`. Invalid or incomplete native facts take precedence as `NATIVE_FACT_INVALID`. More than one final survivor returns `ROOT_MULTIPLE`; exactly one proceeds to render evaluation. Rejections of unrelated windows do not fail an otherwise successful stage.
+
+Render evaluation starts from the complete child enumeration of that unique root. An empty initial universe returns `RENDER_NONE`. Otherwise it applies these filters in this exact order: visible; `GA_ROOT == selected root`; process belongs to the private Job; exact launched-process identity; valid client geometry. The record contains the reduced cardinality after each filter. A filter reason is returned only when that filter changes a previously nonempty survivor set to empty: respectively `RENDER_NOT_VISIBLE`, `RENDER_ANCESTRY_MISMATCH`, `RENDER_OUTSIDE_JOB`, `RENDER_IDENTITY_MISMATCH`, or a geometry reason. Rejections of unrelated children do not fail an otherwise successful stage. Invalid or incomplete native facts take precedence as `NATIVE_FACT_INVALID`.
+
+Geometry validation applies only to candidates surviving the visibility, ancestry, private-Job, and exact-identity filters. Valid geometry means exact integer width at least 640 and height at least 360, matching `PlayerBinding`, with `width * height * 4 <= 64 * 1024 * 1024` bytes, matching the native capture bound. If every surviving geometry fact is well formed and within the 64 MiB bound but every candidate is smaller than 640 by 360, return `RENDER_GEOMETRY_TOO_SMALL`; any zero, negative, non-integer, malformed, or over-64-MiB fact returns `RENDER_GEOMETRY_INVALID` for the entire surviving set rather than filtering that candidate. One or more valid candidates proceed to largest-area selection. Multiple candidates are allowed when one has a strict largest area; only a tie for largest returns `RENDER_EQUAL_LARGEST`. A unique strict largest returns `BINDING_READY`. There is no separate `RENDER_MULTIPLE` reason.
+
+The command envelope contains only `schema_version`, `command_outcome`, and an optional pure-evaluator record. Allowed command outcomes are `PRECONDITION_BLOCKED`, `BINDING_OBSERVED`, `DIAGNOSTIC_FAILED`, `STOP_UNPROVED`, and `STATE_CHANGED`. `BINDING_OBSERVED` means evaluation completed, not that the current rule succeeded; only an evaluator reason of `BINDING_READY` may yield `PlayerBinding` in later production code. Unknown, conflicting, overflowing, incomplete, or exception-producing facts fail closed and never authorize binding.
+
+No real/private runtime value may enter the envelope, console, ordinary logs, Status, Discord, crash reports, filenames, or tracked artifacts: window titles, account names, player tags, BlueStacks instance/display/internal names, PIDs, process names, creation times, process handles, Job handles, HWNDs, dimensions, paths, command lines, exception text, pixels, frames, crops, screenshots, or derived digests are prohibited. Public synthetic tests may use conspicuously fake canary values for those fields solely to prove reduction and non-leakage; they may not use values copied from private configuration or a live run.
+
+The diagnostic boundary catches `BaseException` around complete fact collection/evaluation, immediately discards the exception and any traceback reference, clears raw fact containers, and constructs `NATIVE_FACT_INVALID` or `DIAGNOSTIC_FAILED` from constants in a separate no-argument helper. No raw native exception may cross into the CLI boundary. Tests inspect serialized output and the final raised/returned object; they do not require arbitrary lower-level traceback frames to be free of synthetic local variables.
+
+### Synthetic and review gates
+
+- RED-test zero and multiple roots; each root-filter failure and precedence combination; launched-root versus Job-child ownership; zero-area, too-small, and malformed children; each render-filter failure and precedence combination; no render; multiple renders; equal-largest renders; 4096/4097 bounds; invalid native values; and one exact positive binding.
+- Prove every rejected case returns one closed reason and no `PlayerBinding`; prove permutations within each complete enumeration cannot change the record.
+- Prove exception collapse, serialization, console output, and final failure representations contain none of the prohibited real/private canaries.
+- For reconciliation, RED-test missing, malformed, expired, wrong-action, wrong-tree, wrong-state, and reused approvals; wrong slot, nonce, block reason, or state bytes; non-canonical state; transition guard; abandoned/contended mutex; any pre-existing player/window; and every approval-consumption, absence-proof, audit, state-write, read-back, and handle-close failure.
+- For the later normal diagnostic visit, retain the existing start/rollback/stop matrix and RED-test every evaluator reason plus output reduction. Prove no native launch occurs before protected mutex acquisition, one-shot launch-approval consumption, canonical `READY`, transition-guard absence, durable `ACTIVE`, and complete player-absence proof.
+- Run focused tests and the canonical suite, export the exact staged tree, scan it for private identifiers and forbidden transports, and obtain independent review of the exact tree hash before requesting any live action.
+
+### Later live gates
+
+Do not create an alternate launcher from `ACTIVE`. The reviewed `LifecycleSupervisor.start` remains the only inert launch boundary. Therefore the current blocked generation must be reconciled before—not after—the diagnostic visit.
+
+Both reconciliation and the later diagnostic launch use separate one-shot local approval artifacts. The local approval service creates a random 128-bit approval ID, binds it to exactly one action kind (`RECONCILE_WINDOW_BINDING` or `LAUNCH_WINDOW_BINDING_DIAGNOSTIC`), the reviewed candidate tree hash, an expiry no more than ten minutes away, and the SHA-256 digest of the exact canonical lifecycle-state bytes observed when approval is granted. The complete artifact is protected for the current operator plus `SYSTEM` beneath ignored `var/approvals/`; none of its ID, state digest, nonce, path, or bytes enters CLI arguments, output, ordinary logs, Discord, or tracked files. Under the protected host-wide mutex, the command exclusively consumes the artifact before any lifecycle write or process creation. Consumption is durable and non-replayable even when the subsequent operation fails. Missing, malformed, expired, wrong-action, wrong-tree, wrong-state, or previously consumed approval blocks without side effects. Approval for either action cannot satisfy the other.
+
+First, implement and independently review an owner-controlled reconciliation command. After separate approval, it must acquire the protected schema-v1 mutex; load and validate the approval; read canonical `ACTIVE(slot 0, exact run_nonce, WINDOW_BINDING)` with no transition guard; match the approval's protected state digest; completely enumerate processes and windows; prove no `HD-Player.exe` identity and no exact configured slot-title root window survives; durably consume approval; append a sanitized reconciliation-intent audit event; write/read back one canonical `READY(slot 0)` transition; and release the mutex. Any uncertainty before successful `READY` read-back preserves `ACTIVE` or its transition guard, except that a consumed approval stays consumed. A cleanup failure after successful `READY` follows the existing committed-state cleanup rule and never rewrites the cursor. Reconciliation emits no input, creates no process, and cannot authorize a launch.
+
+Second, after reconciliation is proved and the evaluator implementation has static PASS, request a fresh `LAUNCH_WINDOW_BINDING_DIAGNOSTIC` approval. Under the same protected mutex, the normal inert visit must first read canonical `READY(slot 0)` with no transition guard, validate the approval and match its protected state digest, then durably consume the approval. Only afterward may it call unchanged `LifecycleSupervisor.start`, which repeats canonical `READY` validation, proves complete player absence, durably writes `ACTIVE`, and then creates the suspended process. A state/guard mismatch discovered before consumption leaves the approval unused; any failure after consumption leaves it consumed. Start uses the existing stage-specific rollback matrix and records the closed evaluator result. The visit performs no capture when binding is not `BINDING_READY`, no gameplay input in every case, and always uses existing authoritative stop/absence proof. Failure remains blocked `ACTIVE`; success completes the existing inert bind/capture-health/stop path and advances exactly once to `READY(slot 1)`. Neither result authorizes retry or another launch.
+
+The one-shot approval service, reconciliation command, evaluator integration, and diagnostic visit each require RED tests, canonical tests, exact-tree privacy review, and independent PASS before their respective owner request. Static implementation never constitutes either approval.
+
+### Allowed files for this sub-slice
+
+- `research/slice-1-contract.md`
+- `src/clash_rush_rebuild/win32_lifecycle_host.py`
+- one narrowly scoped diagnostic module under `src/clash_rush_rebuild/`
+- the composition-root command in `src/clash_rush_rebuild/cli.py`
+- focused synthetic tests under `tests/`
+- static privacy/forbidden-transport tests under `tests/`
+
+No other production file is in scope without revising this contract before RED.
+
 ## Allowed commit files
 
 - `.gitignore`
