@@ -25,6 +25,17 @@ class CycleCommand(Protocol):
     def visit_once(self) -> object: ...
 
 
+def build_native_state_store(project_root: Path) -> LifecycleStateStore:
+    project = Path(project_root).resolve(strict=True)
+    var = project / "var"
+    var.mkdir(exist_ok=True)
+    state_api = NativeWin32StateApi()
+    return LifecycleStateStore(
+        project,
+        Win32StateFilePort(project, state_api),
+    )
+
+
 def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
     """Compose native Slice 1 without launching or inspecting until visit_once."""
     project = Path(project_root)
@@ -34,11 +45,7 @@ def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
     host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
 
     def make_state_store() -> LifecycleStateStore:
-        state_api = NativeWin32StateApi()
-        return LifecycleStateStore(
-            project,
-            Win32StateFilePort(project, state_api),
-        )
+        return build_native_state_store(project)
 
     def observe_player_count() -> int:
         snapshot = host.complete_player_snapshot()

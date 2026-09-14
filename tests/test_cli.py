@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from clash_rush_rebuild.cli import main
+from clash_rush_rebuild.cli import build_native_state_store, main
 
 
 class FakeCycle:
@@ -65,3 +65,15 @@ def test_cli_initializes_state_without_live_approval_or_visit() -> None:
 
     assert status == 0
     assert events == ["build:X:Y", "initialize"]
+
+
+def test_native_state_composition_creates_validated_private_var_before_port(
+    tmp_path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    store = build_native_state_store(project)
+
+    assert (project / "var").is_dir()
+    assert store.__class__.__name__ == "LifecycleStateStore"
