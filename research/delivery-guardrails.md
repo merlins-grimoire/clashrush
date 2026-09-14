@@ -158,7 +158,7 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - Treat published Clash Rush as unreliable historical first-party evidence, not the default tactical authority. Reuse only narrow code whose assumptions and behavior have been independently re-proved.
 - Use two-to-five-minute diagnostic runs before another full release run.
 - Every diagnostic input gets a red crosshair and narrow before/after reviewed crops. Full frames stay memory-only except for the separately reviewed blocker-only Discord upload to an exact private account channel.
-- Diagnostic mode is explicitly bounded, auto-disables on exit, and may show a non-recording full-frame local preview plus approved OCR crop/value/confidence panels. Only reviewed narrow crops may persist under ignored `var/debug/` with bounded retention.
+- Diagnostic mode is explicitly bounded to two-to-five minutes, auto-disables on timeout/Pause/Stop/disconnect/blocker/exit, and may show a non-recording full-frame local preview plus approved OCR crop/value/confidence panels. A local Debug control is primary. Remote `/debug start|status|stop team:<name>` is disabled by default, requires Setup opt-in plus fresh Captain/Fleet Captain authorization, applies only to an already-running team, and cannot start/resume automation or widen any safety/image permission. Only reviewed narrow crops may persist under protected ignored `var/private-debug/` with bounded retention.
 - “Approved crop” means an entry in a sealed manifest binding crop ID, source screen, normalized ROI, maximum dimensions, preprocessing, and permitted closed/numeric output grammar. Arbitrary ROIs and raw OCR text never enter logs or Discord panels.
 
 ## 14. Enforce privacy structurally
@@ -168,10 +168,11 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - Public fixtures contain no real names, instance IDs, tags, hashes, screenshots, machine paths, or calibration values.
 - Scan the exact staged archive before every commit.
 - References and commercial fonts remain ignored and are never packaged.
-- Actual Discord guild/category/channel/role/user IDs, troop assignments, runner credentials, account mappings, and bot credentials remain under ignored private roots or the operating-system credential store. Public schemas use placeholders only.
+- Actual Discord guild/category/channel/role/user IDs, team assignments, runner credentials, account mappings, and bot credentials remain under ignored private roots or the operating-system credential store. Public schemas use placeholders only.
 - A blocker screenshot may leave memory only through the explicit Discord exception: exact mapped private account channel, immediate destination revalidation, restricted captain mentions, no local persistence, and no fallback destination.
 - An optional OCR diagnostic panel may accompany that blocker only when its narrow-crop manifest was prepared before upload; neither attachment may be retried or recaptured after an ambiguous send.
 - Guided Setup writes real topology only to ignored private configuration, stores token values in the OS credential store, and activates versioned configurations only at a stopped clean boundary. Public examples contain synthetic placeholders and secret references only.
+- The protected local operator log/debug view may include configured account names, player tags, and BlueStacks display names. Its sink must verify current-operator-plus-`SYSTEM` DACL restriction or operator-bound encryption before writing; otherwise only `account_ref` is logged. Private identifiers never enter filenames, lifecycle state, Status, console output, Discord summaries, telemetry, crash reports, support/public exports, tests, or Git.
 
 ## 15. Serialize physical input across the host
 
@@ -202,5 +203,5 @@ The rebuild is done only when:
 - attacks deploy every configured card and Builder Stage 2 is positively detected;
 - crash/restart tests prove no duplicate spend or deployment;
 - bounded live evidence passes for every account in the promoted configuration (including the current exact-five v1 proof);
-- local builder-due queues survive restarts and multi-runner Discord routing cannot cross troop or account channels;
+- local builder-due queues survive restarts and multi-runner Discord routing cannot cross team or account channels;
 - the exact published archive passes tests, privacy scan, and independent release review.

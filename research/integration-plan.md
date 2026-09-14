@@ -2,7 +2,7 @@
 
 ## Target outcome
 
-A Windows/BlueStacks runner that services a configured troop fairly and runs Home Village and Builder Base using copied/adapted proven donor mechanics behind local safety controls. The already-reviewed inert foundation remains exact-five; variable cardinality enters only through a separately tested schema-v2 migration.
+A Windows/BlueStacks runner that services a configured team fairly and runs Home Village and Builder Base using copied/adapted proven donor mechanics behind local safety controls. The already-reviewed inert foundation remains exact-five; variable cardinality enters only through a separately tested schema-v2 migration.
 
 The new runner is not a wholesale fork. It is a small coordinator with explicit adapters and copied, attributed mechanics from the three MIT donors. Published Clash Rush is historical first-party evidence and a source of narrow primitives/pure policy only after re-verification; it is not presumed to contain known-good end-to-end tactics.
 
@@ -10,10 +10,13 @@ The new runner is not a wholesale fork. It is a small coordinator with explicit 
 
 | Source | Canonical URL | Commit | Tree |
 |---|---|---|---|
-| BasePilot | `https://github.com/efebolukbasi/BasePilot` | `e17c23e88cff58047123d66747c937d3bbf8f815` | `d038e2b99cb440002199aa5a1b9cd64474dda95f` |
+| BasePilot | `https://github.com/efebolukbasi/BasePilot` | `4ede1efd220ffc79a5b490cfd3788b44d2584da4` | `0553306bfd30a32e31e427a0b77ff22c41f55901` |
 | CoC_Bot | `https://github.com/m24842/CoC_Bot` | `a5c943afed0ed3b9abedbbc228b0889145ecaf24` | `d79368fbe550036f1542883f18434e318016b279` |
 | ClashAutomation | `https://github.com/calebmwelsh/ClashAutomation` | `c41fe12a6df051e241c695b71b6859286e24c612` | `b549901e7ca8b871a17265517d730f0b3c84a618` |
 | Published Clash Rush historical engine | `https://github.com/merlins-grimoire/autoclasher` | `949497bf0a543a43ec6ef39a8c897e366bc10362` | `12ded3ccdb9f27610d9f07fdc7a6ad5b9fd74cc0` |
+| keshav-x/coc-bot (study only; no source license grant) | `https://github.com/keshav-x/coc-bot` | `69392ab8ca58cd9b7725bf4106e650dbcd5e73bd` | `542d2a9908bbb7f49559c5f29175a020b08cccb9` |
+| Auto Farmer (MIT; ADB implementation rejected) | `https://github.com/alisakkaf/Clash-of-Clans-Bot-Auto-Farmer` | `0120019918758e45feddf84fd5522e31cc6fd578` | `acb9709289cc1030787dc87d554ff1c16562bde4` |
+| NX-ClashClient (study only; no source license grant) | `https://github.com/N1xUser/NX-ClashClient` | `e4c79fd671912714d48fc04c2ff9ffb60e09ef50` | `dcfc43125e3e74dbca52ee00bb0b743a4e3c7fbd` |
 
 The dirty legacy checkout is not reproducible evidence. Only files from the published Clash Rush commit above may even be considered for reuse, and each candidate must first survive donor comparison plus differential tests. That seal includes `builder_base_policy.py`; later uncommitted Builder navigation/reconciliation work is excluded entirely.
 
@@ -21,7 +24,7 @@ The dirty legacy checkout is not reproducible evidence. Only files from the publ
 
 ### One live instance per host, configured durable accounts
 
-Only one BlueStacks instance runs on a Windows host at a time. One host-wide arbiter grants a complete visit lease spanning discovery, launch, input, safe stop, absence proof, and final commit. Multiple logical troop runners on the same computer may schedule independently but cannot click or keep separate players alive concurrently; physical foreground input has one global cursor and target. Runners on different computers may operate concurrently.
+Only one BlueStacks instance runs on a Windows host at a time. One host-wide arbiter grants a complete visit lease spanning discovery, launch, input, safe stop, absence proof, and final commit. Multiple logical team runners on the same computer may schedule independently but cannot click or keep separate players alive concurrently; physical foreground input has one global cursor and target. Runners on different computers may operate concurrently.
 
 This avoids host memory/CPU pressure and removes cross-instance cursor/capture races. Every transaction still obtains fresh evidence after acquiring the instance lease and immediately before input.
 
@@ -44,9 +47,9 @@ A battle must finish or reconcile before rotation. If no safe game screen can be
 
 The due queue is the sole eligibility/ordering authority only after schema v2 is promoted. The reviewed exact-five v1 `LifecycleSupervisor.start` remains sealed with its `READY.next_slot == selected_slot` authorization and does not admit due-selected work. A stopped-only migration creates a new versioned `start_admitted(account_key, configuration_generation, visit_nonce)` boundary; it accepts an oldest-due account while holding the lifecycle mutex and writes matching schema-v2 `ACTIVE` before process creation. After verified stop, the v2 `READY` account-key cursor supplies only the next equal-deadline tie start. It never selects or makes a not-yet-due account eligible, and no second account/lane cursor exists.
 
-Coordinate the SQLite queue/journal and separate lifecycle file with a write-ahead visit generation and nonce. Admission atomically marks one job `ADMITTED` and inserts its immutable nonce/generation before `ACTIVE`; actions use non-replayable journal states; a successor builder/reconciliation plan is persisted before normal shutdown; verified stop then commits `READY`; and one idempotent SQLite transaction consumes the admitted generation, creates exactly one successor, and finalizes the visit. Slice 2 adds an emergency owned-stop path that proves Job/process/window absence but deliberately leaves blocked `ACTIVE` when successor planning cannot be persisted. Startup under the lifecycle mutex reconciles every open visit against exact `READY/ACTIVE`, `ACTIVE.run_nonce == admitted.visit_nonce`, generation, action outcomes, successor plan, and complete process absence. `READY` before `ACTIVE` may release an unchanged admission only after absence proof; `READY` after a recorded successor plan finalizes it idempotently; matching `ACTIVE` blocks launch and requires lifecycle reconciliation; any mismatch blocks the troop.
+Coordinate the SQLite queue/journal and separate lifecycle file with a write-ahead visit generation and nonce. Admission atomically marks one job `ADMITTED` and inserts its immutable nonce/generation before `ACTIVE`; actions use non-replayable journal states; a successor builder/reconciliation plan is persisted before normal shutdown; verified stop then commits `READY`; and one idempotent SQLite transaction consumes the admitted generation, creates exactly one successor, and finalizes the visit. Slice 2 adds an emergency owned-stop path that proves Job/process/window absence but deliberately leaves blocked `ACTIVE` when successor planning cannot be persisted. Startup under the lifecycle mutex reconciles every open visit against exact `READY/ACTIVE`, `ACTIVE.run_nonce == admitted.visit_nonce`, generation, action outcomes, successor plan, and complete process absence. `READY` before `ACTIVE` may release an unchanged admission only after absence proof; `READY` after a recorded successor plan finalizes it idempotently; matching `ACTIVE` blocks launch and requires lifecycle reconciliation; any mismatch blocks the team.
 
-Oldest-due applies only to currently eligible jobs. Lane-incomplete or uncertain jobs carry a durable `DEFERRED(reconcile_at)` deadline no later than 60 minutes and retain their original due event; explicit human/safety quarantines remain visible but cannot block other jobs and require captain clearance. This prevents one broken oldest job from freezing the troop without silently skipping or deleting it.
+Oldest-due applies only to currently eligible jobs. Lane-incomplete or uncertain jobs carry a durable `DEFERRED(reconcile_at)` deadline no later than 60 minutes and retain their original due event; explicit human/safety quarantines remain visible but cannot block other jobs and require captain clearance. This prevents one broken oldest job from freezing the team without silently skipping or deleting it.
 
 ### Required lifecycle sequence
 
@@ -201,9 +204,11 @@ The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_
 
 ### Observability and diagnostic mode
 
-Normal operation writes structured per-troop and per-account events beneath ignored `var/`: configuration generation, a random 128-bit `account_ref` generated once by Setup and never derived from a name/tag/instance, visit/action nonce, screen/detector/reason code, normalized intended target, state transition, timing, and confirmed/failed/uncertain outcome. The private configuration maps `account_ref` to the account key; Status and exported support bundles expose the opaque reference only. Logs never record tokens, private names/IDs, paths, PIDs/HWNDs, raw OCR, pixels, full-frame digests, or exception locals. Audit-intent failure prevents input; audit failure after input leaves the action uncertain and blocks replay.
+Normal operation writes structured per-team and per-account audit events beneath ignored `var/`: configuration generation, a random 128-bit `account_ref` generated once by Setup and never derived from a name/tag/instance, visit/action nonce, screen/detector/reason code, normalized intended target, state transition, timing, and confirmed/failed/uncertain outcome. A separate protected local operator-log sink may include the configured account name, player tag, and BlueStacks display name so the owner can diagnose a specific account. That sink is allowed only beneath ignored `var/private-logs/` after a current-operator-plus-`SYSTEM` DACL or operator-bound encryption is positively verified; otherwise logging falls back to the sanitized audit sink. Sensitive identifiers never enter filenames, lifecycle state, Status, console output, Discord summaries, telemetry, crash reports, support/public exports, tests, Git, or exception locals. Tokens, credential values, raw unrestricted OCR, pixels, and full-frame digests are prohibited from both sinks. Audit-intent failure prevents input; audit failure after input leaves the action uncertain and blocks replay.
 
-An explicit two-to-five-minute diagnostic run enables a non-focus-stealing local preview with transient full frame, red crosshair/target bounds, account/lifecycle/instance timers, and NX-inspired OCR panels. A sealed diagnostic manifest allowlists each crop ID, screen state, normalized ROI, maximum dimensions, preprocessing pipeline, and permitted output grammar (closed reason/state vocabulary or bounded numeric value plus confidence); arbitrary user ROIs and raw OCR text cannot be persisted or uploaded. Full frames remain memory-only. Optional retained before/after evidence is limited to those reviewed narrow crops under ignored `var/debug/` with bounded retention. A blocker may include one optional in-memory OCR panel in its predeclared Discord attachment manifest; ambiguous delivery never retries or recaptures that generation.
+An explicit two-to-five-minute diagnostic session is started primarily through a local **Debug** control beside Run/Pause/Stop. The owner chooses duration and whether to retain reviewed narrow crops. Setup may separately enable remote diagnostics; only then may a currently authorized Captain or Fleet Captain use `/debug start team:<name> minutes:<2-5>`, `/debug status team:<name>`, or `/debug stop team:<name>`. A remote debug command never starts/resumes automation, authorizes spending, widens image delivery, or bypasses lifecycle/transaction gates; it fails if the team is not already running, and every session auto-disables on timeout, Stop, Pause, disconnect, blocker, or process exit.
+
+The session enables a non-focus-stealing local preview with transient full frame, red crosshair/target bounds, account/lifecycle/instance timers, configured account name/player tag/BlueStacks display name, and NX-inspired OCR panels. Those private labels are local-only and sourced from validated private configuration, never arbitrary OCR. A sealed diagnostic manifest allowlists each crop ID, screen state, normalized ROI, maximum dimensions, preprocessing pipeline, and permitted output grammar (closed reason/state vocabulary or bounded numeric value plus confidence); arbitrary user ROIs and raw OCR text cannot be persisted or uploaded. Full frames remain memory-only. Optional retained before/after evidence is limited to reviewed narrow crops under ignored `var/private-debug/`, protected like the sensitive local log sink and removed after bounded retention. A blocker may include one optional in-memory OCR panel in its predeclared Discord attachment manifest only under its separately approved policy; ambiguous delivery never retries or recaptures that generation.
 
 ### Crash-safe action boundary
 
@@ -230,6 +235,8 @@ Persist a write-ahead transaction record atomically before input: `PLANNED → I
 | Upgrade decisions | Donor comparison + Rush Bible contract | Select/rebuild deterministic Home and Builder policy; historical Clash Rush modules require differential proof |
 | Scheduler, safety, audit | Local implementation | Rebuild around configured stable account keys, two village lanes, and the durable due-account queue; preserve exact-five v1 migration evidence |
 | Operator preview/dashboard concepts | NX-ClashClient `e4c79fd…` | Clean-room only: no license grant; adopt information architecture and OCR-preview behavior, not code/input/storage |
+| Performance profile UX | Auto Farmer `0120019…` | Adapt MIT configuration concepts only; keep detector thresholds and safety evidence independent of performance |
+| Loot filtering and Sneaky Goblin concepts | keshav-x/coc-bot `69392ab…` | Study only: no license grant; rebuild fail-closed with no forced attack, blind slot, jitter, or anti-ban claim |
 | API/CWL/rankings/donation counters | Official API; ClashKing references | Read-only central adapter; never a builder/action authority |
 
 ## Delivery slices and exit gates
@@ -321,7 +328,7 @@ Each needs a synthetic test, exact-index privacy scan, independent review, and o
 
 ## Discord fleet control and due-account scheduling
 
-`research/discord-fleet-control-plan.md` is the binding plan for one dedicated central Discord service, multiple uniquely named 1–10-account troop runners after schema-v2 promotion, private per-runner enrollment, explicit troop/account autocomplete, scoped Troop/Fleet Captain roles, account-channel routing, and the persistent builder-triggered due queue. Discord adapts the same local Setup/Run/Pause/Resume/Stop/Status service and never creates a second lifecycle or scheduler authority.
+`research/discord-fleet-control-plan.md` is the binding plan for one dedicated central Discord service, multiple uniquely named 1–10-account team runners after schema-v2 promotion, private per-runner enrollment, explicit team/account autocomplete, scoped Captain/Fleet Captain roles, account-channel routing, and the persistent builder-triggered due queue. Discord adapts the same local Setup/Run/Pause/Resume/Stop/Status/Debug service and never creates a second lifecycle or scheduler authority.
 
 ## What we will not copy
 

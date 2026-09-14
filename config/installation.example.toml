@@ -14,7 +14,7 @@ clash_api_secret_ref = "credential://clash-rush/supercell-api"
 
 [central.discord]
 guild_id = "GUILD_ID_HERE"
-troop_captain_role_id = "TROOP_CAPTAIN_ROLE_ID_HERE"
+captain_role_id = "CAPTAIN_ROLE_ID_HERE"
 fleet_captain_role_id = "FLEET_CAPTAIN_ROLE_ID_HERE"
 
 [central.authorizations]
@@ -32,58 +32,83 @@ mention_role_id = "CWL_MENTION_ROLE_ID_HERE" # required only for role
 reminder_minutes = [360, 120, 30]
 cooldown_minutes = 120
 
-[[troops]]
-key = "example-troop"
-display_name = "Example Troop"
-category_id = "TROOP_CATEGORY_ID_HERE"
+[[teams]]
+key = "example-team"
+display_name = "Example Team"
+category_id = "TEAM_CATEGORY_ID_HERE"
 operations_channel_id = "OPERATIONS_CHANNEL_ID_HERE"
 runner_url = "wss://runner.example.invalid"
-runner_secret_ref = "credential://clash-rush/runner/example-troop"
-captain_user_ids = ["TROOP_CAPTAIN_USER_ID_HERE"]
+runner_secret_ref = "credential://clash-rush/runner/example-team"
+captain_user_ids = [
+  "CAPTAIN_1_USER_ID_HERE",
+  "CAPTAIN_2_USER_ID_HERE",
+  "CAPTAIN_3_USER_ID_HERE",
+]
+# Setup labels these ordered assignments Captain 1, Captain 2, and Captain 3.
 
-[troops.resources]
+[teams.resources]
 # Setup requires four independent explicit choices. Discord cannot change them.
 home_gold_enabled = false
 home_elixir_enabled = false
 builder_gold_enabled = false
 builder_elixir_enabled = false
 
-[troops.debug]
-enabled = false
+[teams.logging]
+# These identifiers are written only to the protected ignored local operator log.
+sensitive_local_log_enabled = true
+include_account_name = true
+include_player_tag = true
+include_bluestacks_display_name = true
+retention_hours = 168
+
+[teams.debug]
+allow_remote_start = false
+default_duration_minutes = 3 # Setup accepts 2–5
 ocr_live_preview = true
+include_private_identifiers = true
 persist_narrow_crops = false
 crop_retention_hours = 24
 
-# Troop size is derived from the number of account entries. There is no second
-# troop_size field that can disagree with the array. Schema v2 accepts 1–10
+# Team size is derived from the number of account entries. There is no second
+# team_size field that can disagree with the array. Schema v2 accepts 1–10
 # accounts (default five in Setup). The implemented Slice 1 remains exactly
 # five; variable cardinality is a later schema-v2 slice.
-[[troops.accounts]]
+[[teams.accounts]]
 key = "account-01"
 account_ref = "GENERATED_128_BIT_ACCOUNT_REF_01"
+account_name = "EXAMPLE_ACCOUNT_01"
+player_tag = "PLAYER_TAG_HERE_01"
 bluestacks_display_name = "EXAMPLE_INSTANCE_01"
 discord_channel_id = "ACCOUNT_01_CHANNEL_ID_HERE"
 
-[[troops.accounts]]
+[[teams.accounts]]
 key = "account-02"
 account_ref = "GENERATED_128_BIT_ACCOUNT_REF_02"
+account_name = "EXAMPLE_ACCOUNT_02"
+player_tag = "PLAYER_TAG_HERE_02"
 bluestacks_display_name = "EXAMPLE_INSTANCE_02"
 discord_channel_id = "ACCOUNT_02_CHANNEL_ID_HERE"
 
-[[troops.accounts]]
+[[teams.accounts]]
 key = "account-03"
 account_ref = "GENERATED_128_BIT_ACCOUNT_REF_03"
+account_name = "EXAMPLE_ACCOUNT_03"
+player_tag = "PLAYER_TAG_HERE_03"
 bluestacks_display_name = "EXAMPLE_INSTANCE_03"
 discord_channel_id = "ACCOUNT_03_CHANNEL_ID_HERE"
 
-[[troops.accounts]]
+[[teams.accounts]]
 key = "account-04"
 account_ref = "GENERATED_128_BIT_ACCOUNT_REF_04"
+account_name = "EXAMPLE_ACCOUNT_04"
+player_tag = "PLAYER_TAG_HERE_04"
 bluestacks_display_name = "EXAMPLE_INSTANCE_04"
 discord_channel_id = "ACCOUNT_04_CHANNEL_ID_HERE"
 
-[[troops.accounts]]
+[[teams.accounts]]
 key = "account-05"
 account_ref = "GENERATED_128_BIT_ACCOUNT_REF_05"
+account_name = "EXAMPLE_ACCOUNT_05"
+player_tag = "PLAYER_TAG_HERE_05"
 bluestacks_display_name = "EXAMPLE_INSTANCE_05"
 discord_channel_id = "ACCOUNT_05_CHANNEL_ID_HERE"

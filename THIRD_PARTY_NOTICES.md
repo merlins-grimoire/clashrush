@@ -2,9 +2,11 @@
 
 The exact-name registry behavior in `src/clash_rush_rebuild/registry.py` and named-instance launch concepts in `src/clash_rush_rebuild/win32_lifecycle_host.py` were adapted from the pinned CoC_Bot source identified below. The local implementation removes its Android-debug transport, caches, globals, broad executable search, and first-match behavior. The other repositories remain pinned research references; no BasePilot or ClashAutomation implementation has been copied into this slice.
 
-- BasePilot — https://github.com/efebolukbasi/BasePilot — pinned `e17c23e88cff58047123d66747c937d3bbf8f815`
+- BasePilot — https://github.com/efebolukbasi/BasePilot — pinned `4ede1efd220ffc79a5b490cfd3788b44d2584da4`
 - CoC_Bot — https://github.com/m24842/CoC_Bot — pinned `a5c943afed0ed3b9abedbbc228b0889145ecaf24`
 - ClashAutomation — https://github.com/calebmwelsh/ClashAutomation — pinned `c41fe12a6df051e241c695b71b6859286e24c612` (prefix `c41fe12a6df0`)
+
+Additional ignored research checkouts are recorded in `research/additional-donor-assessment.md`. Auto Farmer is MIT licensed but has not been copied. `keshav-x/coc-bot` and NX-ClashClient have no verified source-code license grant and are study-only; none of their implementation is included.
 
 The complete licenses remain available in ignored local checkouts under `references/<repository>/LICENSE`. The applicable CoC_Bot notice is reproduced here:
 

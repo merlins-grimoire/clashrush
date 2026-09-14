@@ -4,11 +4,11 @@
 
 Add Discord control after the local runner has stable Setup, Run, Pause, Resume, Stop, and Status operations. Discord is a remote control and reporting adapter; it never owns BlueStacks processes, chooses gameplay actions, or becomes the scheduler source of truth.
 
-This plan supports multiple installations. Each installation is one uniquely named **troop runner**. The reviewed Slice 1 remains exactly five slots; a separate schema-v2 migration later derives troop size from the configured account array. Runners on different computers may operate concurrently. Multiple logical runners on one computer share a host-wide arbiter and cannot launch or physically drive BlueStacks at the same time.
+This plan supports multiple installations. Each installation is one uniquely named **team runner**. The reviewed Slice 1 remains exactly five slots; a separate schema-v2 migration later derives team size from the configured account array. Runners on different computers may operate concurrently. Multiple logical runners on one computer share a host-wide arbiter and cannot launch or physically drive BlueStacks at the same time.
 
 ## Guided private configuration
 
-Setup presents one guided configuration experience. It writes non-secret topology to ignored `private/installation.toml`, stores bot/API/runner token values in Windows Credential Manager, and activates a validated immutable configuration generation. The tracked `config/installation.example.toml` contains synthetic placeholders and secret references only. Actual guild, category, channel, role, user, clan, runner, account, BlueStacks, and credential values never belong in source, examples, tests, logs, screenshots, or Git history.
+Setup presents one guided configuration experience. It writes non-secret topology to ignored `private/installation.toml`, stores bot/API/runner token values in Windows Credential Manager, and activates a validated immutable configuration generation. The tracked `config/installation.example.toml` contains synthetic placeholders and secret references only. Actual guild, category, channel, role, user, clan, runner, account, BlueStacks, and credential values never belong in source, examples, tests, ordinary audit logs, Status, support exports, crash reports, or Git history. The only local text exception is the protected ignored operator-log/debug sink defined below; the only image exception is the separately governed blocker upload.
 
 Configuration moves through `DRAFT → VALIDATED → STAGED → ACTIVE(generation)`. Activation requires no running player, no open visit/action, and no unresolved transition. Every remote command and notification is bound to the active generation. A partial or mismatched activation leaves the prior generation active and blocks remote actions/image delivery.
 
@@ -20,29 +20,33 @@ The old repository contains a dedicated Discord runtime and durable publishing t
 
 ### Commands
 
-Every control command requires an explicit troop option with Discord autocomplete:
+Every control command requires an explicit team option with Discord autocomplete:
 
-- `/run troop:<name>` — starts that troop immediately without a second confirmation.
-- `/pause troop:<name>` — safely finishes the admitted transaction, closes the owned emulator, then remains idle until `/resume`.
-- `/resume troop:<name>` — resumes a paused scheduler.
-- `/stop troop:<name>` — safely finishes the admitted transaction, closes the owned emulator, exits the run, and remains stopped until `/run`.
-- `/status troop:<name>` — returns a sanitized ephemeral response to the requesting captain.
-- `/quarantine troop:<name> account:<account> reason:<code>` — prevents new work for one account while preserving its due event and pending lane.
-- `/unquarantine troop:<name> account:<account>` — restores the preserved job; it never starts a run or authorizes spending.
+- `/run team:<name>` — starts that team immediately without a second confirmation.
+- `/pause team:<name>` — safely finishes the admitted transaction, closes the owned emulator, then remains idle until `/resume`.
+- `/resume team:<name>` — resumes a paused scheduler.
+- `/stop team:<name>` — safely finishes the admitted transaction, closes the owned emulator, exits the run, and remains stopped until `/run`.
+- `/status team:<name>` — returns a sanitized ephemeral response to the requesting captain.
+- `/debug start team:<name> minutes:<2-5>` — when Setup explicitly allows remote diagnostics, enables a bounded local diagnostic session for an already-running team; it never starts or resumes automation.
+- `/debug status team:<name>` — reports only whether bounded diagnostics are active and their remaining time.
+- `/debug stop team:<name>` — disables diagnostics without changing Run/Pause/Stop state.
+- `/quarantine team:<name> account:<account> reason:<code>` — prevents new work for one account while preserving its due event and pending lane.
+- `/unquarantine team:<name> account:<account>` — restores the preserved job; it never starts a run or authorizes spending.
 - `/blocker respond blocker:<id> response:<allowed-action>` — resolves one blocker generation using only that blocker class's closed response vocabulary.
-- `/captain add user:<mention-or-id> troop:<name>` — assigns Troop Captain access for one troop.
-- `/captain remove user:<mention-or-id> troop:<name>` — removes that assignment.
+- `/captain add user:<mention-or-id> team:<name>` — assigns Captain access for one team.
+- `/captain remove user:<mention-or-id> team:<name>` — removes that assignment.
 
 Status includes runner connectivity, control state, current sanitized slot index, queue depth, next due time, blocked reason, and last outcome. It excludes account names, player tags, local paths, credentials, PIDs, HWNDs, and raw traces.
 
 ### Roles and authorization
 
-- A Discord server owner or Administrator bootstraps the configured `Troop Captain` and `Fleet Captain` roles and the first assignments.
-- Troop Captains may control only troops explicitly assigned to them in the central private authorization store.
-- Fleet Captains may control every troop.
-- Existing authorized captains may add or remove Troop Captains for troops they are allowed to manage.
+- A Discord server owner or Administrator bootstraps the configured `Captain` and `Fleet Captain` roles and the first assignments.
+- Captains may control only teams explicitly assigned to them in the central private authorization store.
+- Fleet Captains may control every team.
+- Existing authorized captains may add or remove Captains for teams they are allowed to manage.
 - Fleet Captain membership remains server-owner/Administrator managed.
-- Authorization is re-read from Discord membership plus the private troop-assignment store for every command. A role name alone is not authority.
+- Setup and operator views label a team's ordered assignments `Captain 1`, `Captain 2`, and `Captain 3`; these are display positions under one `Captain` Discord role, not separate roles or different authority levels.
+- Authorization is re-read from Discord membership plus the private team-assignment store for every command. A role name alone is not authority.
 - Gold/Elixir resource permissions remain local Setup decisions. Discord may report their sanitized enabled/disabled state but cannot change them.
 
 ## Topology
@@ -53,7 +57,7 @@ Run one always-on service using the dedicated Clash Rush Discord application/bot
 
 - Discord slash-command registration and autocomplete;
 - guild/role/member authorization checks;
-- private troop registry and captain-to-troop assignments;
+- private team registry and captain-to-team assignments;
 - runner connection registry and heartbeats;
 - durable command delivery and acknowledgement;
 - pending offline Pause/Stop desired state;
@@ -62,22 +66,22 @@ Run one always-on service using the dedicated Clash Rush Discord application/bot
 
 It does **not** receive BlueStacks ownership handles, perform gameplay planning, or become authoritative for account deadlines.
 
-### Troop runner agent
+### Team runner agent
 
 Each installation owns:
 
-- one private troop name/key;
+- one private team name/key;
 - the configured private BlueStacks account bindings (exactly five until schema v2 is promoted);
 - one explicit account-to-Discord-channel-ID map entry per configured account;
 - its local durable scheduler and transaction journal;
 - BlueStacks lifecycle ownership;
 - one private runner credential used only for an outbound authenticated connection to the central service.
 
-The runner opens an outbound TLS connection to the central service. A one-time enrollment flow exchanges a short-lived enrollment token for a revocable per-runner credential. The Discord bot token is never copied to troop runners.
+The runner opens an outbound TLS connection to the central service. A one-time enrollment flow exchanges a short-lived enrollment token for a revocable per-runner credential. The Discord bot token is never copied to team runners.
 
 ### Command protocol
 
-Every command carries a unique command ID, target troop key, issuer identity, requested state, creation time, expiry policy, and monotonically increasing control epoch. The runner persists accepted commands before applying them and returns a terminal acknowledgement. Duplicate delivery is idempotent.
+Every command carries a unique command ID, target team key, issuer identity, requested state, creation time, expiry policy, and monotonically increasing control epoch. The runner persists accepted commands before applying them and returns a terminal acknowledgement. Duplicate delivery is idempotent.
 
 Pause and Stop are desired-state controls, not one-shot signals. If a runner is offline, the central service retains the latest Pause/Stop state. On reconnect, the runner authenticates, receives that state, persists it, and checks it before any launch or new action. Run and Resume fail while a runner is offline instead of being queued invisibly.
 
@@ -87,22 +91,28 @@ If the control connection drops during operation, the runner completes only its 
 
 The public repository contains only schemas and placeholder examples. One-time guided Setup writes actual values beneath ignored private roots or the operating-system credential store:
 
-- central service: bot credential, guild ID, role IDs, troop registry, captain assignments, and runner credential hashes;
-- runner: central URL, troop key, runner secret reference, account bindings, and one explicit account-channel ID per account.
+- central service: bot credential, guild ID, role IDs, team registry, captain assignments, and runner credential hashes;
+- runner: central URL, team key, runner secret reference, account bindings, and one explicit account-channel ID per account.
 
 Setup validates that:
 
 1. the configured guild is exact;
-2. the troop category exists;
+2. the team category exists;
 3. every mapped account channel exists, is a text channel, belongs to that exact category, and is distinct;
 4. the bot can send messages and attachments there;
-5. the configured troop key is unique;
+5. the configured team key is unique;
 6. cardinality matches the active schema (exactly five for v1; 1–10 account entries for v2, default five) and every local binding is distinct;
-7. each account has one Setup-generated random 128-bit `account_ref`, distinct and not derived from its name, tag, slot, channel, or instance;
+7. each account has one Setup-generated random 128-bit `account_ref`, distinct and not derived from its configured account name, player tag, slot, channel, or BlueStacks display name;
 8. Home Gold, Home Elixir, Builder Gold, and Builder Elixir each have an explicit boolean owner choice; Discord cannot mutate them;
 9. no private identifier is written outside the ignored private root.
 
-Autocomplete displays configured troop labels but command payloads use immutable private troop keys. Ordinary Run, Pause, Resume, Stop, and Status never require editing source or JSON.
+Autocomplete displays configured team labels but command payloads use immutable private team keys. Ordinary Run, Pause, Resume, Stop, Status, and Debug never require editing source or JSON. Remote Debug is disabled by default in Setup; a local Debug button remains the primary control.
+
+### Protected local operator logs and debug
+
+The owner-facing local log and diagnostic preview include the configured account name, player tag, and BlueStacks display name. They are written/rendered only after the active account binding is proved and only from validated private configuration—not unrestricted OCR. The file sink is confined to ignored `var/private-logs/` and `var/private-debug/` and requires either a DACL limited to the current operator plus `SYSTEM` or operator-bound encryption. If protection cannot be proved, the runner emits only the sanitized `account_ref` audit and does not mirror private identifiers to console output.
+
+The sanitized append-only audit remains the sole source for Status, Discord summaries, telemetry, crash reports, and support/public exports. Sensitive-log filenames and retention metadata never contain names, tags, or instance names. Debug sessions last two to five minutes and auto-disable on timeout, Pause, Stop, disconnect, blocker, or process exit. Local Debug and remote `/debug` call the same application service and cannot start/resume automation, grant resource permission, bypass transaction gates, select arbitrary screenshot ROIs, or widen Discord image delivery.
 
 ## Local due-account scheduler
 
@@ -143,7 +153,7 @@ Each job retains its original availability event and due time plus an explicit e
 - `QUARANTINED` — an explicit human/safety lock; excluded until an authorized captain clears it;
 - `ADMITTED(visit_nonce, generation)` — selected exactly once and unavailable to another worker.
 
-Oldest-due ordering applies only among `ELIGIBLE` jobs. Every uncertainty deferral persists `reconcile_at` at least five and no more than 60 minutes in the future plus a `yield_set` containing the generation of every other job eligible when deferral occurs. The deferred job cannot re-enter `ELIGIBLE` until the time passes and every yield-set generation has received one terminal admission or independently become waiting/quarantined. Failure to clear the barrier because lifecycle cleanup or the host is blocked becomes explicit intervention rather than repeated admission. A quarantined job cannot block other due work, cannot disappear, remains visible in Status and its account channel, and has no automatic gameplay attempt until cleared. A lane-incomplete job is deferred with its pending lane, so Home is not replayed and the account regains priority after yielding one round without monopolizing the troop.
+Oldest-due ordering applies only among `ELIGIBLE` jobs. Every uncertainty deferral persists `reconcile_at` at least five and no more than 60 minutes in the future plus a `yield_set` containing the generation of every other job eligible when deferral occurs. The deferred job cannot re-enter `ELIGIBLE` until the time passes and every yield-set generation has received one terminal admission or independently become waiting/quarantined. Failure to clear the barrier because lifecycle cleanup or the host is blocked becomes explicit intervention rather than repeated admission. A quarantined job cannot block other due work, cannot disappear, remains visible in Status and its account channel, and has no automatic gameplay attempt until cleared. A lane-incomplete job is deferred with its pending lane, so Home is not replayed and the account regains priority after yielding one round without monopolizing the team.
 
 ### Crash-consistent admission and completion
 
@@ -161,7 +171,7 @@ Startup reconciliation runs under the same mutex before selection:
 - `READY` plus a pre-`ACTIVE` admitted visit and complete player absence returns that unchanged job generation to `ELIGIBLE`; lifecycle ordering proves no process could have been created before `ACTIVE`.
 - `READY` plus a visit that already has a persisted successor plan means stop committed but queue finalization may not have; finalize idempotently from that plan before selecting work.
 - `ACTIVE` plus the exact matching open visit permits no launch. Reconcile lifecycle/process absence through the separately approved lifecycle path, then finalize only from recorded action outcomes and the persisted successor plan; never replay an uncertain action.
-- Any slot, visit nonce, generation, cursor, process, or journal disagreement blocks the troop for operator reconciliation.
+- Any slot, visit nonce, generation, cursor, process, or journal disagreement blocks the team for operator reconciliation.
 
 The SQLite unique keys `(account_key, configuration_generation, job_generation)` and `visit_nonce`, exact equality between the admitted nonce and lifecycle `ACTIVE.run_nonce`, and idempotent successor finalization cover crashes before `ACTIVE`, during gameplay, after stop proof but before `READY`, after `READY` but before queue finalization, and after finalization acknowledgement.
 
@@ -192,17 +202,17 @@ Every account event goes only to that account's explicitly mapped private channe
 - next persisted due time;
 - concise cycle/visit summary.
 
-Blockers are immutable generations with a class-specific action matrix. Safe responses may include `RETRY_OBSERVATION_ONCE`, `DEFER_ACCOUNT`, `QUARANTINE_ACCOUNT`, `STOP_TROOP`, `ACKNOWLEDGE_ONLY`, or `RESUME_FROM_PROVED_STATE`. Lifecycle ownership, stop-proof, identity mismatch, CAPTCHA, and uncertain action blockers never permit retry/resume. The first authorized terminal response wins atomically; later conflicting responses are rejected. Free text can explain but never authorize an action.
+Blockers are immutable generations with a class-specific action matrix. Safe responses may include `RETRY_OBSERVATION_ONCE`, `DEFER_ACCOUNT`, `QUARANTINE_ACCOUNT`, `STOP_TEAM`, `ACKNOWLEDGE_ONLY`, or `RESUME_FROM_PROVED_STATE`. Lifecycle ownership, stop-proof, identity mismatch, CAPTCHA, and uncertain action blockers never permit retry/resume. The first authorized terminal response wins atomically; later conflicting responses are rejected. Free text can explain but never authorize an action.
 
-`/status` is ephemeral and creates no channel message. Troop-wide state changes that do not identify an account are attached to the account currently being serviced; when no account is active, the runner records them locally and the command acknowledgement remains ephemeral.
+`/status` is ephemeral and creates no channel message. Team-wide state changes that do not identify an account are attached to the account currently being serviced; when no account is active, the runner records them locally and the command acknowledgement remains ephemeral.
 
 ### Blocker screenshots — explicit privacy exception
 
 The owner explicitly authorizes a full game screenshot for a blocker only when all of these conditions hold:
 
 1. it is uploaded directly from memory to the exact mapped private account channel;
-2. guild, category, channel, troop, and slot bindings are revalidated immediately before upload;
-3. only assigned Troop Captains are mentioned, with `@everyone`, unrelated roles, and arbitrary user mentions disabled;
+2. guild, category, channel, team, and slot bindings are revalidated immediately before upload;
+3. only assigned Captains are mentioned, with `@everyone`, unrelated roles, and arbitrary user mentions disabled;
 4. the frame is never written to local disk, logs, traces, tests, Git, or public artifacts;
 5. credentials, Discord tokens, local paths, desktop content outside the exact game render, and non-game windows are never captured;
 6. delivery follows the ambiguous-send protocol below rather than assuming a Discord nonce guarantees indefinite deduplication;
@@ -224,7 +234,7 @@ This intentionally favors a missing alert over a duplicate indefinitely retained
 
 ## Failure behavior
 
-- Unknown troop, channel, role, assignment, runner identity, command version, or account mapping fails closed.
+- Unknown team, channel, role, assignment, runner identity, command version, or account mapping fails closed.
 - A mismatched channel never falls back to another channel.
 - An offline Run/Resume fails visibly; an offline Pause/Stop remains pending.
 - Lost control connectivity pauses the runner after safe transaction cleanup.
@@ -248,15 +258,15 @@ Implement and exercise local Setup, Run, Pause, Resume, Stop, and Status. Discor
 
 ### D3 — central router and private enrollment
 
-Build the dedicated Discord service, private schemas, runner enrollment, authenticated outbound connection, heartbeat, exact troop routing, command idempotency, and offline desired-state handling.
+Build the dedicated Discord service, private schemas, runner enrollment, authenticated outbound connection, heartbeat, exact team routing, command idempotency, and offline desired-state handling.
 
 ### D4 — role and command slice
 
-Add explicit troop/account autocomplete, ephemeral Status, immediate Run, Pause/Resume/Stop, account quarantine/unquarantine, blocker-response actions, Troop Captain assignments, Fleet Captain authority, and Administrator bootstrap. RED-test cross-troop denial, stale roles/config generations, duplicate/conflicting commands, active-visit quarantine, and offline commands.
+Add explicit team/account autocomplete, ephemeral Status, immediate Run, Pause/Resume/Stop, account quarantine/unquarantine, blocker-response actions, Captain assignments, Fleet Captain authority, and Administrator bootstrap. RED-test cross-team denial, stale roles/config generations, duplicate/conflicting commands, active-visit quarantine, and offline commands.
 
 ### D5 — account-channel reporting
 
-Add exact configured-cardinality channel validation, durable outbox delivery, per-account event routing, concise summaries, and blocked/failure notifications. Test that no event can fall back or cross troop/account boundaries.
+Add exact configured-cardinality channel validation, durable outbox delivery, per-account event routing, concise summaries, and blocked/failure notifications. Test that no event can fall back or cross team/account boundaries.
 
 ### D6 — blocker-image exception
 
@@ -264,7 +274,7 @@ Separately review and promote direct in-memory full-frame blocker upload. Test e
 
 ### D7 — multi-runner release gate
 
-Run at least two synthetic troop runners concurrently with different configured cardinalities and prove:
+Run at least two synthetic team runners concurrently with different configured cardinalities and prove:
 
 - explicit command routing never crosses runners;
 - runners on distinct hosts can proceed independently, while same-host runners serialize the entire launch/visit/stop boundary through one fair host arbiter;

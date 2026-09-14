@@ -43,7 +43,7 @@ Creating the player suspended prevents it from creating an unowned child before 
 - Bare launch PIDs never authorize action. Use immutable `ProcessIdentity(pid, creation_time_100ns)` values.
 - `PlayerBinding` carries that identity plus exact root/render HWNDs and geometry.
 - Every PID observation is paired with creation `FILETIME`; numeric PID reuse produces a different identity and fails closed.
-- The host retains the original process handle and private Job handle in memory. Handles and display names are never persisted or logged.
+- The host retains the original process handle and private Job handle in memory. Handles and display names never enter lifecycle state, ordinary audit, Status, errors, or console output. A later protected local operator-log/debug adapter may render the validated BlueStacks display name outside this sealed lifecycle component; it receives no handle/PID/HWND authority.
 - Root and render HWNDs must remain owned by the exact process identity, and render must remain under the exact root.
 
 Job membership snapshots use `JOBOBJECT_BASIC_PROCESS_ID_LIST` with bounded buffer-resize retries. Accept only when `NumberOfProcessIdsInList == NumberOfAssignedProcesses`. For every returned PID, open and retain a query/synchronize process handle, read creation `FILETIME`, call `IsProcessInJob` against the private Job, and reject any failure or mismatch. Re-query until two consecutive complete `(pid, creation_time_100ns)` sets match. Numeric Job-member PIDs alone never authorize diagnostics, proof, or termination.

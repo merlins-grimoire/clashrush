@@ -5,10 +5,11 @@ P1 observability/operator Setup is required before the first Home/Builder produc
 ## P1 — observability and operator UI
 
 - Guided Setup that writes one ignored installation profile and puts tokens/runner credentials in Windows Credential Manager.
-- Normal per-troop and per-account structured audit views.
+- Normal per-team and per-account structured audit views.
 - Opt-in two-to-five-minute diagnostic mode with transient full-frame local preview, red crosshair/target box, OCR live-preview panels, state/instance/timer displays, and optionally retained reviewed narrow crops only.
 - Optional in-memory OCR diagnostic panel attached to a blocker message under the same exact-channel/no-retry privacy protocol.
 - Clean-room dashboard inspired by useful UX patterns in NX-ClashClient; no source copying.
+- `Conservative`, `Balanced`, and `Responsive` performance profiles inspired by the MIT Auto Farmer UX. Profiles may change cadence, worker budget, cache lifetime, and preview rate, but never detector thresholds, required evidence, postconditions, settling bounds, or fallback policy.
 
 ## P2 — official API and Discord information
 
@@ -24,6 +25,8 @@ P1 observability/operator Setup is required before the first Home/Builder produc
 - Typed troop, spell, siege, and hero deployment plan with no random/blind fallback.
 - Hero abilities scheduled from each positively confirmed hero drop using monotonic per-hero deadlines; configurable delay does not start after unrelated spell/troop work.
 - Positive card identity, deployed/depleted state, valid-zone proof, postcondition, and unconditional release for every input.
+- Fail-closed smart loot filtering with typed `ACCEPT|REJECT|UNKNOWN`, fresh-frame agreement, scan budgets that defer/stop rather than force an attack, and no Dark Elixir requirement unless separately authorized.
+- A dedicated Sneaky Goblin strategy only after generic scout/deployment safety passes: positively identified card, observed targets/deployable zones, deterministic batches, remaining-card evidence, and verified battle exit. No blind slot, jitter, or “anti-ban” claim.
 
 ## P4 — social donations
 

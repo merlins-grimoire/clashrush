@@ -90,7 +90,7 @@ The numerical winner is ClashAutomation because of transport quality, but **CoC_
 
 ### 3. BasePilot — recovery and mature Home mechanics donor
 
-**Pinned revision:** `e17c23e88cff58047123d66747c937d3bbf8f815`
+**Pinned revision:** `4ede1efd220ffc79a5b490cfd3788b44d2584da4`
 **License:** MIT (`references/BasePilot/LICENSE`)
 
 **Strong parts**
@@ -126,7 +126,7 @@ A safe equal-deadline proof order is:
 
 `H0 → B0 → H1 → B1 → H2 → B2 → H3 → B3 → H4 → B4 → repeat`
 
-where `H` is one bounded Home lane and `B` is one bounded Builder Base lane during the same instance session. Non-equal deadlines run oldest-due first instead. A battle is completed or reconciled before queue advancement. If no safe game screen can be proved, the coordinator emits no further game input, terminates only the exact bound emulator process tree, verifies that the PID tree and HWNDs disappeared, and refuses to start another slot if shutdown cannot be proved. Global action, failure, and wall-clock bounds still apply across the complete troop run.
+where `H` is one bounded Home lane and `B` is one bounded Builder Base lane during the same instance session. Non-equal deadlines run oldest-due first instead. A battle is completed or reconciled before queue advancement. If no safe game screen can be proved, the coordinator emits no further game input, terminates only the exact bound emulator process tree, verifies that the PID tree and HWNDs disappeared, and refuses to start another slot if shutdown cannot be proved. Global action, failure, and wall-clock bounds still apply across the complete team run.
 
 ## Final recommendation
 
