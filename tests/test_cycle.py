@@ -54,7 +54,13 @@ class FakeSupervisor:
     def __init__(self, events: list[str]) -> None:
         self.events = events
         self.binding = PlayerBinding(
-            ProcessIdentity(100, 9001), 101, 102, 1280, 720, "a" * 32
+            ProcessIdentity(100, 9001),
+            ProcessIdentity(100, 9001),
+            101,
+            102,
+            1280,
+            720,
+            "a" * 32,
         )
 
     def start(self, slot: Slot) -> PlayerBinding:

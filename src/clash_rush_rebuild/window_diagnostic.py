@@ -262,7 +262,6 @@ def select_render_window(
         (lambda fact: fact.visible, DiagnosticReason.RENDER_NOT_VISIBLE),
         (lambda fact: fact.ancestry_matches, DiagnosticReason.RENDER_ANCESTRY_MISMATCH),
         (lambda fact: fact.in_private_job, DiagnosticReason.RENDER_OUTSIDE_JOB),
-        (lambda fact: fact.identity_matches, DiagnosticReason.RENDER_IDENTITY_MISMATCH),
     )
     for predicate, reason in filters:
         survivors = tuple(
@@ -280,6 +279,11 @@ def select_render_window(
                 None,
                 None,
             )
+
+    # A BlueStacks render may be owned by a child process rather than by the
+    # launched root process. Retain that structural fact in the diagnostic, but
+    # do not discard an exact owner already proved inside the private Job.
+    counts.append(sum(fact.identity_matches for _index, fact in survivors))
 
     classified = tuple(
         (index, fact, *_geometry(fact)) for index, fact in survivors

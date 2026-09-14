@@ -17,7 +17,8 @@ class FakeCapturePort:
 
 
 def _binding() -> PlayerBinding:
-    return PlayerBinding(ProcessIdentity(100, 9001), 101, 102, 1280, 720, "a" * 32)
+    identity = ProcessIdentity(100, 9001)
+    return PlayerBinding(identity, identity, 101, 102, 1280, 720, "a" * 32)
 
 
 def test_capture_immediately_reduces_frame_to_nonidentifying_health() -> None:

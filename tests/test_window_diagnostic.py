@@ -76,14 +76,17 @@ def test_root_selection_result_distinguishes_zero_one_and_multiple_roots() -> No
     assert multiple.selected_index is None
 
 
-def test_render_selection_result_rejects_child_owner_even_when_inside_private_job() -> None:
+def test_render_selection_accepts_child_owner_when_exactly_inside_private_job() -> None:
     result = select_render_window(
         (_render(in_private_job=True, identity_matches=False),), complete=True
     )
 
-    assert result.reason is DiagnosticReason.RENDER_IDENTITY_MISMATCH
-    assert result.selected_index is None
-    assert result.selected_size is None
+    assert result.reason is DiagnosticReason.BINDING_READY
+    assert result.selected_index == 0
+    assert result.selected_size == (1280, 720)
+    assert result.diagnostic.job_ownership is Cardinality.ONE
+    assert result.diagnostic.identity is Cardinality.ZERO
+    assert result.diagnostic.geometry is Cardinality.ONE
 
 
 def test_render_selection_result_tracks_visibility_and_ancestry_changes() -> None:
@@ -171,7 +174,6 @@ def test_root_reasons_are_closed_and_ordered(
         ((_render(visible=False),), DiagnosticReason.RENDER_NOT_VISIBLE, GeometryClass.NOT_EVALUATED),
         ((_render(ancestry_matches=False),), DiagnosticReason.RENDER_ANCESTRY_MISMATCH, GeometryClass.NOT_EVALUATED),
         ((_render(in_private_job=False),), DiagnosticReason.RENDER_OUTSIDE_JOB, GeometryClass.NOT_EVALUATED),
-        ((_render(identity_matches=False),), DiagnosticReason.RENDER_IDENTITY_MISMATCH, GeometryClass.NOT_EVALUATED),
         ((_render(client_size=(639, 360)),), DiagnosticReason.RENDER_GEOMETRY_TOO_SMALL, GeometryClass.TOO_SMALL),
         ((_render(client_size=(0, 720)),), DiagnosticReason.RENDER_GEOMETRY_INVALID, GeometryClass.INVALID),
         ((_render(), _render()), DiagnosticReason.RENDER_EQUAL_LARGEST, GeometryClass.VALID),
@@ -201,7 +203,7 @@ def test_rejected_unrelated_windows_do_not_fail_a_successful_stage() -> None:
         _render(visible=False),
         _render(ancestry_matches=False),
         _render(in_private_job=False),
-        _render(identity_matches=False),
+        _render(identity_matches=False, client_size=(640, 360)),
         _render(client_size=(200, 200)),
         _render(),
     )

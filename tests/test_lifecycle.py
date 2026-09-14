@@ -125,7 +125,7 @@ class FakeHost:
         if self.bind_missing_reads > 0:
             self.bind_missing_reads -= 1
             return None
-        return PlayerBinding(identity, 101, 102, 1280, 720, "a" * 32)
+        return PlayerBinding(identity, identity, 101, 102, 1280, 720, "a" * 32)
 
     def capture_ready(self, binding: PlayerBinding, job: object) -> None:
         self.events.append("capture:ready")

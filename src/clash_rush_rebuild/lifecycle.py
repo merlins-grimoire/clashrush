@@ -99,6 +99,7 @@ class MemberSnapshot(_OwnedIdentitySnapshot):
 @dataclass(frozen=True, slots=True)
 class PlayerBinding:
     identity: ProcessIdentity
+    render_identity: ProcessIdentity
     root_hwnd: int
     render_hwnd: int
     width: int
@@ -107,8 +108,12 @@ class PlayerBinding:
 
     def __post_init__(self) -> None:
         integers = (self.root_hwnd, self.render_hwnd, self.width, self.height)
-        if type(self.identity) is not ProcessIdentity or any(
-            type(value) is not int or value <= 0 for value in integers
+        if (
+            type(self.identity) is not ProcessIdentity
+            or type(self.render_identity) is not ProcessIdentity
+            or any(
+                type(value) is not int or value <= 0 for value in integers
+            )
         ):
             raise LifecycleError("invalid player binding")
         if self.root_hwnd == self.render_hwnd or self.width < 640 or self.height < 360:

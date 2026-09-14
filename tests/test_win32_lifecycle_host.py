@@ -309,7 +309,8 @@ def test_bind_exact_requires_exact_identity_title_root_ancestry_and_geometry() -
 
 
 @pytest.mark.parametrize(
-    "fault", ["title", "root-identity", "render-identity", "visibility", "ancestry"]
+    "fault",
+    ["title", "root-identity", "render-outside-job", "visibility", "ancestry"],
 )
 def test_bind_exact_rejects_every_inexact_window_fact(fault: str) -> None:
     api = SyntheticNative()
@@ -319,17 +320,20 @@ def test_bind_exact_rejects_every_inexact_window_fact(fault: str) -> None:
         api.windows[10]["title"] = "Exact Slot - extra"
     elif fault == "root-identity":
         api.windows[10]["pid"] = 101
-    elif fault == "render-identity":
+    elif fault == "render-outside-job":
         api.windows[11]["pid"] = 101
     elif fault == "visibility":
         api.windows[11]["visible"] = False
     else:
         api.windows[11]["parent"] = None
 
+    members = _members(ProcessIdentity(100, 9001), ProcessIdentity(101, 9002))
+    if fault == "render-outside-job":
+        members = _members(ProcessIdentity(100, 9001))
     binding = _host(api).bind_exact(
         ProcessIdentity(100, 9001),
         "Exact Slot",
-        _members(ProcessIdentity(100, 9001), ProcessIdentity(101, 9002)),
+        members,
     )
 
     assert binding is None
@@ -361,16 +365,11 @@ def test_bind_exact_rejects_multiple_roots_and_equal_largest_render_areas() -> N
     assert host.bind_exact(ProcessIdentity(100, 9001), "Exact Slot", members) is None
 
 
-def test_bind_exact_rejects_child_owned_render_even_when_owner_is_in_private_job() -> None:
+def test_bind_exact_pins_child_owned_render_when_owner_is_in_private_job() -> None:
     api = SyntheticNative()
     api.creation = {100: 9001, 101: 9002}
     _windows(api)
     api.windows[11]["pid"] = 101
-
-    def geometry_must_not_be_queried(_hwnd: int) -> tuple[int, int]:
-        raise AssertionError("geometry queried after exact-identity rejection")
-
-    api.client_size = geometry_must_not_be_queried  # type: ignore[method-assign]
 
     binding = _host(api).bind_exact(
         ProcessIdentity(100, 9001),
@@ -378,7 +377,30 @@ def test_bind_exact_rejects_child_owned_render_even_when_owner_is_in_private_job
         _members(ProcessIdentity(100, 9001), ProcessIdentity(101, 9002)),
     )
 
-    assert binding is None
+    assert binding is not None
+    assert binding.identity == ProcessIdentity(100, 9001)
+    assert binding.render_identity == ProcessIdentity(101, 9002)
+
+
+def test_capture_rejects_a_changed_child_render_identity_before_capture() -> None:
+    api = SyntheticNative()
+    api.creation = {100: 9001, 101: 9002}
+    _windows(api)
+    api.windows[11]["pid"] = 101
+    host = _host(api)
+    binding = host.bind_exact(
+        ProcessIdentity(100, 9001),
+        "Exact Slot",
+        _members(ProcessIdentity(100, 9001), ProcessIdentity(101, 9002)),
+    )
+    assert binding is not None
+    api.creation[101] = 9003
+    api.calls.clear()
+
+    with pytest.raises(Win32LifecycleHostError, match="render identity mismatch"):
+        host.capture_ready(binding, "job")
+
+    assert not any(call[0] == "capture" for call in api.calls)
 
 
 def _binding_and_job(api: SyntheticNative):

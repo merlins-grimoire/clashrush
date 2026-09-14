@@ -599,6 +599,7 @@ class Win32LifecycleHost:
 
         render_windows = self._window_list(self._api.enum_child_windows(root))
         render_facts: list[RenderWindowFact] = []
+        render_identities: list[ProcessIdentity | None] = []
         for hwnd in render_windows:
             visible = self._window_is_visible(hwnd)
             ancestry_matches = (
@@ -609,13 +610,14 @@ class Win32LifecycleHost:
             )
             in_private_job = render_identity in members.identities
             identity_matches = render_identity == identity
+            render_identities.append(render_identity)
             render_facts.append(
                 RenderWindowFact(
                     visible,
                     ancestry_matches,
                     in_private_job,
                     identity_matches,
-                    self._api.client_size(hwnd) if identity_matches else (0, 0),
+                    self._api.client_size(hwnd) if in_private_job else (0, 0),
                 )
             )
         render_selection = select_render_window(tuple(render_facts), complete=True)
@@ -626,9 +628,13 @@ class Win32LifecycleHost:
         ):
             return None
         render = render_windows[render_selection.selected_index]
+        render_identity = render_identities[render_selection.selected_index]
+        if render_identity is None or render_identity not in members.identities:
+            return None
         width, height = render_selection.selected_size
         return PlayerBinding(
             identity,
+            render_identity,
             root,
             render,
             width,
@@ -653,7 +659,7 @@ class Win32LifecycleHost:
             raise Win32LifecycleHostError("capture render ancestry mismatch")
         if self._window_identity(binding.root_hwnd, job) != binding.identity:
             raise Win32LifecycleHostError("capture root identity mismatch")
-        if self._window_identity(binding.render_hwnd, job) != binding.identity:
+        if self._window_identity(binding.render_hwnd, job) != binding.render_identity:
             raise Win32LifecycleHostError("capture render identity mismatch")
         if self._api.client_size(binding.render_hwnd) != (
             binding.width,
