@@ -76,11 +76,13 @@ The single state file has two exact variants: `READY(next_slot)` and `ACTIVE(slo
 Every transition uses this exact protocol beneath project `var/`:
 
 1. Serialize bounded canonical UTF-8 JSON with exact fields and no values beyond slot, random run nonce, next slot, and closed reason code.
-2. Create a same-directory temporary file with `CreateFileW` and `FILE_FLAG_WRITE_THROUGH`; reject reparse-point destinations and keep the resolved path beneath project `var/`.
-3. Write every byte, call `FlushFileBuffers`, and successfully close the temporary handle.
-4. Replace the target with `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
-5. Reopen without write sharing, read completely, and require byte equality plus successful schema parsing.
-6. On any failure, do not create a process or report a transition. Before launch this leaves `READY`; after `ACTIVE` it leaves the previous durable `ACTIVE`, which blocks restart.
+2. Exclusively create and flush the fixed same-directory `.lifecycle-state.transition` guard with `FILE_FLAG_WRITE_THROUGH`. Any pre-existing or unprovable guard blocks loading and requires reconciliation.
+3. Create a unique same-directory temporary state file with `CreateFileW` and `FILE_FLAG_WRITE_THROUGH`; reject reparse-point destinations and keep every path beneath project `var/`.
+4. Write every byte, call `FlushFileBuffers`, and successfully close the temporary handle.
+5. Replace the target with `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
+6. Reopen without write sharing, read completely, and require byte equality plus successful schema parsing.
+7. Delete the transition guard only after successful read-back. A failure after replacement therefore leaves the guard visible, so a later runner cannot accept exposed `READY` bytes as an acknowledged transition.
+8. On any failure, do not create a process or report a transition. The state or transition guard remains fail-closed.
 
 Synthetic tests inject the filesystem port and prove ordering `write -> FlushFileBuffers -> write-through replace -> read-back -> CreateProcessW`, plus short writes, flush/replace/read-back failures, stale temporary files, malformed state, and crash points around every operation.
 
