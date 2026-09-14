@@ -27,10 +27,18 @@ from .win32_primitives import (
     stable_job_members,
 )
 from .win32_runtime import NativeWin32Api, RuntimeApi, Win32Runtime
+from .window_diagnostic import (
+    DiagnosticReason,
+    RenderWindowFact,
+    RootWindowFact,
+    select_render_window,
+    select_root_window,
+)
 
 BLUESTACKS_PLAYER_PATH = r"C:\Program Files\BlueStacks_nxt\HD-Player.exe"
 _PLAYER_IMAGE_NAME = "HD-Player.exe"
 _INTERNAL_NAME = re.compile(r"Pie64(?:_[A-Za-z0-9_]+)?")
+_MAX_WINDOWS = 4096
 TH32CS_SNAPPROCESS = 0x00000002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
 SYNCHRONIZE = 0x00100000
@@ -537,6 +545,7 @@ class Win32LifecycleHost:
             type(value) is not tuple
             or any(type(hwnd) is not int or hwnd <= 0 for hwnd in value)
             or len(set(value)) != len(value)
+            or len(value) > _MAX_WINDOWS
         ):
             raise Win32LifecycleHostError("complete exact window enumeration required")
         return value
@@ -561,46 +570,63 @@ class Win32LifecycleHost:
         ):
             raise Win32LifecycleHostError("exact member identity and title required")
 
-        roots: list[int] = []
-        for hwnd in self._window_list(self._api.enum_top_level_windows()):
-            if not self._window_is_visible(hwnd):
-                continue
-            if self._api.window_text(hwnd) != expected_title:
-                continue
-            if self._api.get_ancestor_root(hwnd) != hwnd:
-                continue
-            if self._window_identity(hwnd) == identity:
-                roots.append(hwnd)
-        if len(roots) != 1:
+        root_windows = self._window_list(self._api.enum_top_level_windows())
+        root_facts: list[RootWindowFact] = []
+        for hwnd in root_windows:
+            visible = self._window_is_visible(hwnd)
+            title_matches = visible and self._api.window_text(hwnd) == expected_title
+            ancestry_matches = (
+                title_matches and self._api.get_ancestor_root(hwnd) == hwnd
+            )
+            identity_matches = (
+                ancestry_matches and self._window_identity(hwnd) == identity
+            )
+            root_facts.append(
+                RootWindowFact(
+                    visible,
+                    title_matches,
+                    ancestry_matches,
+                    identity_matches,
+                )
+            )
+        root_selection = select_root_window(tuple(root_facts), complete=True)
+        if (
+            root_selection.reason is not DiagnosticReason.BINDING_READY
+            or root_selection.selected_index is None
+        ):
             return None
-        root = roots[0]
+        root = root_windows[root_selection.selected_index]
 
-        candidates: list[tuple[int, int, int, int]] = []
-        for hwnd in self._window_list(self._api.enum_child_windows(root)):
-            if not self._window_is_visible(hwnd):
-                continue
-            if self._api.get_ancestor_root(hwnd) != root:
-                continue
-            if self._window_identity(hwnd) != identity:
-                continue
-            size = self._api.client_size(hwnd)
-            if (
-                type(size) is not tuple
-                or len(size) != 2
-                or any(type(value) is not int or value <= 0 for value in size)
-            ):
-                continue
-            width, height = size
-            candidates.append((width * height, hwnd, width, height))
-        if not candidates:
+        render_windows = self._window_list(self._api.enum_child_windows(root))
+        render_facts: list[RenderWindowFact] = []
+        for hwnd in render_windows:
+            visible = self._window_is_visible(hwnd)
+            ancestry_matches = (
+                visible and self._api.get_ancestor_root(hwnd) == root
+            )
+            render_identity = (
+                self._window_identity(hwnd) if ancestry_matches else None
+            )
+            in_private_job = render_identity in members.identities
+            identity_matches = render_identity == identity
+            render_facts.append(
+                RenderWindowFact(
+                    visible,
+                    ancestry_matches,
+                    in_private_job,
+                    identity_matches,
+                    self._api.client_size(hwnd) if identity_matches else (0, 0),
+                )
+            )
+        render_selection = select_render_window(tuple(render_facts), complete=True)
+        if (
+            render_selection.reason is not DiagnosticReason.BINDING_READY
+            or render_selection.selected_index is None
+            or render_selection.selected_size is None
+        ):
             return None
-        largest_area = max(candidate[0] for candidate in candidates)
-        largest = [
-            candidate for candidate in candidates if candidate[0] == largest_area
-        ]
-        if len(largest) != 1:
-            return None
-        _, render, width, height = largest[0]
+        render = render_windows[render_selection.selected_index]
+        width, height = render_selection.selected_size
         return PlayerBinding(
             identity,
             root,

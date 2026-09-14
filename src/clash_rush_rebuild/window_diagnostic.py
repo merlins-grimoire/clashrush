@@ -93,6 +93,21 @@ class WindowDiagnosticRecord:
     render: RenderDiagnostic | None
 
 
+@dataclass(frozen=True, slots=True)
+class RootSelectionResult:
+    reason: DiagnosticReason
+    diagnostic: RootDiagnostic
+    selected_index: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RenderSelectionResult:
+    reason: DiagnosticReason
+    diagnostic: RenderDiagnostic
+    selected_index: int | None
+    selected_size: tuple[int, int] | None
+
+
 def _cardinality(count: int) -> Cardinality:
     if count == 0:
         return Cardinality.ZERO
@@ -103,14 +118,6 @@ def _cardinality(count: int) -> Cardinality:
 
 def _empty_root() -> RootDiagnostic:
     return RootDiagnostic(*(Cardinality.ZERO,) * 5)
-
-
-def _invalid_record() -> WindowDiagnosticRecord:
-    return WindowDiagnosticRecord(
-        DiagnosticReason.NATIVE_FACT_INVALID,
-        _empty_root(),
-        None,
-    )
 
 
 def _root_report(counts: tuple[int, int, int, int, int]) -> RootDiagnostic:
@@ -175,6 +182,156 @@ def _geometry(fact: RenderWindowFact) -> tuple[GeometryClass, int]:
     return GeometryClass.VALID, area
 
 
+def select_root_window(
+    roots: tuple[RootWindowFact, ...], *, complete: bool
+) -> RootSelectionResult:
+    """Select one exact root while retaining only its tuple position internally."""
+    if (
+        type(roots) is not tuple
+        or type(complete) is not bool
+        or not complete
+        or len(roots) > _MAX_WINDOWS
+        or not _root_facts_valid(roots)
+    ):
+        return RootSelectionResult(
+            DiagnosticReason.NATIVE_FACT_INVALID, _empty_root(), None
+        )
+
+    counts = [len(roots)]
+    report = _root_report((counts[0], 0, 0, 0, 0))
+    if not roots:
+        return RootSelectionResult(DiagnosticReason.ROOT_NONE, report, None)
+
+    survivors = tuple(enumerate(roots))
+    filters = (
+        (lambda fact: fact.visible, DiagnosticReason.ROOT_NOT_VISIBLE),
+        (lambda fact: fact.title_matches, DiagnosticReason.ROOT_TITLE_MISMATCH),
+        (lambda fact: fact.ancestry_matches, DiagnosticReason.ROOT_ANCESTRY_MISMATCH),
+        (lambda fact: fact.identity_matches, DiagnosticReason.ROOT_IDENTITY_MISMATCH),
+    )
+    for predicate, reason in filters:
+        survivors = tuple(
+            (index, fact) for index, fact in survivors if predicate(fact)
+        )
+        counts.append(len(survivors))
+        if not survivors:
+            counts.extend([0] * (5 - len(counts)))
+            return RootSelectionResult(
+                reason,
+                _root_report(tuple(counts)),  # type: ignore[arg-type]
+                None,
+            )
+
+    report = _root_report(tuple(counts))  # type: ignore[arg-type]
+    if len(survivors) > 1:
+        return RootSelectionResult(DiagnosticReason.ROOT_MULTIPLE, report, None)
+    return RootSelectionResult(
+        DiagnosticReason.BINDING_READY, report, survivors[0][0]
+    )
+
+
+def select_render_window(
+    renders: tuple[RenderWindowFact, ...], *, complete: bool
+) -> RenderSelectionResult:
+    """Select a unique strict-largest exact render from a complete child inventory."""
+    if (
+        type(renders) is not tuple
+        or type(complete) is not bool
+        or not complete
+        or len(renders) > _MAX_WINDOWS
+        or not _render_filters_valid(renders)
+    ):
+        return RenderSelectionResult(
+            DiagnosticReason.NATIVE_FACT_INVALID,
+            _render_report((0, 0, 0, 0, 0, 0), GeometryClass.NOT_EVALUATED),
+            None,
+            None,
+        )
+
+    counts = [len(renders)]
+    if not renders:
+        return RenderSelectionResult(
+            DiagnosticReason.RENDER_NONE,
+            _render_report((0, 0, 0, 0, 0, 0), GeometryClass.NOT_EVALUATED),
+            None,
+            None,
+        )
+
+    survivors = tuple(enumerate(renders))
+    filters = (
+        (lambda fact: fact.visible, DiagnosticReason.RENDER_NOT_VISIBLE),
+        (lambda fact: fact.ancestry_matches, DiagnosticReason.RENDER_ANCESTRY_MISMATCH),
+        (lambda fact: fact.in_private_job, DiagnosticReason.RENDER_OUTSIDE_JOB),
+        (lambda fact: fact.identity_matches, DiagnosticReason.RENDER_IDENTITY_MISMATCH),
+    )
+    for predicate, reason in filters:
+        survivors = tuple(
+            (index, fact) for index, fact in survivors if predicate(fact)
+        )
+        counts.append(len(survivors))
+        if not survivors:
+            counts.extend([0] * (6 - len(counts)))
+            return RenderSelectionResult(
+                reason,
+                _render_report(
+                    tuple(counts),  # type: ignore[arg-type]
+                    GeometryClass.NOT_EVALUATED,
+                ),
+                None,
+                None,
+            )
+
+    classified = tuple(
+        (index, fact, *_geometry(fact)) for index, fact in survivors
+    )
+    if any(kind is GeometryClass.INVALID for _index, _fact, kind, _area in classified):
+        counts.append(0)
+        return RenderSelectionResult(
+            DiagnosticReason.RENDER_GEOMETRY_INVALID,
+            _render_report(
+                tuple(counts),  # type: ignore[arg-type]
+                GeometryClass.INVALID,
+            ),
+            None,
+            None,
+        )
+
+    valid = tuple(
+        (index, fact, area)
+        for index, fact, kind, area in classified
+        if kind is GeometryClass.VALID
+    )
+    counts.append(len(valid))
+    if not valid:
+        return RenderSelectionResult(
+            DiagnosticReason.RENDER_GEOMETRY_TOO_SMALL,
+            _render_report(
+                tuple(counts),  # type: ignore[arg-type]
+                GeometryClass.TOO_SMALL,
+            ),
+            None,
+            None,
+        )
+
+    report = _render_report(
+        tuple(counts),  # type: ignore[arg-type]
+        GeometryClass.VALID,
+    )
+    largest_area = max(area for _index, _fact, area in valid)
+    largest = tuple(candidate for candidate in valid if candidate[2] == largest_area)
+    if len(largest) != 1:
+        return RenderSelectionResult(
+            DiagnosticReason.RENDER_EQUAL_LARGEST, report, None, None
+        )
+    selected_index, selected_fact, _area = largest[0]
+    return RenderSelectionResult(
+        DiagnosticReason.BINDING_READY,
+        report,
+        selected_index,
+        selected_fact.client_size,
+    )
+
+
 def evaluate_window_inventory(
     roots: tuple[RootWindowFact, ...],
     renders: tuple[RenderWindowFact, ...],
@@ -183,122 +340,14 @@ def evaluate_window_inventory(
     renders_complete: bool,
 ) -> WindowDiagnosticRecord:
     """Reduce one complete root/child inventory to bounded structural facts."""
-    if (
-        type(roots) is not tuple
-        or type(roots_complete) is not bool
-        or not roots_complete
-        or len(roots) > _MAX_WINDOWS
-        or not _root_facts_valid(roots)
-    ):
-        return _invalid_record()
+    root = select_root_window(roots, complete=roots_complete)
+    if root.reason is not DiagnosticReason.BINDING_READY:
+        return WindowDiagnosticRecord(root.reason, root.diagnostic, None)
 
-    root_counts = [len(roots)]
-    root_report = _root_report((root_counts[0], 0, 0, 0, 0))
-    if not roots:
-        return WindowDiagnosticRecord(DiagnosticReason.ROOT_NONE, root_report, None)
-
-    survivors = roots
-    root_filters = (
-        (lambda fact: fact.visible, DiagnosticReason.ROOT_NOT_VISIBLE),
-        (lambda fact: fact.title_matches, DiagnosticReason.ROOT_TITLE_MISMATCH),
-        (lambda fact: fact.ancestry_matches, DiagnosticReason.ROOT_ANCESTRY_MISMATCH),
-        (lambda fact: fact.identity_matches, DiagnosticReason.ROOT_IDENTITY_MISMATCH),
-    )
-    for predicate, reason in root_filters:
-        survivors = tuple(fact for fact in survivors if predicate(fact))
-        root_counts.append(len(survivors))
-        if not survivors:
-            root_counts.extend([0] * (5 - len(root_counts)))
-            return WindowDiagnosticRecord(
-                reason,
-                _root_report(tuple(root_counts)),  # type: ignore[arg-type]
-                None,
-            )
-    root_report = _root_report(tuple(root_counts))  # type: ignore[arg-type]
-    if len(survivors) > 1:
-        return WindowDiagnosticRecord(
-            DiagnosticReason.ROOT_MULTIPLE, root_report, None
-        )
-
-    if (
-        type(renders) is not tuple
-        or type(renders_complete) is not bool
-        or not renders_complete
-        or len(renders) > _MAX_WINDOWS
-        or not _render_filters_valid(renders)
-    ):
-        return WindowDiagnosticRecord(
-            DiagnosticReason.NATIVE_FACT_INVALID, root_report, None
-        )
-
-    render_counts = [len(renders)]
-    if not renders:
-        render_report = _render_report(
-            (0, 0, 0, 0, 0, 0), GeometryClass.NOT_EVALUATED
-        )
-        return WindowDiagnosticRecord(
-            DiagnosticReason.RENDER_NONE, root_report, render_report
-        )
-
-    render_survivors = renders
-    render_filters = (
-        (lambda fact: fact.visible, DiagnosticReason.RENDER_NOT_VISIBLE),
-        (lambda fact: fact.ancestry_matches, DiagnosticReason.RENDER_ANCESTRY_MISMATCH),
-        (lambda fact: fact.in_private_job, DiagnosticReason.RENDER_OUTSIDE_JOB),
-        (lambda fact: fact.identity_matches, DiagnosticReason.RENDER_IDENTITY_MISMATCH),
-    )
-    for predicate, reason in render_filters:
-        render_survivors = tuple(fact for fact in render_survivors if predicate(fact))
-        render_counts.append(len(render_survivors))
-        if not render_survivors:
-            render_counts.extend([0] * (6 - len(render_counts)))
-            return WindowDiagnosticRecord(
-                reason,
-                root_report,
-                _render_report(
-                    tuple(render_counts),  # type: ignore[arg-type]
-                    GeometryClass.NOT_EVALUATED,
-                ),
-            )
-
-    classified = tuple(_geometry(fact) for fact in render_survivors)
-    if any(kind is GeometryClass.INVALID for kind, _area in classified):
-        render_counts.append(0)
-        return WindowDiagnosticRecord(
-            DiagnosticReason.RENDER_GEOMETRY_INVALID,
-            root_report,
-            _render_report(
-                tuple(render_counts),  # type: ignore[arg-type]
-                GeometryClass.INVALID,
-            ),
-        )
-
-    valid_areas = tuple(
-        area for kind, area in classified if kind is GeometryClass.VALID
-    )
-    render_counts.append(len(valid_areas))
-    if not valid_areas:
-        return WindowDiagnosticRecord(
-            DiagnosticReason.RENDER_GEOMETRY_TOO_SMALL,
-            root_report,
-            _render_report(
-                tuple(render_counts),  # type: ignore[arg-type]
-                GeometryClass.TOO_SMALL,
-            ),
-        )
-
-    render_report = _render_report(
-        tuple(render_counts),  # type: ignore[arg-type]
-        GeometryClass.VALID,
-    )
-    largest = max(valid_areas)
-    if sum(area == largest for area in valid_areas) != 1:
-        return WindowDiagnosticRecord(
-            DiagnosticReason.RENDER_EQUAL_LARGEST, root_report, render_report
-        )
-    return WindowDiagnosticRecord(
-        DiagnosticReason.BINDING_READY, root_report, render_report
-    )
+    render = select_render_window(renders, complete=renders_complete)
+    if render.reason is DiagnosticReason.NATIVE_FACT_INVALID:
+        return WindowDiagnosticRecord(render.reason, root.diagnostic, None)
+    return WindowDiagnosticRecord(render.reason, root.diagnostic, render.diagnostic)
 
 
 def serialize_window_diagnostic(record: WindowDiagnosticRecord) -> str:

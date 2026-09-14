@@ -9,11 +9,15 @@ from clash_rush_rebuild.window_diagnostic import (
     DiagnosticReason,
     GeometryClass,
     RenderDiagnostic,
+    RenderSelectionResult,
     RenderWindowFact,
     RootDiagnostic,
+    RootSelectionResult,
     RootWindowFact,
     WindowDiagnosticRecord,
     evaluate_window_inventory,
+    select_render_window,
+    select_root_window,
     serialize_window_diagnostic,
 )
 
@@ -53,6 +57,68 @@ def _evaluate(
         renders,
         roots_complete=roots_complete,
         renders_complete=renders_complete,
+    )
+
+
+def test_root_selection_result_distinguishes_zero_one_and_multiple_roots() -> None:
+    zero = select_root_window((), complete=True)
+    one = select_root_window((_root(title_matches=False), _root()), complete=True)
+    multiple = select_root_window((_root(), _root()), complete=True)
+
+    assert zero == RootSelectionResult(
+        DiagnosticReason.ROOT_NONE,
+        RootDiagnostic(*(Cardinality.ZERO,) * 5),
+        None,
+    )
+    assert one.reason is DiagnosticReason.BINDING_READY
+    assert one.selected_index == 1
+    assert multiple.reason is DiagnosticReason.ROOT_MULTIPLE
+    assert multiple.selected_index is None
+
+
+def test_render_selection_result_rejects_child_owner_even_when_inside_private_job() -> None:
+    result = select_render_window(
+        (_render(in_private_job=True, identity_matches=False),), complete=True
+    )
+
+    assert result.reason is DiagnosticReason.RENDER_IDENTITY_MISMATCH
+    assert result.selected_index is None
+    assert result.selected_size is None
+
+
+def test_render_selection_result_tracks_visibility_and_ancestry_changes() -> None:
+    hidden = select_render_window((_render(visible=False),), complete=True)
+    visible = select_render_window(
+        (_render(client_size=(640, 360)), _render()), complete=True
+    )
+    detached = select_render_window(
+        (_render(ancestry_matches=False),), complete=True
+    )
+
+    assert hidden.reason is DiagnosticReason.RENDER_NOT_VISIBLE
+    assert visible.reason is DiagnosticReason.BINDING_READY
+    assert visible.selected_index == 1
+    assert visible.selected_size == (1280, 720)
+    assert detached.reason is DiagnosticReason.RENDER_ANCESTRY_MISMATCH
+
+
+def test_render_selection_result_rejects_equal_area_candidates() -> None:
+    result = select_render_window(
+        (
+            _render(client_size=(1280, 720)),
+            _render(client_size=(960, 960)),
+        ),
+        complete=True,
+    )
+
+    assert result == RenderSelectionResult(
+        DiagnosticReason.RENDER_EQUAL_LARGEST,
+        RenderDiagnostic(
+            *(Cardinality.MULTIPLE,) * 6,
+            GeometryClass.VALID,
+        ),
+        None,
+        None,
     )
 
 

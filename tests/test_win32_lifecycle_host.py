@@ -361,6 +361,26 @@ def test_bind_exact_rejects_multiple_roots_and_equal_largest_render_areas() -> N
     assert host.bind_exact(ProcessIdentity(100, 9001), "Exact Slot", members) is None
 
 
+def test_bind_exact_rejects_child_owned_render_even_when_owner_is_in_private_job() -> None:
+    api = SyntheticNative()
+    api.creation = {100: 9001, 101: 9002}
+    _windows(api)
+    api.windows[11]["pid"] = 101
+
+    def geometry_must_not_be_queried(_hwnd: int) -> tuple[int, int]:
+        raise AssertionError("geometry queried after exact-identity rejection")
+
+    api.client_size = geometry_must_not_be_queried  # type: ignore[method-assign]
+
+    binding = _host(api).bind_exact(
+        ProcessIdentity(100, 9001),
+        "Exact Slot",
+        _members(ProcessIdentity(100, 9001), ProcessIdentity(101, 9002)),
+    )
+
+    assert binding is None
+
+
 def _binding_and_job(api: SyntheticNative):
     _windows(api)
     api.creation = {100: 9001}
