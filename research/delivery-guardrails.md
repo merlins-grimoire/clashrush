@@ -55,7 +55,7 @@ Required screen states include Home, Builder Home, My Army, Scout, Home Battle, 
 ## 5. Separate observation, policy, and execution
 
 - Observers return immutable typed state.
-- Clash Rush planners return recommendations only.
+- The selected typed planners return recommendations only; historical Clash Rush planners receive no privileged execution path.
 - A closed adapter converts recommendations to `ActionIntent`.
 - Executors accept only known intent/resource/action enums.
 - Planners cannot capture, click, sleep, launch, or read private configuration.
@@ -69,11 +69,11 @@ Persist before input:
 
 `PLANNED → INTENT_RECORDED → INPUT_STARTED → INPUT_COMPLETED → CONFIRMED|FAILED|UNCERTAIN`
 
-Cursor advancement and terminal transaction state commit atomically. On restart, reconcile unfinished records from read-only evidence. Never replay an uncertain spend, deployment, reward, or confirmation.
+The terminal action outcome and pending-lane state commit atomically in SQLite. The lifecycle tie cursor advances separately only through `ACTIVE → READY` after verified stop; reconcile the write-ahead visit generation across both stores before admitting work. Never replay an uncertain spend, deployment, reward, or confirmation.
 
 ## 7. Test the real five-account lifecycle
 
-The scheduler gate is not just a list of indexes. Tests must prove:
+The scheduler gate is not just a list of indexes. With five equal due times, tests must prove the tie cursor emits:
 
 `START0 → HOME0 → BUILDER0 → SAFE_HOME0 → STOP0 → START1`
 
@@ -89,6 +89,7 @@ Also prove:
 - a global limit between lanes resumes at the correct lane;
 - iteration/failure/time counters never reset during rotation;
 - no runnable lane can be starved indefinitely.
+- non-equal due times run strictly oldest-due first, regardless of slot number, and `READY(next_slot)` acts only as the equal-deadline tie cursor.
 
 ## 8. Require a complete per-account visit report
 
@@ -154,7 +155,7 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - Before implementing a gameplay mechanic, inspect BasePilot, CoC_Bot, and ClashAutomation and copy/adapt the largest compatible, licensed behavioral seam rather than reinventing it.
 - Treat published Clash Rush as unreliable historical first-party evidence, not the default tactical authority. Reuse only narrow code whose assumptions and behavior have been independently re-proved.
 - Use two-to-five-minute diagnostic runs before another full release run.
-- Every diagnostic input gets a red crosshair and narrow before/after reviewed crops; full frames stay memory-only.
+- Every diagnostic input gets a red crosshair and narrow before/after reviewed crops. Full frames stay memory-only except for the separately reviewed blocker-only Discord upload to an exact private account channel.
 
 ## 14. Enforce privacy structurally
 
@@ -163,6 +164,8 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - Public fixtures contain no real names, instance IDs, tags, hashes, screenshots, machine paths, or calibration values.
 - Scan the exact staged archive before every commit.
 - References and commercial fonts remain ignored and are never packaged.
+- Actual Discord guild/category/channel/role/user IDs, troop assignments, runner credentials, account mappings, and bot credentials remain under ignored private roots or the operating-system credential store. Public schemas use placeholders only.
+- A blocker screenshot may leave memory only through the explicit Discord exception: exact mapped private account channel, immediate destination revalidation, restricted captain mentions, no local persistence, and no fallback destination.
 
 ## 15. Preserve safety policy in code structure
 
@@ -172,11 +175,12 @@ Only explicitly enabled `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER
 
 The rebuild is done only when:
 
-- a clean install launches through the operator command;
-- exactly five private slots cycle sequentially with one emulator at a time;
+- a clean install exposes and exercises Setup, Run, Pause, Resume, Stop, and Status without source/config kill-switch edits;
+- exactly five private slots remain durably scheduled oldest-due-first, using restart-safe round-robin only for equal deadlines, with one emulator at a time;
 - Home and Builder Base are serviced for every slot;
 - labs and all available builders are checked and actionable work is attempted within budget;
 - attacks deploy every configured card and Builder Stage 2 is positively detected;
 - crash/restart tests prove no duplicate spend or deployment;
 - bounded live evidence passes for all five slots;
+- local builder-due queues survive restarts and multi-runner Discord routing cannot cross troop or account channels;
 - the exact published archive passes tests, privacy scan, and independent release review.

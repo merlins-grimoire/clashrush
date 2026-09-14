@@ -11,7 +11,7 @@ None of the three repositories is a safe drop-in foundation.
 - **ClashAutomation supplies the best native-Windows substrate**: local Win32 input/capture, normalized coordinates, local vision, and the only meaningful test suite among the donors. Its Google Play Games window discovery, account switching, and scheduling are not suitable.
 - **BasePilot is the best recovery and Home Village mechanics donor**: popup/reconnect/post-battle recovery, builder-menu parsing, guarded upgrades, wall batches, and useful Builder Base attack/return flows. It is not a five-instance runner and its source contains substantial recovered/decompiled control flow.
 
-The resulting runner should therefore be a **hybrid clean architecture**, not a renamed copy. CoC_Bot determines the feature inventory; ClashAutomation contributes the Windows adapter patterns; BasePilot contributes recovery and mature interaction sequences; Clash Rush contributes deterministic upgrade policy and safety controls.
+The resulting runner should therefore be a **hybrid clean architecture**, not a renamed copy. CoC_Bot determines the feature inventory; ClashAutomation contributes Windows adapter patterns; BasePilot contributes recovery and mature interaction sequences; and the required Rush Bible behavior is extracted as a contract. Published Clash Rush is unreliable historical evidence whose narrow policy or input candidates require donor comparison and differential proof.
 
 ## Decision matrix
 
@@ -120,19 +120,19 @@ The numerical winner is ClashAutomation because of transport quality, but **CoC_
 
 ## Required architecture decision
 
-Run **exactly one BlueStacks instance at a time**. The coordinator launches the next configured instance, positively binds its PID/HWND/account, services its Home and Builder Base lanes, returns to a safe screen, stops that instance, and advances the durable cursor. This matches the host's capacity and eliminates cross-instance cursor, capture, and memory contention.
+Run **exactly one BlueStacks instance at a time**. The coordinator selects the oldest due account, positively binds its PID/HWND/account, services its Home and Builder Base lanes, returns to a safe screen, stops that instance, and commits the queue outcome. A restart-safe round-robin cursor breaks equal-deadline ties only. This matches the host's capacity and eliminates cross-instance cursor, capture, and memory contention.
 
-A safe service order is:
+A safe equal-deadline proof order is:
 
 `H0 → B0 → H1 → B1 → H2 → B2 → H3 → B3 → H4 → B4 → repeat`
 
-where `H` is one bounded Home transaction and `B` is one bounded Builder Base transaction during the same instance session. A battle is completed or reconciled before rotation. If no safe game screen can be proved, the coordinator emits no further game input, terminates only the exact bound emulator process tree, verifies that the PID tree and HWNDs disappeared, and refuses to start another slot if shutdown cannot be proved. Global action, failure, and wall-clock bounds still apply across the complete five-slot cycle.
+where `H` is one bounded Home lane and `B` is one bounded Builder Base lane during the same instance session. Non-equal deadlines run oldest-due first instead. A battle is completed or reconciled before queue advancement. If no safe game screen can be proved, the coordinator emits no further game input, terminates only the exact bound emulator process tree, verifies that the PID tree and HWNDs disappeared, and refuses to start another slot if shutdown cannot be proved. Global action, failure, and wall-clock bounds still apply across the complete troop run.
 
 ## Final recommendation
 
 **Primary donor:** CoC_Bot, for BlueStacks and Builder Base behavior.
 **Transport donor:** ClashAutomation, rewritten for exact BlueStacks PID/HWND binding.
 **Recovery/Home donor:** BasePilot.
-**Policy donor:** the existing Clash Rush pure planners only.
+**Policy selection:** extract the Rush Bible contract, compare the pinned donors, and admit historical Clash Rush planner code only after differential proof.
 
 Do not copy any donor’s scheduler, unsafe fallback clicks, account-switching UI, random upgrade selection, ADB transport, external OCR, or persistent full-frame diagnostics.

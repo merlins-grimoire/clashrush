@@ -1,14 +1,14 @@
 # Clash Rush Rebuild
 
-Clean-room comparison workspace for selecting proven five-account Home Village and Builder Base mechanics, then integrating them behind local safety and transaction controls. The host runs one BlueStacks instance at a time and cycles deterministically through five configured slots.
+Clean-room comparison workspace for selecting proven five-account Home Village and Builder Base mechanics, then integrating them behind local safety and transaction controls. Each troop runner manages exactly five configured slots, selects deterministically from a persisted due queue, and runs one local BlueStacks instance at a time.
 
 ## Non-negotiable constraints
 
 - Native Windows/BlueStacks input only; no ADB.
-- Exactly five configured accounts with deterministic, restart-safe rotation.
+- Exactly five configured accounts with deterministic, restart-safe oldest-due scheduling and round-robin tie-breaking.
 - Home Village and Builder Base must both be first-class modes.
 - Never spend gems, make purchases, claim irreversible rewards, use chat/clan/war/donations, switch Supercell accounts, evade detection, or bypass CAPTCHA.
-- Private account names, player tags, tag hashes, screenshots, calibration data, traces, and machine paths stay local and ignored.
+- Private account names, player tags, tag hashes, calibration data, traces, and machine paths stay local and ignored. Full frames remain memory-only except for the separately reviewed blocker-only Discord upload authorized in `research/discord-fleet-control-plan.md`; no private material enters public artifacts.
 - Home Gold, Home Elixir, Builder Gold, and Builder Elixir each require explicit owner enablement, kill switches, bounded runs, and transaction verification. Dark Elixir and gems remain disabled.
 - Private files may be written only beneath ignored `private/` or `var/` roots; runtime path validation will reject every other destination.
 - Each account receives one bounded ten-minute visit. The runner completes as much immediately available Home and Builder work as possible, reserves time for both villages, then rotates.
@@ -18,7 +18,7 @@ Clean-room comparison workspace for selecting proven five-account Home Village a
 
 ## Operator experience contract
 
-The finished runner will expose four obvious operations: **Setup**, **Run**, **Stop**, and **Status**. Setup validates the host and five slots without gameplay. Run starts the bounded unattended cycle with the saved non-secret configuration. Stop requests a safe stop, prevents admission of another transaction, releases held input, closes the currently owned emulator, and leaves a resumable durable cursor. Status is read-only and reports sanitized lifecycle state, slot index, running/stopped state, blocked reason, and last outcome without private names or identifiers. Emergency termination remains fail-closed and must never guess at process ownership.
+The finished runner will expose six obvious operations: **Setup**, **Run**, **Pause**, **Resume**, **Stop**, and **Status**. Setup validates the host and five slots without gameplay. Run starts the bounded unattended scheduler with the saved non-secret configuration. Pause finishes the admitted transaction safely, closes the owned emulator, and idles until Resume. Stop performs the same safe boundary and exits until Run. Status is read-only and reports sanitized lifecycle state, slot index, running/stopped state, blocked reason, and last outcome without private names or identifiers. Emergency termination remains fail-closed and must never guess at process ownership.
 
 Internal resource and transaction gates remain mandatory, but the owner will not toggle them by opening a source or configuration file. Initial resource authorization belongs in Setup and can be changed through a command/UI; command-scoped approval flags used during development spikes are not the final everyday interface.
 
@@ -30,14 +30,15 @@ Behavioral mechanics are donor-first: inspect the pinned BasePilot, CoC_Bot, and
 
 - `references/` — local pinned comparison checkouts; excluded from this workspace's Git history.
 - `research/runner-comparison.md` — evidence-based comparison and recommendation.
-- `research/integration-plan.md` — architecture for adding the Clash Rush policy engine and Builder Base.
+- `research/integration-plan.md` — architecture for donor-backed Home Village and Builder Base behavior.
+- `research/discord-fleet-control-plan.md` — multi-runner Discord commands, role scoping, private channel routing, and builder-due scheduling.
 - `research/delivery-guardrails.md` — binding anti-regression, verification, privacy, and live-test gates.
 - `research/slice-1-contract.md` — frozen inert lifecycle scope and exit gate.
 - `src/clash_rush_rebuild/` — exact-five registry, crash-durable `READY`/`ACTIVE` lifecycle state, protected host-wide mutex, Job-owned lifecycle supervisor, memory-only capture health, and native Windows adapters.
 
 ## Current status
 
-The comparison and architecture gate passed. Slice 1 is under static verification. It contains no game-input API and cannot upgrade, attack, navigate, spend, or claim anything. Live lifecycle/capture execution remains disabled until the exact staged tree passes clean-export tests, privacy scanning, independent review, and a separate owner approval.
+The comparison and architecture gate passed, and the inert Slice 1 implementation passed static verification and independent review. Its first bounded live spike launched and stopped the owned player safely but failed closed at exact `WINDOW_BINDING`; durable state remains blocked for explicit reconciliation. It contains no game-input API and cannot upgrade, attack, navigate, spend, or claim anything. The next live diagnostic requires a new narrow reviewed slice and separate owner approval.
 
 ## Local setup for Slice 1
 
@@ -47,4 +48,4 @@ The comparison and architecture gate passed. Slice 1 is under static verificatio
 4. With every BlueStacks player already closed, initialize once with `uv run clash-rush-rebuild initialize --project-root . --slots private/slots.json`. Initialization acquires the protected global mutex, validates all five slots, proves no player is running, and creates only `READY(0)`.
 5. Do not run `visit-one` until the staged tree has an independent PASS and the owner gives fresh approval. The command additionally requires `--owner-approved`; it performs one inert launch/bind/capture/forced-stop visit and has no gameplay-input surface.
 
-`CCBackBeat.ttf` is a commercially licensed Comicraft font and is not redistributable from an unverified download. If a later UI-recognition slice requires it, place an operator-owned licensed copy at `private/assets/CCBackBeat.ttf`; that private asset will remain ignored and publication checks must fail closed if the required local copy is absent.
+An operator-provided local `CCBackBeat.ttf` copy is available at `private/assets/CCBackBeat.ttf`. It remains ignored and may be used for local recognition/template rendering, but it must never be packaged or committed without independently verified redistribution rights.

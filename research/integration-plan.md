@@ -13,28 +13,26 @@ The new runner is not a wholesale fork. It is a small coordinator with explicit 
 | BasePilot | `https://github.com/efebolukbasi/BasePilot` | `e17c23e88cff58047123d66747c937d3bbf8f815` | `d038e2b99cb440002199aa5a1b9cd64474dda95f` |
 | CoC_Bot | `https://github.com/m24842/CoC_Bot` | `a5c943afed0ed3b9abedbbc228b0889145ecaf24` | `d79368fbe550036f1542883f18434e318016b279` |
 | ClashAutomation | `https://github.com/calebmwelsh/ClashAutomation` | `c41fe12a6df051e241c695b71b6859286e24c612` | `b549901e7ca8b871a17265517d730f0b3c84a618` |
-| Published Clash Rush policy/Home engine | `https://github.com/merlins-grimoire/autoclasher` | `949497bf0a543a43ec6ef39a8c897e366bc10362` | `12ded3ccdb9f27610d9f07fdc7a6ad5b9fd74cc0` |
+| Published Clash Rush historical engine | `https://github.com/merlins-grimoire/autoclasher` | `949497bf0a543a43ec6ef39a8c897e366bc10362` | `12ded3ccdb9f27610d9f07fdc7a6ad5b9fd74cc0` |
 
-The dirty legacy checkout is not a reproducible donor. Only files from the published Clash Rush commit above may be copied directly. That seal includes `builder_base_policy.py`; later uncommitted Builder navigation/reconciliation work is excluded.
+The dirty legacy checkout is not reproducible evidence. Only files from the published Clash Rush commit above may even be considered for reuse, and each candidate must first survive donor comparison plus differential tests. That seal includes `builder_base_policy.py`; later uncommitted Builder navigation/reconciliation work is excluded entirely.
 
 ## Runtime model
 
 ### One live instance, five durable slots
 
-Only one BlueStacks instance runs at a time. One coordinator launches the next configured slot, verifies its process/window/account binding, services Home and Builder Base, returns it to a positively identified safe screen, stops it, and advances the persisted cursor. The other four instances remain stopped.
+Only one BlueStacks instance runs at a time. One coordinator selects the oldest due account, verifies its process/window/account binding, services Home and Builder Base, returns it to a positively identified safe screen, stops it, and commits the queue outcome. The other four instances remain stopped.
 
 This avoids host memory/CPU pressure and removes cross-instance cursor/capture races. Every transaction still obtains fresh evidence after acquiring the instance lease and immediately before input.
 
-### Fair service schedule
+### Due-account service schedule
 
-Use two work queues per account:
-
-`Home[0], Builder[0], Home[1], Builder[1], …, Home[4], Builder[4]`
+Each account has one durable job carrying its due time and pending village lane. The earliest known free builder across Home or Builder Base creates one persisted due time at availability plus a uniform 0–60 minute delay. Select the oldest due account first; for equal deadlines, rotate deterministically from the restart-safe tie cursor.
 
 Each account visit has a hard **10-minute** wall-clock budget. Within that visit, drain all immediately actionable Home and Builder work that can be completed safely. Reserve the first five minutes for Home and the remaining five minutes for Builder so one village cannot consume the other village's opportunity; unfinished work resumes on the next cycle. A transaction-specific continuation may exceed its lane boundary only to reach a safe stopping screen, never the ten-minute account deadline except for fail-closed cleanup. Persist:
 
-- next slot and village lane as one atomic `(slot, lane)` cursor;
-- per-slot readiness/defer time;
+- per-account due time, availability event identity, and pending village lane;
+- a round-robin tie cursor used only among equal oldest deadlines;
 - active battle type and deadline;
 - consecutive failure/quarantine state;
 - current account/tag-digest binding;
@@ -42,6 +40,12 @@ Each account visit has a hard **10-minute** wall-clock budget. Within that visit
 - last successful Home and Builder observations.
 
 A battle must finish or reconcile before rotation. If no safe game screen can be proved, emit no more game input, release every held key/button, terminate only the exact bound emulator process tree, and verify the PID tree and HWNDs disappeared. If shutdown cannot be proved, stop the complete fleet and do not start the next slot.
+
+The due queue is the sole eligibility/ordering authority. Slice 2 explicitly removes Slice 1's `READY.next_slot == selected_slot` launch precondition: while holding the same lifecycle mutex, the scheduler admits any oldest-due selected slot with one unique 32-hex visit nonce, and the lifecycle records that exact slot with `ACTIVE.run_nonce` equal to the admitted nonce before process creation. The migrated start path accepts the admitted nonce instead of generating a competing one; the lifecycle schema does not expand. After verified stop, `READY((slot + 1) % 5)` supplies only the next equal-deadline tie start. `READY` never selects or makes a not-yet-due account eligible, and no second slot/lane cursor exists.
+
+Coordinate the SQLite queue/journal and separate lifecycle file with a write-ahead visit generation and nonce. Admission atomically marks one job `ADMITTED` and inserts its immutable nonce/generation before `ACTIVE`; actions use non-replayable journal states; a successor builder/reconciliation plan is persisted before normal shutdown; verified stop then commits `READY`; and one idempotent SQLite transaction consumes the admitted generation, creates exactly one successor, and finalizes the visit. Slice 2 adds an emergency owned-stop path that proves Job/process/window absence but deliberately leaves blocked `ACTIVE` when successor planning cannot be persisted. Startup under the lifecycle mutex reconciles every open visit against exact `READY/ACTIVE`, `ACTIVE.run_nonce == admitted.visit_nonce`, generation, action outcomes, successor plan, and complete process absence. `READY` before `ACTIVE` may release an unchanged admission only after absence proof; `READY` after a recorded successor plan finalizes it idempotently; matching `ACTIVE` blocks launch and requires lifecycle reconciliation; any mismatch blocks the troop.
+
+Oldest-due applies only to currently eligible jobs. Lane-incomplete or uncertain jobs carry a durable `DEFERRED(reconcile_at)` deadline no later than 60 minutes and retain their original due event; explicit human/safety quarantines remain visible but cannot block other jobs and require captain clearance. This prevents one broken oldest job from freezing the troop without silently skipping or deleting it.
 
 ### Required lifecycle sequence
 
@@ -60,7 +64,7 @@ For every slot, the normal path is exactly:
 ## Component boundaries
 
 ```text
-Operator Setup / Run / Stop / Status entry points
+Operator Setup / Run / Pause / Resume / Stop / Status entry points
   -> five-slot config + internal safety gates + bounds
   -> Fleet coordinator (durable scheduler)
        -> BlueStacks registry (exact process/HWND binding)
@@ -68,7 +72,7 @@ Operator Setup / Run / Stop / Status entry points
        -> Capture adapter (memory-only full frame)
        -> Screen classifier
        -> Home observer -----------+
-       -> Builder observer --------+--> Clash Rush planners
+       -> Builder observer --------+--> selected typed planners
                                       -> typed ActionIntent
        -> Transaction executor <---+
        -> Audit/event store
@@ -95,7 +99,7 @@ Adapt CoC_Bot’s `bluestacks.conf` parsing and named `HD-Player --instance` lau
 
 ### 2. `NativeWindowAdapter`
 
-Adapt ClashAutomation’s controller abstraction, normalized coordinates, and `PrintWindow` capture, but not its unproven CROSVM `PostMessage` transport. Pin the physical foreground-bound BlueStacks gesture implementation to published Clash Rush commit `949497bf0a543a43ec6ef39a8c897e366bc10362`. Required properties:
+Compare BasePilot, ClashAutomation, and the historical published Clash Rush transport, adapting ClashAutomation’s controller abstraction, normalized coordinates, and `PrintWindow` capture but rejecting its unproven CROSVM `PostMessage`. Select a physical foreground-bound BlueStacks gesture seam only after the inert differential transport spike. Required properties:
 
 - no ADB/minitouch imports or subprocess calls;
 - a single coordinator-owned native-input path;
@@ -106,6 +110,12 @@ Adapt ClashAutomation’s controller abstraction, normalized coordinates, and `P
 
 Before any gameplay slice, run a transport spike proving exact BlueStacks capture, focus/binding, click, drag, scroll, hold, and unconditional release on a reversible screen. If the spike fails, stop; do not transplant higher-level donor flows.
 
+#### Target localization policy
+
+Coordinates are the final transport representation, not the primary proof that a button exists. Locate dynamic buttons and screen states with small reviewed templates, color/shape evidence, or restricted OCR, then click the detected control center in normalized render coordinates. A fixed normalized coordinate is allowed only for an owner-calibrated stable HUD/keybind target after the exact screen and render geometry are positively proved; it is never a blind fallback. Verify the expected destination after every click.
+
+Use the operator-provided `private/assets/CCBackBeat.ttf` only for local text rendering/matching where it improves restricted OCR or anchored label verification. The font remains ignored, is never packaged, and cannot replace a positive live control detector by itself.
+
 ### 3. `RecoveryStateMachine`
 
 Adapt BasePilot’s popup, disconnect, battle-result, and delayed-return flows. Every recovery gesture requires a positive source-state detector. Unknown or persistent near-black states are deferred/quarantined rather than clicked through.
@@ -114,7 +124,7 @@ Adapt BasePilot’s popup, disconnect, battle-result, and delayed-return flows. 
 
 #### Home observer
 
-Reuse only published-seal Clash Rush world-export reconciliation and proven Home detectors where possible:
+Compare BasePilot, CoC_Bot, and ClashAutomation first and copy/adapt the largest compatible complete observation seam. Published-seal Clash Rush detectors are historical candidates only and must win differential tests before reuse:
 
 - account/tag binding;
 - builder count;
@@ -131,7 +141,7 @@ Start with CoC_Bot’s separate Builder HUD regions and boat/lab/building vocabu
 - CoC_Bot boat navigation and Star Laboratory/building recognition;
 - BasePilot attack, hero, and return flows, excluding carts/rewards;
 - ClashAutomation deployment geometry only; its timed second deployment is not a stage detector;
-- the published `BuilderBasePlanner`, plus new locally reviewed observation/reconciliation types.
+- the published `BuilderBasePlanner` only as a historical differential-test candidate, plus new locally reviewed observation/reconciliation types.
 
 The two-stage Builder Base state machine has no proven donor. Build it locally with positive first-stage, transition, second-stage, result, and return detectors; never use a timed blind second deployment.
 
@@ -146,9 +156,9 @@ Required state:
 - named candidate buildings with level, cost, and resource;
 - attack readiness and pending first/second stage.
 
-### 5. Clash Rush planners
+### 5. Planner selection and adaptation
 
-Copy only pure policy/model modules from the published Clash Rush seal first; do not transplant live UI orchestration:
+Extract the required strategic-rush behavior as a contract, compare it with the three pinned donors, and copy/adapt the largest compatible licensed policy seam. The following pure modules from the published Clash Rush seal are historical candidates only; do not transplant them or live UI orchestration without differential tests:
 
 - `models.py`
 - `policy.py` and `policy_data.py`
@@ -159,13 +169,13 @@ Copy only pure policy/model modules from the published Clash Rush seal first; do
 - `builder_base_policy.py`
 - mechanically required reconciliation/model helpers
 
-The published `builder_base_policy.py` is a reproducible pure-policy donor. Builder Base navigation and observation reconciliation are not taken from dirty legacy files; implement and review those boundaries in this repository.
+The published `builder_base_policy.py` is reproducible historical evidence, not presumed-correct policy. Builder Base navigation and observation reconciliation are not taken from dirty legacy files; implement and review those boundaries in this repository.
 
 Add one closed adapter type before any executor exists:
 
 `ActionIntent(slot, village, kind, target_id, resource, max_cost, reason_code)`
 
-Adapters translate `RushPlanner`, `cycle.py`, and the published `BuilderBasePlanner` outputs into this exact vocabulary. Unknown recommendation/result types fail closed; planners never call executors directly.
+Adapters translate whichever planner wins the frozen donor/policy contract into this exact vocabulary. Historical `RushPlanner`, `cycle.py`, and `BuilderBasePlanner` outputs are supported only if differential tests justify their selection. Unknown recommendation/result types fail closed; planners never call executors directly.
 
 The planner receives trusted typed observations and returns one typed `ActionIntent`. It never clicks, captures, launches, sleeps, or reads private configuration.
 
@@ -190,7 +200,7 @@ The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_
 
 ### Crash-safe action boundary
 
-Persist a write-ahead transaction record atomically before input: `PLANNED → INTENT_RECORDED → INPUT_STARTED → INPUT_COMPLETED → CONFIRMED|FAILED|UNCERTAIN`. Cursor/lane advancement occurs in the same SQLite transaction as the terminal outcome. On restart:
+Persist a write-ahead transaction record atomically before input: `PLANNED → INTENT_RECORDED → INPUT_STARTED → INPUT_COMPLETED → CONFIRMED|FAILED|UNCERTAIN`. The terminal action outcome and its pending-lane update commit together in SQLite. The equal-deadline tie cursor advances separately and only through the later lifecycle `ACTIVE → READY` transition after verified stop; the write-ahead visit reconciliation protocol bridges those stores. On restart:
 
 - reconcile `INPUT_STARTED`/`INPUT_COMPLETED` from read-only game state;
 - never replay a spend, deployment, or claim whose outcome is uncertain;
@@ -203,15 +213,15 @@ Persist a write-ahead transaction record atomically before input: `PLANNED → I
 |---|---|---|
 | BlueStacks instance discovery/launch | CoC_Bot | Copy structure; remove all ADB fields and commands |
 | Five-instance process inventory | CoC_Bot | Replace independent loops with one coordinator that launches one named instance at a time |
-| Native input transport | Published Clash Rush `949497b…` | Copy the proven foreground-bound BlueStacks path and re-prove it in Slice 1 |
+| Native input transport | BasePilot/ClashAutomation comparison + historical published Clash Rush `949497b…` | Select one foreground-bound physical Windows seam only after an inert differential transport spike; reject ADB and `PostMessage` |
 | Capture/interface/geometry | ClashAutomation | Adapt interface/geometry only; do not assume CROSVM `PostMessage` works on BlueStacks |
-| Home builder menu and walls | BasePilot + published Clash Rush seal | Reuse positive detectors and guarded mechanics |
-| Home attacks | Published Clash Rush seal + ClashAutomation | Keep verified slot geometry and positive scout transitions |
+| Home builder menu and walls | BasePilot first; compare CoC_Bot/ClashAutomation and historical Clash Rush | Copy the largest compatible guarded behavior and re-prove local transaction boundaries |
+| Home attacks | BasePilot + ClashAutomation; historical Clash Rush only as evidence | Copy compatible deployment/transition mechanics but keep local physical input and positive state proof |
 | Popup/reconnect/result recovery | BasePilot | Convert each branch to positive state transitions; omit every reward/claim branch |
 | Builder boat/HUD/build/lab | CoC_Bot | Adapt mechanics to native input and typed observations |
 | Builder battle | BasePilot + local implementation | Reuse guarded deployment/return ideas; build positive two-stage detection locally; exclude cart/rewards |
-| Upgrade decisions | Published Clash Rush seal | Pure reproducible Home and Builder planners only |
-| Scheduler, safety, audit | Published Clash Rush seal | Rebuild cleanly around five slots and two village lanes |
+| Upgrade decisions | Donor comparison + Rush Bible contract | Select/rebuild deterministic Home and Builder policy; historical Clash Rush modules require differential proof |
+| Scheduler, safety, audit | Local implementation | Rebuild cleanly around five slots, two village lanes, and the durable due-account queue |
 
 ## Delivery slices and exit gates
 
@@ -231,19 +241,24 @@ Persist a write-ahead transaction record atomically before input: `PLANNED → I
 - Reject missing, duplicate, stale, or ambiguous bindings.
 - Clean restart preserves slot order.
 
-### Slice 2 — dual-lane dry scheduler
+### Slice 2 — due-account dual-lane dry scheduler
 
-- Emit `H0,B0,H1,B1,…,H4,B4` twice across a restart.
-- Assert lifecycle order `START0,H0,B0,SAFE_HOME,STOP0,START1` and that no two configured emulator processes overlap.
+- Prove non-equal deadlines run strictly oldest-due first, regardless of slot number.
+- Prove five equal due times emit `H0,B0,H1,B1,…,H4,B4` twice across a restart using only the lifecycle tie cursor.
+- Prove the migrated lifecycle start accepts the due-selected slot while `READY.next_slot` differs, and that the latter affects equal-deadline ties only.
+- Prove the admitted visit nonce becomes the exact existing `ACTIVE.run_nonce`, with no lifecycle schema expansion or independently generated competing nonce.
+- Assert each admitted account follows `START,H0,B0,SAFE_HOME,STOP` and that no two configured emulator processes overlap.
 - No native input, ADB, screenshots, or spending.
-- Deferred slot remains explicit and cannot silently disappear.
+- Every not-yet-due, deferred, or lane-incomplete account remains explicit and cannot silently disappear.
 - Global action/failure/wall-clock limits span all slots.
 - Crash after intent, input start, input completion, and outcome persistence never replays a transaction.
+- Crash at every admission/`ACTIVE`/stop/`READY`/successor-finalization boundary deterministically releases, blocks, or finalizes one visit without duplicate work or a lost successor.
+- A successor-plan persistence failure uses the emergency owned-stop proof, leaves exact blocked `ACTIVE`, and cannot expose another admission.
 - Home failure, Builder failure, quarantine, and a limit between lanes preserve a bounded non-starving cursor.
 
 ### Slice 3 — Home observer + one safe transaction
 
-- Import pure Clash Rush Home policy.
+- Compare the three pinned donors, copy/adapt the largest compatible Home observation/policy seam, and use historical Clash Rush code only if differential tests prove it.
 - Observe lab and all builders before planning.
 - Run one owner-approved normal-resource transaction with postcondition and audit.
 - One action cannot monopolize a round.
@@ -270,17 +285,22 @@ Each needs a synthetic test, exact-index privacy scan, independent review, and o
 
 ### Slice 6 — five-account release candidate
 
-- Ship and exercise owner-facing Setup, Run, Stop, and Status commands plus Windows shortcuts/wrappers.
+- Ship and exercise owner-facing Setup, Run, Pause, Resume, Stop, and Status commands plus Windows shortcuts/wrappers.
 - Require no source or JSON edits for ordinary start/stop control after one-time setup.
 - Verify Stop blocks new transactions, releases held input, safely closes the owned instance, and preserves a resumable cursor.
+- Verify Pause reaches the same safe closed-emulator boundary but keeps the scheduler alive and idle until Resume.
 
 - All five slots and both lanes serviced.
 - Per slot: lab checked, builder count checked, planner decision recorded, outcome recorded.
 - Each account stops within ten minutes, with no Home or Builder lane starvation.
 - All immediately actionable work attempted within its lane budget; unfinished work remains durable for the next visit.
 - Every battle has a bounded finish/recovery path before rotation.
-- No full frames retained; no private identifiers in public artifacts.
-- Kill switch returns off after every exit.
+- No full frames retained locally; the only external full-frame path is the separately reviewed blocker-only upload to the exact mapped private Discord account channel.
+- Further transaction admission is automatically revoked after every exit; no owner file edit is required.
+
+## Discord fleet control and due-account scheduling
+
+`research/discord-fleet-control-plan.md` is the binding plan for one dedicated central Discord service, multiple uniquely named five-account troop runners, private per-runner enrollment, explicit troop autocomplete, scoped Troop/Fleet Captain roles, account-channel routing, and the persistent builder-triggered due queue. Discord adapts the same local Setup/Run/Pause/Resume/Stop/Status service and never creates a second lifecycle or scheduler authority.
 
 ## What we will not copy
 
