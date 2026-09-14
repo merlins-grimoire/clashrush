@@ -7,7 +7,7 @@ These gates exist to prevent the regression loops, hidden dependencies, unsafe l
 - The rebuild workspace is the only implementation target.
 - Import source only from sealed donor commits recorded in `research/integration-plan.md`.
 - Never copy an uncommitted legacy file.
-- Copy the smallest complete behavioral seam, including its caller assumptions and tests—not isolated helpers.
+- Copy the largest compatible complete behavioral seam that fits the frozen slice, including its caller assumptions and tests—not isolated helpers or unrelated donor subsystems.
 
 ## 2. Freeze each vertical slice before coding
 
@@ -142,14 +142,21 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 ## 12. Keep live debugging bounded
 
 - No live action before static PASS, independent PASS, and owner approval.
-- Enable the kill switch only for the bounded run; return it to off on every exit.
+- Authorize only the bounded run through the Run command; on every exit, automatically revoke further transaction admission without requiring a file edit.
 - First live failure ends the run and creates one narrow reliability slice.
 - Do not patch and immediately retry live.
 - Compare all three donors before revising mechanics.
+
+## 13. Keep operation owner-simple and donor-first
+
+- Never require the owner to edit source code or a JSON kill-switch to start or stop normal operation.
+- Treat the owner's Run action as bounded runtime authorization; expose Stop and Status as dedicated commands/shortcuts while enforcing internal fail-closed gates automatically.
+- Before implementing a gameplay mechanic, inspect BasePilot, CoC_Bot, and ClashAutomation and copy/adapt the largest compatible, licensed behavioral seam rather than reinventing it.
+- Treat published Clash Rush as unreliable historical first-party evidence, not the default tactical authority. Reuse only narrow code whose assumptions and behavior have been independently re-proved.
 - Use two-to-five-minute diagnostic runs before another full release run.
 - Every diagnostic input gets a red crosshair and narrow before/after reviewed crops; full frames stay memory-only.
 
-## 13. Enforce privacy structurally
+## 14. Enforce privacy structurally
 
 - Runtime writes only beneath ignored `private/` or `var/` roots.
 - Reject other output paths in code.
@@ -157,7 +164,7 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - Scan the exact staged archive before every commit.
 - References and commercial fonts remain ignored and are never packaged.
 
-## 14. Preserve safety policy in code structure
+## 15. Preserve safety policy in code structure
 
 Only explicitly enabled `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR` have executors. Dark Elixir, gems, purchases, fallbacks, rewards, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA behavior have no implementation—not merely disabled flags.
 

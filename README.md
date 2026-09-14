@@ -1,6 +1,6 @@
 # Clash Rush Rebuild
 
-Clean-room comparison workspace for selecting a proven five-account Home Village and Builder Base runner, then integrating the existing Clash Rush strategic-upgrade engine. The host runs one BlueStacks instance at a time and cycles deterministically through five configured slots.
+Clean-room comparison workspace for selecting proven five-account Home Village and Builder Base mechanics, then integrating them behind local safety and transaction controls. The host runs one BlueStacks instance at a time and cycles deterministically through five configured slots.
 
 ## Non-negotiable constraints
 
@@ -14,6 +14,17 @@ Clean-room comparison workspace for selecting a proven five-account Home Village
 - Each account receives one bounded ten-minute visit. The runner completes as much immediately available Home and Builder work as possible, reserves time for both villages, then rotates.
 - The first Builder Base release includes Baby Dragon attacks, Star Laboratory research, and named building upgrades; new-building placement and reward claims remain excluded.
 - Unattended runs require Windows to remain logged in, unlocked, awake, and on a stable display configuration.
+- Normal operation must not require editing Python, JSON, or a kill-switch file. Setup is one-time; starting the installed runner is the owner's explicit authorization for that run, and stopping it uses a dedicated command or shortcut.
+
+## Operator experience contract
+
+The finished runner will expose four obvious operations: **Setup**, **Run**, **Stop**, and **Status**. Setup validates the host and five slots without gameplay. Run starts the bounded unattended cycle with the saved non-secret configuration. Stop requests a safe stop, prevents admission of another transaction, releases held input, closes the currently owned emulator, and leaves a resumable durable cursor. Status is read-only and reports sanitized lifecycle state, slot index, running/stopped state, blocked reason, and last outcome without private names or identifiers. Emergency termination remains fail-closed and must never guess at process ownership.
+
+Internal resource and transaction gates remain mandatory, but the owner will not toggle them by opening a source or configuration file. Initial resource authorization belongs in Setup and can be changed through a command/UI; command-scoped approval flags used during development spikes are not the final everyday interface.
+
+## Donor policy
+
+Behavioral mechanics are donor-first: inspect the pinned BasePilot, CoC_Bot, and ClashAutomation implementations before writing each gameplay slice, copy the complete compatible seam where licensing permits, preserve attribution, and test the adapted behavior. Published Clash Rush is historical first-party evidence—not a presumed-correct tactical donor—because its prior live runner was unreliable. It may supply a narrowly verified local policy or native-input primitive, but every such reuse must be compared with the other pinned references and re-proved in this runner. Unsafe donor transport, account switching, rewards, privacy behavior, or spending shortcuts remain excluded.
 
 ## Layout
 

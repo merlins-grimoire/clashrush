@@ -2,9 +2,9 @@
 
 ## Target outcome
 
-A Windows/BlueStacks runner that keeps five named emulator instances available, services all five fairly, runs Home Village and Builder Base, and delegates upgrade choice to the existing Clash Rush policy engine.
+A Windows/BlueStacks runner that keeps five named emulator instances available, services all five fairly, and runs Home Village and Builder Base using copied/adapted proven donor mechanics behind local safety controls.
 
-The new runner is not a wholesale fork. It is a small coordinator with explicit adapters and copied, attributed mechanics from the three MIT donors.
+The new runner is not a wholesale fork. It is a small coordinator with explicit adapters and copied, attributed mechanics from the three MIT donors. Published Clash Rush is historical first-party evidence and a source of narrow primitives/pure policy only after re-verification; it is not presumed to contain known-good end-to-end tactics.
 
 ## Reproducible source seals
 
@@ -60,8 +60,8 @@ For every slot, the normal path is exactly:
 ## Component boundaries
 
 ```text
-Operator launcher
-  -> five-slot config + kill switches + bounds
+Operator Setup / Run / Stop / Status entry points
+  -> five-slot config + internal safety gates + bounds
   -> Fleet coordinator (durable scheduler)
        -> BlueStacks registry (exact process/HWND binding)
        -> Lifecycle supervisor (start/stop/process-tree proof)
@@ -184,6 +184,8 @@ Each intent executes through:
 9. positive postcondition;
 10. outcome audit and safe-screen recovery.
 
+The owner does not operate these gates by editing files. One-time Setup records explicit non-premium resource authorizations through a command/UI. Starting Run authorizes that bounded run; Stop revokes further transaction admission immediately and performs safe cleanup. Development-only `--owner-approved` flags do not define the release UX.
+
 The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. Each normal-resource type requires explicit owner enablement. `HOME_DARK_ELIXIR`, `GEMS`, real-money purchases, purchase fallbacks, reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA handling have no executor implementation.
 
 ### Crash-safe action boundary
@@ -267,6 +269,10 @@ The first Builder Base release is limited to Baby Dragon attacks, Star Laborator
 Each needs a synthetic test, exact-index privacy scan, independent review, and one bounded owner-approved live transaction.
 
 ### Slice 6 — five-account release candidate
+
+- Ship and exercise owner-facing Setup, Run, Stop, and Status commands plus Windows shortcuts/wrappers.
+- Require no source or JSON edits for ordinary start/stop control after one-time setup.
+- Verify Stop blocks new transactions, releases held input, safely closes the owned instance, and preserves a resumable cursor.
 
 - All five slots and both lanes serviced.
 - Per slot: lab checked, builder count checked, planner decision recorded, outcome recorded.
