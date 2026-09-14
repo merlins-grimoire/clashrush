@@ -89,7 +89,7 @@ Also prove:
 - a global limit between lanes resumes at the correct lane;
 - iteration/failure/time counters never reset during rotation;
 - no runnable lane can be starved indefinitely.
-- non-equal due times run strictly oldest-due first, regardless of slot number, and `READY(next_slot)` acts only as the equal-deadline tie cursor.
+- after schema-v2 migration, non-equal due times run strictly oldest-due first regardless of account order, and `READY(tie_after_account_key, configuration_generation)` acts only as the equal-deadline tie cursor. The sealed v1 `READY(next_slot)` contract remains unchanged and is not used to admit due-selected work.
 
 ## 8. Require a complete per-account visit report
 
@@ -116,6 +116,8 @@ Each account receives ten minutes:
 - unused Home time may be donated to Builder, but Builder always receives an attempt;
 - cleanup may exceed a lane boundary only to reach a safe stopping state;
 - unfinished work persists to the next visit.
+- a positively confirmed free builder at the final observation creates one immediate successor due at visit finish with no random offset; older eligible jobs still run first;
+- only a future builder completion receives one persisted 0–60 minute random offset; unknown final state defers.
 
 ## 10. Build Builder Base in separate proven slices
 
@@ -156,6 +158,8 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - Treat published Clash Rush as unreliable historical first-party evidence, not the default tactical authority. Reuse only narrow code whose assumptions and behavior have been independently re-proved.
 - Use two-to-five-minute diagnostic runs before another full release run.
 - Every diagnostic input gets a red crosshair and narrow before/after reviewed crops. Full frames stay memory-only except for the separately reviewed blocker-only Discord upload to an exact private account channel.
+- Diagnostic mode is explicitly bounded, auto-disables on exit, and may show a non-recording full-frame local preview plus approved OCR crop/value/confidence panels. Only reviewed narrow crops may persist under ignored `var/debug/` with bounded retention.
+- “Approved crop” means an entry in a sealed manifest binding crop ID, source screen, normalized ROI, maximum dimensions, preprocessing, and permitted closed/numeric output grammar. Arbitrary ROIs and raw OCR text never enter logs or Discord panels.
 
 ## 14. Enforce privacy structurally
 
@@ -166,8 +170,24 @@ Never copy ClashAutomation’s blind timed second deployment. New-building place
 - References and commercial fonts remain ignored and are never packaged.
 - Actual Discord guild/category/channel/role/user IDs, troop assignments, runner credentials, account mappings, and bot credentials remain under ignored private roots or the operating-system credential store. Public schemas use placeholders only.
 - A blocker screenshot may leave memory only through the explicit Discord exception: exact mapped private account channel, immediate destination revalidation, restricted captain mentions, no local persistence, and no fallback destination.
+- An optional OCR diagnostic panel may accompany that blocker only when its narrow-crop manifest was prepared before upload; neither attachment may be retried or recaptured after an ambiguous send.
+- Guided Setup writes real topology only to ignored private configuration, stores token values in the OS credential store, and activates versioned configurations only at a stopped clean boundary. Public examples contain synthetic placeholders and secret references only.
 
-## 15. Preserve safety policy in code structure
+## 15. Serialize physical input across the host
+
+- Multiple logical runners on one computer share one fair host-wide visit arbiter.
+- The lease spans launch through verified stop and final durable commit; another runner cannot foreground/click or keep another player alive during it.
+- Abandoned lease, unexpected player, focus loss, locked desktop, ownership mismatch, or stop-proof failure blocks every local runner.
+- True concurrent automation requires separate hosts or independently validated interactive sessions; multiple windows do not create independent physical cursors.
+
+## 16. Quarantine and blocker responses are state machines
+
+- `/quarantine` targets one immutable account key, preserves due/pending state, and prevents every new `INPUT_STARTED`; an admitted action finishes only reconciliation/release/safe stop before entering quarantine.
+- `/unquarantine` restores preserved eligibility but never starts Run or authorizes spending.
+- Each blocker generation exposes only a compiled class-specific action set. First authorized terminal response wins; unsupported, duplicate-conflicting, free-text, stale-generation, or unsafe retry requests fail closed.
+- Lifecycle, identity, CAPTCHA, stop-proof, and uncertain spend/deployment blockers cannot be resumed or retried through Discord.
+
+## 17. Preserve safety policy in code structure
 
 Only explicitly enabled `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR` have executors. Dark Elixir, gems, purchases, fallbacks, rewards, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA behavior have no implementation—not merely disabled flags.
 
@@ -176,11 +196,11 @@ Only explicitly enabled `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER
 The rebuild is done only when:
 
 - a clean install exposes and exercises Setup, Run, Pause, Resume, Stop, and Status without source/config kill-switch edits;
-- exactly five private slots remain durably scheduled oldest-due-first, using restart-safe round-robin only for equal deadlines, with one emulator at a time;
+- the frozen exact-five foundation remains reproducible and its separately promoted schema-v2 migration schedules every configured account oldest-due-first, using restart-safe round-robin only for equal deadlines, with one emulator per host;
 - Home and Builder Base are serviced for every slot;
 - labs and all available builders are checked and actionable work is attempted within budget;
 - attacks deploy every configured card and Builder Stage 2 is positively detected;
 - crash/restart tests prove no duplicate spend or deployment;
-- bounded live evidence passes for all five slots;
+- bounded live evidence passes for every account in the promoted configuration (including the current exact-five v1 proof);
 - local builder-due queues survive restarts and multi-runner Discord routing cannot cross troop or account channels;
 - the exact published archive passes tests, privacy scan, and independent release review.

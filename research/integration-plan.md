@@ -2,7 +2,7 @@
 
 ## Target outcome
 
-A Windows/BlueStacks runner that keeps five named emulator instances available, services all five fairly, and runs Home Village and Builder Base using copied/adapted proven donor mechanics behind local safety controls.
+A Windows/BlueStacks runner that services a configured troop fairly and runs Home Village and Builder Base using copied/adapted proven donor mechanics behind local safety controls. The already-reviewed inert foundation remains exact-five; variable cardinality enters only through a separately tested schema-v2 migration.
 
 The new runner is not a wholesale fork. It is a small coordinator with explicit adapters and copied, attributed mechanics from the three MIT donors. Published Clash Rush is historical first-party evidence and a source of narrow primitives/pure policy only after re-verification; it is not presumed to contain known-good end-to-end tactics.
 
@@ -19,15 +19,15 @@ The dirty legacy checkout is not reproducible evidence. Only files from the publ
 
 ## Runtime model
 
-### One live instance, five durable slots
+### One live instance per host, configured durable accounts
 
-Only one BlueStacks instance runs at a time. One coordinator selects the oldest due account, verifies its process/window/account binding, services Home and Builder Base, returns it to a positively identified safe screen, stops it, and commits the queue outcome. The other four instances remain stopped.
+Only one BlueStacks instance runs on a Windows host at a time. One host-wide arbiter grants a complete visit lease spanning discovery, launch, input, safe stop, absence proof, and final commit. Multiple logical troop runners on the same computer may schedule independently but cannot click or keep separate players alive concurrently; physical foreground input has one global cursor and target. Runners on different computers may operate concurrently.
 
 This avoids host memory/CPU pressure and removes cross-instance cursor/capture races. Every transaction still obtains fresh evidence after acquiring the instance lease and immediately before input.
 
 ### Due-account service schedule
 
-Each account has one durable job carrying its due time and pending village lane. The earliest known free builder across Home or Builder Base creates one persisted due time at availability plus a uniform 0–60 minute delay. Select the oldest due account first; for equal deadlines, rotate deterministically from the restart-safe tie cursor.
+Each account has one durable job carrying its due time and pending village lane. A future builder completion creates one persisted due time at availability plus a uniform 0–60 minute delay. Select the oldest due account first; for equal deadlines, rotate deterministically from the restart-safe tie cursor. After a ten-minute visit, a final positive observation that any builder remains free creates an immediate successor due at visit finish with no random offset and a fresh ordering timestamp, so older waiting accounts still go first. Unknown final builder state is deferred, never guessed.
 
 Each account visit has a hard **10-minute** wall-clock budget. Within that visit, drain all immediately actionable Home and Builder work that can be completed safely. Reserve the first five minutes for Home and the remaining five minutes for Builder so one village cannot consume the other village's opportunity; unfinished work resumes on the next cycle. A transaction-specific continuation may exceed its lane boundary only to reach a safe stopping screen, never the ten-minute account deadline except for fail-closed cleanup. Persist:
 
@@ -38,10 +38,11 @@ Each account visit has a hard **10-minute** wall-clock budget. Within that visit
 - current account/tag-digest binding;
 - Home wall-batch progress;
 - last successful Home and Builder observations.
+- per-account audit event cursor, blocker/quarantine generation, and diagnostic-retention metadata.
 
 A battle must finish or reconcile before rotation. If no safe game screen can be proved, emit no more game input, release every held key/button, terminate only the exact bound emulator process tree, and verify the PID tree and HWNDs disappeared. If shutdown cannot be proved, stop the complete fleet and do not start the next slot.
 
-The due queue is the sole eligibility/ordering authority. Slice 2 explicitly removes Slice 1's `READY.next_slot == selected_slot` launch precondition: while holding the same lifecycle mutex, the scheduler admits any oldest-due selected slot with one unique 32-hex visit nonce, and the lifecycle records that exact slot with `ACTIVE.run_nonce` equal to the admitted nonce before process creation. The migrated start path accepts the admitted nonce instead of generating a competing one; the lifecycle schema does not expand. After verified stop, `READY((slot + 1) % 5)` supplies only the next equal-deadline tie start. `READY` never selects or makes a not-yet-due account eligible, and no second slot/lane cursor exists.
+The due queue is the sole eligibility/ordering authority only after schema v2 is promoted. The reviewed exact-five v1 `LifecycleSupervisor.start` remains sealed with its `READY.next_slot == selected_slot` authorization and does not admit due-selected work. A stopped-only migration creates a new versioned `start_admitted(account_key, configuration_generation, visit_nonce)` boundary; it accepts an oldest-due account while holding the lifecycle mutex and writes matching schema-v2 `ACTIVE` before process creation. After verified stop, the v2 `READY` account-key cursor supplies only the next equal-deadline tie start. It never selects or makes a not-yet-due account eligible, and no second account/lane cursor exists.
 
 Coordinate the SQLite queue/journal and separate lifecycle file with a write-ahead visit generation and nonce. Admission atomically marks one job `ADMITTED` and inserts its immutable nonce/generation before `ACTIVE`; actions use non-replayable journal states; a successor builder/reconciliation plan is persisted before normal shutdown; verified stop then commits `READY`; and one idempotent SQLite transaction consumes the admitted generation, creates exactly one successor, and finalizes the visit. Slice 2 adds an emergency owned-stop path that proves Job/process/window absence but deliberately leaves blocked `ACTIVE` when successor planning cannot be persisted. Startup under the lifecycle mutex reconciles every open visit against exact `READY/ACTIVE`, `ACTIVE.run_nonce == admitted.visit_nonce`, generation, action outcomes, successor plan, and complete process absence. `READY` before `ACTIVE` may release an unchanged admission only after absence proof; `READY` after a recorded successor plan finalizes it idempotently; matching `ACTIVE` blocks launch and requires lifecycle reconciliation; any mismatch blocks the troop.
 
@@ -65,7 +66,7 @@ For every slot, the normal path is exactly:
 
 ```text
 Operator Setup / Run / Pause / Resume / Stop / Status entry points
-  -> five-slot config + internal safety gates + bounds
+  -> versioned 1–10-account config (v1 remains exact-five) + internal safety gates + bounds
   -> Fleet coordinator (durable scheduler)
        -> BlueStacks registry (exact process/HWND binding)
        -> Lifecycle supervisor (start/stop/process-tree proof)
@@ -173,7 +174,7 @@ The published `builder_base_policy.py` is reproducible historical evidence, not 
 
 Add one closed adapter type before any executor exists:
 
-`ActionIntent(slot, village, kind, target_id, resource, max_cost, reason_code)`
+`ActionIntent(account_key, configuration_generation, village, kind, target_id, resource, max_cost, reason_code)`
 
 Adapters translate whichever planner wins the frozen donor/policy contract into this exact vocabulary. Historical `RushPlanner`, `cycle.py`, and `BuilderBasePlanner` outputs are supported only if differential tests justify their selection. Unknown recommendation/result types fail closed; planners never call executors directly.
 
@@ -196,7 +197,13 @@ Each intent executes through:
 
 The owner does not operate these gates by editing files. One-time Setup records explicit non-premium resource authorizations through a command/UI. Starting Run authorizes that bounded run; Stop revokes further transaction admission immediately and performs safe cleanup. Development-only `--owner-approved` flags do not define the release UX.
 
-The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. Each normal-resource type requires explicit owner enablement. `HOME_DARK_ELIXIR`, `GEMS`, real-money purchases, purchase fallbacks, reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA handling have no executor implementation.
+The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. Each normal-resource type requires explicit owner enablement. `HOME_DARK_ELIXIR`, `GEMS`, real-money purchases, purchase fallbacks, reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA handling have no executor in the initial release. Donations and the daily resource cart are separate post-production slices in `research/production-backlog.md`, never recovery side effects.
+
+### Observability and diagnostic mode
+
+Normal operation writes structured per-troop and per-account events beneath ignored `var/`: configuration generation, a random 128-bit `account_ref` generated once by Setup and never derived from a name/tag/instance, visit/action nonce, screen/detector/reason code, normalized intended target, state transition, timing, and confirmed/failed/uncertain outcome. The private configuration maps `account_ref` to the account key; Status and exported support bundles expose the opaque reference only. Logs never record tokens, private names/IDs, paths, PIDs/HWNDs, raw OCR, pixels, full-frame digests, or exception locals. Audit-intent failure prevents input; audit failure after input leaves the action uncertain and blocks replay.
+
+An explicit two-to-five-minute diagnostic run enables a non-focus-stealing local preview with transient full frame, red crosshair/target bounds, account/lifecycle/instance timers, and NX-inspired OCR panels. A sealed diagnostic manifest allowlists each crop ID, screen state, normalized ROI, maximum dimensions, preprocessing pipeline, and permitted output grammar (closed reason/state vocabulary or bounded numeric value plus confidence); arbitrary user ROIs and raw OCR text cannot be persisted or uploaded. Full frames remain memory-only. Optional retained before/after evidence is limited to those reviewed narrow crops under ignored `var/debug/` with bounded retention. A blocker may include one optional in-memory OCR panel in its predeclared Discord attachment manifest; ambiguous delivery never retries or recaptures that generation.
 
 ### Crash-safe action boundary
 
@@ -221,7 +228,9 @@ Persist a write-ahead transaction record atomically before input: `PLANNED → I
 | Builder boat/HUD/build/lab | CoC_Bot | Adapt mechanics to native input and typed observations |
 | Builder battle | BasePilot + local implementation | Reuse guarded deployment/return ideas; build positive two-stage detection locally; exclude cart/rewards |
 | Upgrade decisions | Donor comparison + Rush Bible contract | Select/rebuild deterministic Home and Builder policy; historical Clash Rush modules require differential proof |
-| Scheduler, safety, audit | Local implementation | Rebuild cleanly around five slots, two village lanes, and the durable due-account queue |
+| Scheduler, safety, audit | Local implementation | Rebuild around configured stable account keys, two village lanes, and the durable due-account queue; preserve exact-five v1 migration evidence |
+| Operator preview/dashboard concepts | NX-ClashClient `e4c79fd…` | Clean-room only: no license grant; adopt information architecture and OCR-preview behavior, not code/input/storage |
+| API/CWL/rankings/donation counters | Official API; ClashKing references | Read-only central adapter; never a builder/action authority |
 
 ## Delivery slices and exit gates
 
@@ -241,12 +250,22 @@ Persist a write-ahead transaction record atomically before input: `PLANNED → I
 - Reject missing, duplicate, stale, or ambiguous bindings.
 - Clean restart preserves slot order.
 
+### Slice 1b — configurable lifecycle migration
+
+- Preserve the exact-five Slice 1 implementation, state, `start`, tests, and proof unchanged.
+- While stopped with full player absence and no open visit/action/blocker delivery, migrate v1 indexes to stable account keys bound to one active configuration generation.
+- Add a separate schema-v2 `start_admitted` boundary; do not reuse or weaken the sealed v1 `start` authorization.
+- Accept 1–10 configured accounts, default five, deriving cardinality from the account array and rejecting zero or a separate count.
+- Cover `N=1`, `N=2`, `N=5`, `N=10`, resize/reorder, restart, equal-deadline fairness, unsafe removal, and every migration crash seam.
+- Adding/removing/reordering creates a new generation and fails while an affected account has admitted, uncertain, blocked, or unarchived state.
+- Stage immutable configuration plus the operative schema-v2 mutable lifecycle file, bind the configuration hash and initial lifecycle-seed hash in a durable migration intent, and atomically switch one write-through active-generation pointer as the sole commit point. The pointer permanently binds the immutable configuration hash and lifecycle path/schema/generation—not mutable lifecycle bytes. Before normal admission, migration recovery verifies the seed once; afterward the selected lifecycle changes only through its guarded write-through protocol. Startup deterministically retains v1 before the pointer, selects v2 after it, and blocks every path/hash/generation/absence ambiguity.
+
 ### Slice 2 — due-account dual-lane dry scheduler
 
 - Prove non-equal deadlines run strictly oldest-due first, regardless of slot number.
 - Prove five equal due times emit `H0,B0,H1,B1,…,H4,B4` twice across a restart using only the lifecycle tie cursor.
-- Prove the migrated lifecycle start accepts the due-selected slot while `READY.next_slot` differs, and that the latter affects equal-deadline ties only.
-- Prove the admitted visit nonce becomes the exact existing `ACTIVE.run_nonce`, with no lifecycle schema expansion or independently generated competing nonce.
+- Prove schema-v2 `start_admitted` accepts the due-selected account while `READY.tie_after_account_key` names another account, and that the cursor affects equal-deadline ties only.
+- Prove the admitted visit nonce becomes the exact schema-v2 `ACTIVE.run_nonce`, with no independently generated competing nonce.
 - Assert each admitted account follows `START,H0,B0,SAFE_HOME,STOP` and that no two configured emulator processes overlap.
 - No native input, ADB, screenshots, or spending.
 - Every not-yet-due, deferred, or lane-incomplete account remains explicit and cannot silently disappear.
@@ -254,7 +273,9 @@ Persist a write-ahead transaction record atomically before input: `PLANNED → I
 - Crash after intent, input start, input completion, and outcome persistence never replays a transaction.
 - Crash at every admission/`ACTIVE`/stop/`READY`/successor-finalization boundary deterministically releases, blocks, or finalizes one visit without duplicate work or a lost successor.
 - A successor-plan persistence failure uses the emergency owned-stop proof, leaves exact blocked `ACTIVE`, and cannot expose another admission.
+- A positively free builder at visit end produces one immediate fair-tail successor without a random offset; a future completion keeps one persisted 0–60 minute offset; unknown state defers.
 - Home failure, Builder failure, quarantine, and a limit between lanes preserve a bounded non-starving cursor.
+
 
 ### Slice 3 — Home observer + one safe transaction
 
@@ -290,9 +311,9 @@ Each needs a synthetic test, exact-index privacy scan, independent review, and o
 - Verify Stop blocks new transactions, releases held input, safely closes the owned instance, and preserves a resumable cursor.
 - Verify Pause reaches the same safe closed-emulator boundary but keeps the scheduler alive and idle until Resume.
 
-- All five slots and both lanes serviced.
+- Every configured account and both lanes serviced.
 - Per slot: lab checked, builder count checked, planner decision recorded, outcome recorded.
-- Each account stops within ten minutes, with no Home or Builder lane starvation.
+- Each account stops within ten minutes, with no Home or Builder lane starvation; a remaining free builder requeues immediately behind already older eligible work.
 - All immediately actionable work attempted within its lane budget; unfinished work remains durable for the next visit.
 - Every battle has a bounded finish/recovery path before rotation.
 - No full frames retained locally; the only external full-frame path is the separately reviewed blocker-only upload to the exact mapped private Discord account channel.
@@ -300,14 +321,15 @@ Each needs a synthetic test, exact-index privacy scan, independent review, and o
 
 ## Discord fleet control and due-account scheduling
 
-`research/discord-fleet-control-plan.md` is the binding plan for one dedicated central Discord service, multiple uniquely named five-account troop runners, private per-runner enrollment, explicit troop autocomplete, scoped Troop/Fleet Captain roles, account-channel routing, and the persistent builder-triggered due queue. Discord adapts the same local Setup/Run/Pause/Resume/Stop/Status service and never creates a second lifecycle or scheduler authority.
+`research/discord-fleet-control-plan.md` is the binding plan for one dedicated central Discord service, multiple uniquely named 1–10-account troop runners after schema-v2 promotion, private per-runner enrollment, explicit troop/account autocomplete, scoped Troop/Fleet Captain roles, account-channel routing, and the persistent builder-triggered due queue. Discord adapts the same local Setup/Run/Pause/Resume/Stop/Status service and never creates a second lifecycle or scheduler authority.
 
 ## What we will not copy
 
 - CoC_Bot ADB/minitouch, external Groq OCR, unauthenticated web server, random upgrades, blind collection grid, forced app restart completion, or independent endless workers.
 - ClashAutomation first-window binding, coordinate account switching, fixed-offset confirmation fallbacks, recursive long passes, or unwired Builder lab behavior.
 - BasePilot Supercell-ID switching, random input jitter, blind chest taps, full-frame debug persistence, or recovered/decompiled scheduler code.
+- NX-ClashClient source (unlicensed), PostMessage/ADB transport, random/blind deployment/recovery, cloud frames, unsafe wall/donation executors, tracked secrets, or full-frame debug persistence.
 
 ## Immediate build recommendation
 
-Begin with **Slice 1**, adapting only CoC_Bot’s BlueStacks registry into a new typed, read-only module. Do not copy attacks or upgrades yet. The first executable artifact should list five sanitized slot indexes with verified process/window bindings and emit no game input.
+Finish the separately reviewed sanitized `WINDOW_BINDING` diagnostic and owner-controlled reconciliation of the current blocked exact-five Slice 1 before implementing schema v2, the scheduler, Discord, or gameplay. No further BlueStacks launch is authorized by this plan change.

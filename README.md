@@ -1,13 +1,13 @@
 # Clash Rush Rebuild
 
-Clean-room comparison workspace for selecting proven five-account Home Village and Builder Base mechanics, then integrating them behind local safety and transaction controls. Each troop runner manages exactly five configured slots, selects deterministically from a persisted due queue, and runs one local BlueStacks instance at a time.
+Clean-room comparison workspace for selecting proven Home Village and Builder Base mechanics, then integrating them behind local safety and transaction controls. The promoted Slice 1 is intentionally frozen to exactly five slots; a later reviewed schema-v2 migration makes troop cardinality configurable while preserving that proof. Each runner selects deterministically from a persisted due queue and the entire Windows host permits only one active BlueStacks visit at a time.
 
 ## Non-negotiable constraints
 
 - Native Windows/BlueStacks input only; no ADB.
-- Exactly five configured accounts with deterministic, restart-safe oldest-due scheduling and round-robin tie-breaking.
+- The current Slice 1 requires exactly five configured accounts. A later explicit schema-v2 migration supports 1–10 accounts per troop (Setup defaults to five), never a silent reinterpretation of reviewed state.
 - Home Village and Builder Base must both be first-class modes.
-- Never spend gems, make purchases, claim irreversible rewards, use chat/clan/war/donations, switch Supercell accounts, evade detection, or bypass CAPTCHA.
+- Never spend gems, make purchases, claim irreversible rewards, use chat/clan/war/donations, switch Supercell accounts, evade detection, or bypass CAPTCHA in the initial production release. Cart and donation automation remain separately governed backlog slices.
 - Private account names, player tags, tag hashes, calibration data, traces, and machine paths stay local and ignored. Full frames remain memory-only except for the separately reviewed blocker-only Discord upload authorized in `research/discord-fleet-control-plan.md`; no private material enters public artifacts.
 - Home Gold, Home Elixir, Builder Gold, and Builder Elixir each require explicit owner enablement, kill switches, bounded runs, and transaction verification. Dark Elixir and gems remain disabled.
 - Private files may be written only beneath ignored `private/` or `var/` roots; runtime path validation will reject every other destination.
@@ -18,7 +18,7 @@ Clean-room comparison workspace for selecting proven five-account Home Village a
 
 ## Operator experience contract
 
-The finished runner will expose six obvious operations: **Setup**, **Run**, **Pause**, **Resume**, **Stop**, and **Status**. Setup validates the host and five slots without gameplay. Run starts the bounded unattended scheduler with the saved non-secret configuration. Pause finishes the admitted transaction safely, closes the owned emulator, and idles until Resume. Stop performs the same safe boundary and exits until Run. Status is read-only and reports sanitized lifecycle state, slot index, running/stopped state, blocked reason, and last outcome without private names or identifiers. Emergency termination remains fail-closed and must never guess at process ownership.
+The finished runner will expose six obvious operations: **Setup**, **Run**, **Pause**, **Resume**, **Stop**, and **Status**. Guided Setup collects topology once, writes `private/installation.toml`, stores token values in Windows Credential Manager, and validates the configured account/channel/BlueStacks bindings without gameplay. Run starts the bounded unattended scheduler. Pause finishes the admitted transaction safely, closes the owned emulator, and idles until Resume. Stop performs the same safe boundary and exits until Run. Status is read-only and reports sanitized lifecycle, queue, instance, timer, blocker, and last-outcome data without private names, IDs, paths, or secrets. Emergency termination remains fail-closed and must never guess at process ownership.
 
 Internal resource and transaction gates remain mandatory, but the owner will not toggle them by opening a source or configuration file. Initial resource authorization belongs in Setup and can be changed through a command/UI; command-scoped approval flags used during development spikes are not the final everyday interface.
 
@@ -32,6 +32,9 @@ Behavioral mechanics are donor-first: inspect the pinned BasePilot, CoC_Bot, and
 - `research/runner-comparison.md` — evidence-based comparison and recommendation.
 - `research/integration-plan.md` — architecture for donor-backed Home Village and Builder Base behavior.
 - `research/discord-fleet-control-plan.md` — multi-runner Discord commands, role scoping, private channel routing, and builder-due scheduling.
+- `research/ecosystem-assessment.md` — cited official-API, Discord, asset, GitHub-topic, and NX-ClashClient decisions.
+- `research/production-backlog.md` — sequenced observability, CWL/stats, deployment, donation, and cart work.
+- `config/installation.example.toml` — synthetic public example for the future guided Setup schema; it contains no working IDs or credentials.
 - `research/delivery-guardrails.md` — binding anti-regression, verification, privacy, and live-test gates.
 - `research/slice-1-contract.md` — frozen inert lifecycle scope and exit gate.
 - `src/clash_rush_rebuild/` — exact-five registry, crash-durable `READY`/`ACTIVE` lifecycle state, protected host-wide mutex, Job-owned lifecycle supervisor, memory-only capture health, and native Windows adapters.

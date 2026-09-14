@@ -1,0 +1,89 @@
+# Public installation example for the planned guided Setup flow.
+# Setup writes real topology to ignored private/installation.toml.
+# Secrets are entered in Setup and stored in Windows Credential Manager;
+# this file contains secret references only, never token values.
+
+schema = 2
+installation_name = "EXAMPLE_INSTALLATION"
+
+[central]
+enabled = true
+public_url = "https://control.example.invalid"
+discord_bot_secret_ref = "credential://clash-rush/discord-bot"
+clash_api_secret_ref = "credential://clash-rush/supercell-api"
+
+[central.discord]
+guild_id = "GUILD_ID_HERE"
+troop_captain_role_id = "TROOP_CAPTAIN_ROLE_ID_HERE"
+fleet_captain_role_id = "FLEET_CAPTAIN_ROLE_ID_HERE"
+
+[central.authorizations]
+# Setup resolves mentions to immutable IDs and writes the private values here.
+fleet_captain_user_ids = ["FLEET_CAPTAIN_USER_ID_HERE"]
+
+# Each CWL policy is disabled by default. Setup validates the exact channel and
+# Mention Everyone permission before allowing mention_mode = "everyone".
+[[central.cwl_policies]]
+clan_tag = "#EXAMPLE"
+channel_id = "CWL_CHANNEL_ID_HERE"
+enabled = false
+mention_mode = "none" # none | role | everyone
+mention_role_id = "CWL_MENTION_ROLE_ID_HERE" # required only for role
+reminder_minutes = [360, 120, 30]
+cooldown_minutes = 120
+
+[[troops]]
+key = "example-troop"
+display_name = "Example Troop"
+category_id = "TROOP_CATEGORY_ID_HERE"
+operations_channel_id = "OPERATIONS_CHANNEL_ID_HERE"
+runner_url = "wss://runner.example.invalid"
+runner_secret_ref = "credential://clash-rush/runner/example-troop"
+captain_user_ids = ["TROOP_CAPTAIN_USER_ID_HERE"]
+
+[troops.resources]
+# Setup requires four independent explicit choices. Discord cannot change them.
+home_gold_enabled = false
+home_elixir_enabled = false
+builder_gold_enabled = false
+builder_elixir_enabled = false
+
+[troops.debug]
+enabled = false
+ocr_live_preview = true
+persist_narrow_crops = false
+crop_retention_hours = 24
+
+# Troop size is derived from the number of account entries. There is no second
+# troop_size field that can disagree with the array. Schema v2 accepts 1–10
+# accounts (default five in Setup). The implemented Slice 1 remains exactly
+# five; variable cardinality is a later schema-v2 slice.
+[[troops.accounts]]
+key = "account-01"
+account_ref = "GENERATED_128_BIT_ACCOUNT_REF_01"
+bluestacks_display_name = "EXAMPLE_INSTANCE_01"
+discord_channel_id = "ACCOUNT_01_CHANNEL_ID_HERE"
+
+[[troops.accounts]]
+key = "account-02"
+account_ref = "GENERATED_128_BIT_ACCOUNT_REF_02"
+bluestacks_display_name = "EXAMPLE_INSTANCE_02"
+discord_channel_id = "ACCOUNT_02_CHANNEL_ID_HERE"
+
+[[troops.accounts]]
+key = "account-03"
+account_ref = "GENERATED_128_BIT_ACCOUNT_REF_03"
+bluestacks_display_name = "EXAMPLE_INSTANCE_03"
+discord_channel_id = "ACCOUNT_03_CHANNEL_ID_HERE"
+
+[[troops.accounts]]
+key = "account-04"
+account_ref = "GENERATED_128_BIT_ACCOUNT_REF_04"
+bluestacks_display_name = "EXAMPLE_INSTANCE_04"
+discord_channel_id = "ACCOUNT_04_CHANNEL_ID_HERE"
+
+[[troops.accounts]]
+key = "account-05"
+account_ref = "GENERATED_128_BIT_ACCOUNT_REF_05"
+bluestacks_display_name = "EXAMPLE_INSTANCE_05"
+discord_channel_id = "ACCOUNT_05_CHANNEL_ID_HERE"
