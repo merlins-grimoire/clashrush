@@ -33,6 +33,7 @@ Behavioral mechanics are donor-first: inspect the pinned BasePilot, CoC_Bot, and
 - `research/integration-plan.md` — architecture for donor-backed Home Village and Builder Base behavior.
 - `research/discord-fleet-control-plan.md` — multi-runner Discord commands, role scoping, private channel routing, and builder-due scheduling.
 - `research/discord-control-protocol.md` — frozen central-service/runner command, acknowledgement, expiry, epoch, generation, and idempotency contract.
+- `research/runner-enrollment.md` — one-time private enrollment, revocable Team-bound runner credentials, and authenticated outbound channel contract.
 - `research/ecosystem-assessment.md` — cited official-API, Discord, asset, GitHub-topic, and NX-ClashClient decisions.
 - `research/additional-donor-assessment.md` — pinned coc-bot, Auto Farmer, updated BasePilot, and saved NX source-level findings.
 - `research/production-backlog.md` — sequenced observability, CWL/stats, deployment, donation, and cart work.

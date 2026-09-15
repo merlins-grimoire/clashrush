@@ -54,7 +54,7 @@ Run/Resume (`RUNNING`) are rejected while the runner is offline. Pause/Stop desi
 
 ## Runner durability and idempotency
 
-DIS2 will authenticate the outbound connection before this protocol is accepted. Authentication itself is outside this module. For an authenticated delivery, the runner:
+`runner_enrollment.py` authenticates and revalidates the exact outbound channel before this protocol is accepted; its frozen contract is documented in `research/runner-enrollment.md`. Authentication remains outside this module. For an authenticated delivery, the runner:
 
 1. Strictly decodes the canonical command and compares exact Team key and active configuration generation.
 2. Revalidate the command's exact Team key and configuration generation against the active runner identity on every delivery. If they match and the command ID exactly matches its current applied command with every immutable field unchanged, return a byte-equivalent fresh copy of the stored acknowledgement even after command expiry. It performs no second persistence or downstream handoff. The outbound acknowledgement and its nested identity values never alias the persisted command or persisted acknowledgement. An old-Team or old-generation duplicate rejects instead of replaying an `APPLIED` acknowledgement into a different active identity.
