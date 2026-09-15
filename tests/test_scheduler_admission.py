@@ -197,7 +197,7 @@ def test_lifecycle_failure_leaves_one_durable_admission_for_reconciliation(
         assert store.load(CONFIGURATION)[0].state is QueueState.ADMITTED
 
 
-def test_known_version_one_database_migrates_without_changing_jobs(tmp_path: Path) -> None:
+def test_known_version_one_database_migrates_to_current_without_changing_jobs(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.sqlite3"
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -210,7 +210,7 @@ def test_known_version_one_database_migrates_without_changing_jobs(tmp_path: Pat
         assert store.load_admitted_visits() == ()
 
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (3,)
     connection.close()
 
 

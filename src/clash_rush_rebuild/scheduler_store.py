@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import sqlite3
@@ -24,9 +25,18 @@ from .scheduler_contract import (
     admit,
     select_oldest_eligible,
 )
+from .scheduler_journal import (
+    REPLAYABLE_ACTION_STATES,
+    TERMINAL_ACTION_STATES,
+    ActionState,
+    JournalAction,
+    SchedulerJournalError,
+    require_pristine_action,
+    transition_action,
+)
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _CREATE_JOBS_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_jobs (
     account_key TEXT NOT NULL,
@@ -66,6 +76,46 @@ CREATE TABLE IF NOT EXISTS scheduler_visits (
     FOREIGN KEY(account_key, configuration_generation, job_generation)
         REFERENCES scheduler_jobs(account_key, configuration_generation, job_generation)
         DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_ACTIONS_SQL = """
+CREATE TABLE IF NOT EXISTS scheduler_actions (
+    action_generation INTEGER PRIMARY KEY CHECK(action_generation > 0),
+    action_nonce TEXT NOT NULL UNIQUE CHECK(
+        length(action_nonce) = 32 AND action_nonce NOT GLOB '*[^0-9a-f]*'
+    ),
+    intent_fingerprint TEXT NOT NULL UNIQUE CHECK(
+        length(intent_fingerprint) = 64
+        AND intent_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    visit_generation INTEGER NOT NULL CHECK(visit_generation > 0),
+    visit_nonce TEXT NOT NULL CHECK(
+        length(visit_nonce) = 32 AND visit_nonce NOT GLOB '*[^0-9a-f]*'
+    ),
+    lane TEXT NOT NULL CHECK(lane IN ('HOME', 'BUILDER')),
+    lane_snapshot TEXT NOT NULL CHECK(
+        lane_snapshot IN ('HOME', 'BUILDER') AND lane_snapshot = lane
+    ),
+    binding_seal TEXT NOT NULL CHECK(
+        length(binding_seal) = 64 AND binding_seal NOT GLOB '*[^0-9a-f]*'
+    ),
+    open_singleton INTEGER UNIQUE CHECK(open_singleton IS NULL OR open_singleton = 1),
+    input_started INTEGER NOT NULL CHECK(input_started IN (0, 1)),
+    input_completed INTEGER NOT NULL CHECK(input_completed IN (0, 1)),
+    state TEXT NOT NULL CHECK(state IN (
+        'PLANNED', 'INTENT_RECORDED', 'INPUT_STARTED', 'INPUT_COMPLETED',
+        'CONFIRMED', 'FAILED', 'UNCERTAIN'
+    )),
+    CHECK(
+        (state IN ('PLANNED', 'INTENT_RECORDED')
+            AND open_singleton = 1 AND input_started = 0 AND input_completed = 0)
+        OR (state = 'INPUT_STARTED'
+            AND open_singleton = 1 AND input_started = 1 AND input_completed = 0)
+        OR (state = 'INPUT_COMPLETED'
+            AND open_singleton = 1 AND input_started = 1 AND input_completed = 1)
+        OR (state IN ('CONFIRMED', 'FAILED', 'UNCERTAIN')
+            AND open_singleton IS NULL AND input_started = 1)
+    )
 )
 """
 
@@ -149,7 +199,7 @@ class SQLiteJobStore:
     def _initialize_schema(self) -> None:
         connection = SQLiteJobStore._require_open(self)
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if type(version) is not int or version not in (0, 1, _SCHEMA_VERSION):
+        if type(version) is not int or version not in (0, 1, 2, _SCHEMA_VERSION):
             raise SchedulerStoreError("scheduler database schema version is unsupported")
         jobs_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_jobs'"
@@ -157,13 +207,22 @@ class SQLiteJobStore:
         visits_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_visits'"
         ).fetchone()
-        if version == 0 and (jobs_schema is not None or visits_schema is not None):
+        actions_schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_actions'"
+        ).fetchone()
+        if version == 0 and any(
+            schema is not None for schema in (jobs_schema, visits_schema, actions_schema)
+        ):
             raise SchedulerStoreError("unversioned scheduler database schema already exists")
-        if version in (1, _SCHEMA_VERSION) and jobs_schema is None:
+        if version in (1, 2, _SCHEMA_VERSION) and jobs_schema is None:
             raise SchedulerStoreError("versioned scheduler database schema is missing")
-        if version == 1 and visits_schema is not None:
+        if version == 1 and (visits_schema is not None or actions_schema is not None):
             raise SchedulerStoreError("version one scheduler database schema is noncanonical")
-        if version == _SCHEMA_VERSION and visits_schema is None:
+        if version in (2, _SCHEMA_VERSION) and visits_schema is None:
+            raise SchedulerStoreError("versioned scheduler database schema is missing")
+        if version == 2 and actions_schema is not None:
+            raise SchedulerStoreError("version two scheduler database schema is noncanonical")
+        if version == _SCHEMA_VERSION and actions_schema is None:
             raise SchedulerStoreError("versioned scheduler database schema is missing")
         initial_manifest = connection.execute(
             """SELECT type, name, tbl_name FROM sqlite_master
@@ -179,19 +238,27 @@ class SQLiteJobStore:
                 .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
             )
 
-        if version in (1, _SCHEMA_VERSION):
+        if version in (1, 2, _SCHEMA_VERSION):
             if type(jobs_schema[0]) is not str or normalize(jobs_schema[0]) != normalize(
                 _CREATE_JOBS_SQL
             ):
                 raise SchedulerStoreError("scheduler database schema is noncanonical")
             expected_manifest = [("table", "scheduler_jobs", "scheduler_jobs")]
-            if version == _SCHEMA_VERSION:
+            if version in (2, _SCHEMA_VERSION):
                 if type(visits_schema[0]) is not str or normalize(
                     visits_schema[0]
                 ) != normalize(_CREATE_VISITS_SQL):
                     raise SchedulerStoreError("scheduler database schema is noncanonical")
                 expected_manifest.append(
                     ("table", "scheduler_visits", "scheduler_visits")
+                )
+            if version == _SCHEMA_VERSION:
+                if type(actions_schema[0]) is not str or normalize(
+                    actions_schema[0]
+                ) != normalize(_CREATE_ACTIONS_SQL):
+                    raise SchedulerStoreError("scheduler database schema is noncanonical")
+                expected_manifest.insert(
+                    0, ("table", "scheduler_actions", "scheduler_actions")
                 )
             if [tuple(row) for row in initial_manifest] != expected_manifest:
                 raise SchedulerStoreError("scheduler database schema has unexpected objects")
@@ -201,6 +268,8 @@ class SQLiteJobStore:
                 raise SchedulerStoreError(
                     "version one admitted job has no durable admission record"
                 )
+            if version == 2:
+                SQLiteJobStore._validate_admission_integrity(self)
 
         journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
         connection.execute("PRAGMA synchronous = FULL")
@@ -212,7 +281,8 @@ class SQLiteJobStore:
             BEGIN IMMEDIATE;
             {_CREATE_JOBS_SQL};
             {_CREATE_VISITS_SQL};
-            PRAGMA user_version = 2;
+            {_CREATE_ACTIONS_SQL};
+            PRAGMA user_version = 3;
             COMMIT;
             """
         )
@@ -232,17 +302,28 @@ class SQLiteJobStore:
             or normalize(stored_visits[0]) != normalize(_CREATE_VISITS_SQL)
         ):
             raise SchedulerStoreError("scheduler database schema is noncanonical")
+        stored_actions = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_actions'"
+        ).fetchone()
+        if (
+            stored_actions is None
+            or type(stored_actions[0]) is not str
+            or normalize(stored_actions[0]) != normalize(_CREATE_ACTIONS_SQL)
+        ):
+            raise SchedulerStoreError("scheduler database schema is noncanonical")
         manifest = connection.execute(
             """SELECT type, name, tbl_name FROM sqlite_master
                WHERE name NOT LIKE 'sqlite_%'
                ORDER BY type, name"""
         ).fetchall()
         if [tuple(row) for row in manifest] != [
+            ("table", "scheduler_actions", "scheduler_actions"),
             ("table", "scheduler_jobs", "scheduler_jobs"),
             ("table", "scheduler_visits", "scheduler_visits"),
         ]:
             raise SchedulerStoreError("scheduler database schema has unexpected objects")
         SQLiteJobStore._validate_admission_integrity(self)
+        SQLiteJobStore._validate_journal_integrity(self)
 
     def _validate_admission_integrity(self) -> None:
         connection = SQLiteJobStore._require_open(self)
@@ -264,6 +345,37 @@ class SQLiteJobStore:
             raise SchedulerStoreError("scheduler admission integrity is invalid") from exc
         except BaseException as exc:
             raise SchedulerStoreError("scheduler admission integrity is invalid") from exc
+
+    def _validate_journal_integrity(self) -> None:
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            visit_rows = connection.execute("SELECT * FROM scheduler_visits").fetchall()
+            open_visit = None if not visit_rows else visit_rows[0]
+            action_rows = connection.execute(
+                "SELECT * FROM scheduler_actions ORDER BY action_generation"
+            ).fetchall()
+            for row in action_rows:
+                action = SQLiteJobStore._decode_action(row)
+                terminal = action.state in TERMINAL_ACTION_STATES
+                if (
+                    terminal != (row["open_singleton"] is None)
+                    or row["lane_snapshot"] != action.lane.value
+                    or row["binding_seal"]
+                    != SQLiteJobStore._action_binding_seal(action)
+                ):
+                    raise SchedulerStoreError("scheduler journal integrity is invalid")
+                if (
+                    open_visit is None
+                    or action.visit_generation.value != open_visit["visit_generation"]
+                    or action.visit_nonce != open_visit["visit_nonce"]
+                ):
+                    raise SchedulerStoreError("scheduler journal integrity is invalid")
+        except SchedulerStoreError as exc:
+            if str(exc) == "scheduler journal integrity is invalid":
+                raise
+            raise SchedulerStoreError("scheduler journal integrity is invalid") from exc
+        except BaseException as exc:
+            raise SchedulerStoreError("scheduler journal integrity is invalid") from exc
 
     @staticmethod
     def _require_job(value: object) -> QueueJob:
@@ -568,6 +680,324 @@ class SQLiteJobStore:
     @staticmethod
     def _decode_admitted_visit(row: sqlite3.Row) -> AdmittedVisit:
         return SQLiteJobStore._decode_admission_record(row).admitted_visit
+
+    @staticmethod
+    def _require_action(value: object) -> JournalAction:
+        try:
+            return require_pristine_action(value)
+        except SchedulerJournalError as exc:
+            raise SchedulerStoreError("scheduler journal requires an exact action") from exc
+
+    @staticmethod
+    def _decode_action(row: sqlite3.Row) -> JournalAction:
+        try:
+            if (
+                type(row["input_started"]) is not int
+                or row["input_started"] not in (0, 1)
+                or type(row["input_completed"]) is not int
+                or row["input_completed"] not in (0, 1)
+            ):
+                raise ValueError("action input markers are malformed")
+            return JournalAction(
+                action_generation=row["action_generation"],
+                action_nonce=row["action_nonce"],
+                intent_fingerprint=row["intent_fingerprint"],
+                visit_generation=VisitGeneration(row["visit_generation"]),
+                visit_nonce=row["visit_nonce"],
+                lane=Lane(row["lane"]),
+                input_started=bool(row["input_started"]),
+                input_completed=bool(row["input_completed"]),
+                state=ActionState(row["state"]),
+            )
+        except (KeyError, TypeError, ValueError, SchedulerJournalError) as exc:
+            raise SchedulerStoreError("invalid persisted journal action") from exc
+
+    @staticmethod
+    def _action_values(action: JournalAction) -> tuple[object, ...]:
+        return (
+            action.action_generation,
+            action.action_nonce,
+            action.intent_fingerprint,
+            action.visit_generation.value,
+            action.visit_nonce,
+            action.lane.value,
+            action.lane.value,
+            SQLiteJobStore._action_binding_seal(action),
+            None if action.state in TERMINAL_ACTION_STATES else 1,
+            int(action.input_started),
+            int(action.input_completed),
+            action.state.value,
+        )
+
+    @staticmethod
+    def _action_binding_seal(action: JournalAction) -> str:
+        action = require_pristine_action(action)
+        material = "\0".join(
+            (
+                "scheduler-action-v1",
+                str(action.action_generation),
+                action.action_nonce,
+                action.intent_fingerprint,
+                str(action.visit_generation.value),
+                action.visit_nonce,
+                action.lane.value,
+                "1" if action.input_started else "0",
+                "1" if action.input_completed else "0",
+                action.state.value,
+            )
+        ).encode("ascii")
+        return hashlib.sha256(material).hexdigest()
+
+    def plan_action(
+        self,
+        admitted_visit: AdmittedVisit,
+        *,
+        lane: Lane,
+        intent_fingerprint: str,
+    ) -> JournalAction:
+        """Append one durable PLANNED action bound to the open admitted visit."""
+        if type(admitted_visit) is not AdmittedVisit:
+            raise SchedulerStoreError("action planning requires an exact admitted visit")
+        if type(lane) is not Lane:
+            raise SchedulerStoreError("action planning requires an exact lane")
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            visit_row = connection.execute(
+                "SELECT * FROM scheduler_visits WHERE visit_generation = ?",
+                (admitted_visit.visit_generation.value,),
+            ).fetchone()
+            if (
+                visit_row is None
+                or SQLiteJobStore._decode_admitted_visit(visit_row) != admitted_visit
+            ):
+                raise SchedulerStoreError("action visit is not the open admission")
+            if connection.execute(
+                "SELECT 1 FROM scheduler_actions WHERE intent_fingerprint = ?",
+                (intent_fingerprint,),
+            ).fetchone() is not None:
+                raise SchedulerStoreError("action intent is already journaled")
+            if connection.execute(
+                "SELECT 1 FROM scheduler_actions WHERE open_singleton = 1"
+            ).fetchone() is not None:
+                raise SchedulerStoreError("a nonterminal action already exists")
+            raw_generation = connection.execute(
+                "SELECT COALESCE(MAX(action_generation), 0) + 1 FROM scheduler_actions"
+            ).fetchone()[0]
+            if type(raw_generation) is not int or not 1 <= raw_generation <= 2**63 - 1:
+                raise SchedulerStoreError("action generation is exhausted")
+            action = JournalAction(
+                action_generation=raw_generation,
+                action_nonce=secrets.token_hex(16),
+                intent_fingerprint=intent_fingerprint,
+                visit_generation=admitted_visit.visit_generation,
+                visit_nonce=admitted_visit.visit_nonce,
+                lane=lane,
+                input_started=False,
+                input_completed=False,
+                state=ActionState.PLANNED,
+            )
+            connection.execute(
+                """INSERT INTO scheduler_actions (
+                       action_generation, action_nonce, intent_fingerprint,
+                       visit_generation, visit_nonce, lane, lane_snapshot,
+                       binding_seal, open_singleton, input_started,
+                       input_completed, state
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                SQLiteJobStore._action_values(action),
+            )
+            connection.execute("COMMIT")
+            return action
+        except BaseException as exc:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            if isinstance(exc, SchedulerStoreError):
+                raise
+            raise SchedulerStoreError("scheduler action planning failed") from exc
+
+    def _transition_action(
+        self,
+        expected: JournalAction,
+        *,
+        required_state: ActionState,
+        next_state: ActionState,
+    ) -> JournalAction:
+        expected = SQLiteJobStore._require_action(expected)
+        try:
+            updated_action = transition_action(
+                expected,
+                next_state=next_state,
+            )
+        except SchedulerJournalError as exc:
+            raise SchedulerStoreError(str(exc)) from exc
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM scheduler_actions WHERE action_generation = ?",
+                (expected.action_generation,),
+            ).fetchone()
+            if row is None or SQLiteJobStore._decode_action(row) != expected:
+                raise SchedulerStoreError("stale scheduler action transition")
+            visit = connection.execute(
+                """SELECT 1 FROM scheduler_visits
+                   WHERE visit_generation = ? AND visit_nonce = ?""",
+                (expected.visit_generation.value, expected.visit_nonce),
+            ).fetchone()
+            if visit is None:
+                raise SchedulerStoreError("scheduler action visit is not open")
+            changed = connection.execute(
+                """UPDATE scheduler_actions
+                   SET state = ?, input_started = ?, input_completed = ?,
+                       binding_seal = ?
+                   WHERE action_generation = ? AND state = ?""",
+                (
+                    next_state.value,
+                    int(updated_action.input_started),
+                    int(updated_action.input_completed),
+                    SQLiteJobStore._action_binding_seal(updated_action),
+                    expected.action_generation,
+                    required_state.value,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise SchedulerStoreError("stale scheduler action transition")
+            connection.execute("COMMIT")
+            return updated_action
+        except BaseException as exc:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            if isinstance(exc, SchedulerStoreError):
+                raise
+            raise SchedulerStoreError("scheduler action transition failed") from exc
+
+    def record_action_intent(self, action: JournalAction) -> JournalAction:
+        return SQLiteJobStore._transition_action(
+            self,
+            action,
+            required_state=ActionState.PLANNED,
+            next_state=ActionState.INTENT_RECORDED,
+        )
+
+    def mark_input_started(self, action: JournalAction) -> JournalAction:
+        return SQLiteJobStore._transition_action(
+            self,
+            action,
+            required_state=ActionState.INTENT_RECORDED,
+            next_state=ActionState.INPUT_STARTED,
+        )
+
+    def mark_input_completed(self, action: JournalAction) -> JournalAction:
+        return SQLiteJobStore._transition_action(
+            self,
+            action,
+            required_state=ActionState.INPUT_STARTED,
+            next_state=ActionState.INPUT_COMPLETED,
+        )
+
+    def finalize_action(
+        self,
+        action: JournalAction,
+        *,
+        outcome: ActionState,
+        pending_lane: Lane,
+    ) -> JournalAction:
+        """Commit a terminal outcome and the visit's pending lane atomically."""
+        action = SQLiteJobStore._require_action(action)
+        if type(outcome) is not ActionState or outcome not in TERMINAL_ACTION_STATES:
+            raise SchedulerStoreError("action outcome must be terminal")
+        if type(pending_lane) is not Lane:
+            raise SchedulerStoreError("terminal action pending lane is invalid")
+        if action.state not in (ActionState.INPUT_STARTED, ActionState.INPUT_COMPLETED):
+            raise SchedulerStoreError(
+                f"action is {action.state.value}, expected INPUT_STARTED or INPUT_COMPLETED"
+            )
+        try:
+            finalized = transition_action(
+                action,
+                next_state=outcome,
+            )
+        except SchedulerJournalError as exc:
+            raise SchedulerStoreError(str(exc)) from exc
+
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM scheduler_actions WHERE action_generation = ?",
+                (action.action_generation,),
+            ).fetchone()
+            if row is None or SQLiteJobStore._decode_action(row) != action:
+                raise SchedulerStoreError("stale scheduler action finalization")
+            visit = connection.execute(
+                "SELECT * FROM scheduler_visits WHERE visit_generation = ?",
+                (action.visit_generation.value,),
+            ).fetchone()
+            if visit is None or visit["visit_nonce"] != action.visit_nonce:
+                raise SchedulerStoreError("terminal action visit is not open")
+            changed_action = connection.execute(
+                """UPDATE scheduler_actions
+                   SET state = ?, open_singleton = NULL,
+                       input_started = ?, input_completed = ?, binding_seal = ?
+                   WHERE action_generation = ? AND state = ?""",
+                (
+                    outcome.value,
+                    int(finalized.input_started),
+                    int(finalized.input_completed),
+                    SQLiteJobStore._action_binding_seal(finalized),
+                    action.action_generation,
+                    action.state.value,
+                ),
+            )
+            changed_visit = connection.execute(
+                """UPDATE scheduler_visits SET pending_lane = ?
+                   WHERE visit_generation = ? AND visit_nonce = ?""",
+                (pending_lane.value, action.visit_generation.value, action.visit_nonce),
+            )
+            changed_job = connection.execute(
+                """UPDATE scheduler_jobs SET pending_lane = ?
+                   WHERE account_key = ? AND configuration_generation = ?
+                     AND job_generation = ? AND state = 'ADMITTED'""",
+                (
+                    pending_lane.value,
+                    visit["account_key"],
+                    visit["configuration_generation"],
+                    visit["job_generation"],
+                ),
+            )
+            if (
+                changed_action.rowcount != 1
+                or changed_visit.rowcount != 1
+                or changed_job.rowcount != 1
+            ):
+                raise SchedulerStoreError("terminal action atomic update failed")
+            connection.execute("COMMIT")
+            return finalized
+        except BaseException as exc:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            if isinstance(exc, SchedulerStoreError):
+                raise
+            raise SchedulerStoreError("scheduler action finalization failed") from exc
+
+    def load_actions(self) -> tuple[JournalAction, ...]:
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            rows = connection.execute(
+                "SELECT * FROM scheduler_actions ORDER BY action_generation"
+            ).fetchall()
+            return tuple(SQLiteJobStore._decode_action(row) for row in rows)
+        except SchedulerStoreError:
+            raise
+        except BaseException as exc:
+            raise SchedulerStoreError("scheduler actions could not be loaded") from exc
+
+    def load_replayable_actions(self) -> tuple[JournalAction, ...]:
+        return tuple(
+            action
+            for action in SQLiteJobStore.load_actions(self)
+            if action.state in REPLAYABLE_ACTION_STATES
+        )
 
     def load_admission_records(self) -> tuple[PersistedAdmission, ...]:
         connection = SQLiteJobStore._require_open(self)
