@@ -18,7 +18,9 @@ from clash_rush_rebuild.scheduler_journal import ActionState
 from clash_rush_rebuild.scheduler_store import (
     _CREATE_ACTIONS_SQL,
     _CREATE_JOBS_SQL,
+    _CREATE_SUCCESSOR_PLANS_V4_SQL,
     _CREATE_VISITS_SQL,
+    _CREATE_VISITS_V4_SQL,
     SQLiteJobStore,
     SchedulerStoreError,
 )
@@ -423,5 +425,32 @@ def test_canonical_version_three_store_migrates_without_synthesizing_a_plan(
         assert store.load_successor_plans() == ()
 
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+    connection.close()
+
+
+def test_canonical_version_four_store_migrates_without_changing_empty_plans(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "scheduler.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        f"""{_CREATE_JOBS_SQL};
+            {_CREATE_VISITS_V4_SQL};
+            {_CREATE_ACTIONS_SQL};
+            {_CREATE_SUCCESSOR_PLANS_V4_SQL};
+            PRAGMA user_version = 4;"""
+    )
+    connection.close()
+
+    with SQLiteJobStore(path) as store:
+        assert store.load_all() == ()
+        assert store.load_successor_plans() == ()
+
+    connection = sqlite3.connect(path)
+    assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+    successor_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'scheduler_successor_plans'"
+    ).fetchone()[0]
+    assert "yield_set TEXT NOT NULL CHECK(yield_set = '[]')" not in successor_sql
     connection.close()

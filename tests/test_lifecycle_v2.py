@@ -18,6 +18,7 @@ from clash_rush_rebuild.lifecycle import (
     PlayerBinding,
     PlayerSnapshot,
     ProcessIdentity,
+    StopRecord,
 )
 from clash_rush_rebuild.lifecycle_state import BlockReason
 from clash_rush_rebuild.lifecycle_state_v2 import ActiveV2, ReadyV2
@@ -223,3 +224,59 @@ def test_start_admitted_failure_preserves_exact_nonce_and_closed_reason() -> Non
         GENERATION, ACCOUNT_B, 1, VISIT_NONCE, BlockReason.JOB_SETUP
     )
     assert events[-2:] == ["job:create", "state:commit:ACTIVE"]
+
+
+def test_stop_admitted_proves_absence_then_commits_stable_account_cursor() -> None:
+    events: list[str] = []
+    state = FakeStateStore(ReadyV2(GENERATION, ACCOUNT_A), events)
+    supervisor = _supervisor(events, state)
+    binding = supervisor.start_admitted(ACCOUNT_B, GENERATION, VISIT_NONCE)
+
+    record = supervisor.stop_admitted(binding, None)
+
+    assert record == StopRecord(1, VISIT_NONCE, 1, 2, True)
+    assert state.state == ReadyV2(GENERATION, ACCOUNT_B)
+    assert events.index("job:terminate") < events.index("state:commit:READY")
+    assert events[-1] == "state:commit:READY"
+
+
+def test_unproved_stop_terminates_owned_job_but_halts_in_blocked_active() -> None:
+    events: list[str] = []
+    state = FakeStateStore(ReadyV2(GENERATION, ACCOUNT_A), events)
+
+    class UnprovedStopHost(FakeHost):
+        def __init__(self, host_events: list[str]) -> None:
+            super().__init__(host_events)
+            self.member_queries = 0
+
+        def stable_job_members(self, job: object) -> MemberSnapshot:
+            self.member_queries += 1
+            if self.member_queries == 2:
+                raise RuntimeError("synthetic fresh membership failure")
+            return super().stable_job_members(job)
+
+    host = UnprovedStopHost(events)
+    supervisor = _supervisor(events, state, host=host)
+    binding = supervisor.start_admitted(ACCOUNT_B, GENERATION, VISIT_NONCE)
+
+    with pytest.raises(LifecycleError, match="membership was not proved"):
+        supervisor.stop_admitted(binding, None)
+
+    assert "job:terminate" in events
+    assert state.state == ActiveV2(
+        GENERATION, ACCOUNT_B, 1, VISIT_NONCE, BlockReason.STOP_PROOF
+    )
+    assert "state:commit:READY" not in events
+
+
+def test_instance_shadow_cannot_bypass_admitted_stop_proof() -> None:
+    events: list[str] = []
+    state = FakeStateStore(ReadyV2(GENERATION, ACCOUNT_A), events)
+    supervisor = _supervisor(events, state)
+    binding = supervisor.start_admitted(ACCOUNT_B, GENERATION, VISIT_NONCE)
+    supervisor._prove_stopped_and_close_owned = lambda owned, candidate: 99  # type: ignore[method-assign]
+
+    record = SchemaV2LifecycleSupervisor.stop_admitted(supervisor, binding, None)
+
+    assert record.observed_member_count == 1
+    assert "job:terminate" in events

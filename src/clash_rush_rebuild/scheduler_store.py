@@ -25,6 +25,9 @@ from .scheduler_contract import (
     YieldToken,
     admit,
     complete_visit,
+    mark_eligible,
+    quarantine,
+    release_quarantine,
     select_oldest_eligible,
 )
 from .scheduler_journal import (
@@ -39,7 +42,7 @@ from .scheduler_journal import (
 from .scheduler_successor import SuccessorKind, SuccessorPlan, SuccessorPlanError
 
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _CREATE_JOBS_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_jobs (
     account_key TEXT NOT NULL,
@@ -146,7 +149,7 @@ CREATE TABLE IF NOT EXISTS scheduler_actions (
 )
 """
 
-_CREATE_SUCCESSOR_PLANS_SQL = """
+_CREATE_SUCCESSOR_PLANS_V4_SQL = """
 CREATE TABLE IF NOT EXISTS scheduler_successor_plans (
     plan_nonce TEXT PRIMARY KEY CHECK(
         length(plan_nonce) = 32 AND plan_nonce NOT GLOB '*[^0-9a-f]*'
@@ -179,6 +182,11 @@ CREATE TABLE IF NOT EXISTS scheduler_successor_plans (
     FOREIGN KEY(visit_generation) REFERENCES scheduler_visits(visit_generation)
 )
 """
+
+_CREATE_SUCCESSOR_PLANS_SQL = _CREATE_SUCCESSOR_PLANS_V4_SQL.replace(
+    "yield_set TEXT NOT NULL CHECK(yield_set = '[]')",
+    "yield_set TEXT NOT NULL",
+)
 
 
 class SchedulerStoreError(RuntimeError):
@@ -260,7 +268,7 @@ class SQLiteJobStore:
     def _initialize_schema(self) -> None:
         connection = SQLiteJobStore._require_open(self)
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if type(version) is not int or version not in (0, 1, 2, 3, _SCHEMA_VERSION):
+        if type(version) is not int or version not in (0, 1, 2, 3, 4, _SCHEMA_VERSION):
             raise SchedulerStoreError("scheduler database schema version is unsupported")
         jobs_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_jobs'"
@@ -279,19 +287,19 @@ class SQLiteJobStore:
             for schema in (jobs_schema, visits_schema, actions_schema, successor_plans_schema)
         ):
             raise SchedulerStoreError("unversioned scheduler database schema already exists")
-        if version in (1, 2, 3, _SCHEMA_VERSION) and jobs_schema is None:
+        if version in (1, 2, 3, 4, _SCHEMA_VERSION) and jobs_schema is None:
             raise SchedulerStoreError("versioned scheduler database schema is missing")
         if version == 1 and (visits_schema is not None or actions_schema is not None):
             raise SchedulerStoreError("version one scheduler database schema is noncanonical")
-        if version in (2, 3, _SCHEMA_VERSION) and visits_schema is None:
+        if version in (2, 3, 4, _SCHEMA_VERSION) and visits_schema is None:
             raise SchedulerStoreError("versioned scheduler database schema is missing")
         if version == 2 and actions_schema is not None:
             raise SchedulerStoreError("version two scheduler database schema is noncanonical")
-        if version in (3, _SCHEMA_VERSION) and actions_schema is None:
+        if version in (3, 4, _SCHEMA_VERSION) and actions_schema is None:
             raise SchedulerStoreError("versioned scheduler database schema is missing")
         if version in (1, 2, 3) and successor_plans_schema is not None:
             raise SchedulerStoreError("older scheduler database schema is noncanonical")
-        if version == _SCHEMA_VERSION and successor_plans_schema is None:
+        if version in (4, _SCHEMA_VERSION) and successor_plans_schema is None:
             raise SchedulerStoreError("versioned scheduler database schema is missing")
         initial_manifest = connection.execute(
             """SELECT type, name, tbl_name FROM sqlite_master
@@ -307,16 +315,16 @@ class SQLiteJobStore:
                 .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
             )
 
-        if version in (1, 2, 3, _SCHEMA_VERSION):
+        if version in (1, 2, 3, 4, _SCHEMA_VERSION):
             if type(jobs_schema[0]) is not str or normalize(jobs_schema[0]) != normalize(
                 _CREATE_JOBS_SQL
             ):
                 raise SchedulerStoreError("scheduler database schema is noncanonical")
             expected_manifest = [("table", "scheduler_jobs", "scheduler_jobs")]
-            if version in (2, 3, _SCHEMA_VERSION):
+            if version in (2, 3, 4, _SCHEMA_VERSION):
                 expected_visits_sql = (
                     _CREATE_VISITS_V4_SQL
-                    if version == _SCHEMA_VERSION
+                    if version in (4, _SCHEMA_VERSION)
                     else _CREATE_VISITS_SQL
                 )
                 if type(visits_schema[0]) is not str or normalize(
@@ -326,7 +334,7 @@ class SQLiteJobStore:
                 expected_manifest.append(
                     ("table", "scheduler_visits", "scheduler_visits")
                 )
-            if version in (3, _SCHEMA_VERSION):
+            if version in (3, 4, _SCHEMA_VERSION):
                 if type(actions_schema[0]) is not str or normalize(
                     actions_schema[0]
                 ) != normalize(_CREATE_ACTIONS_SQL):
@@ -334,10 +342,15 @@ class SQLiteJobStore:
                 expected_manifest.insert(
                     0, ("table", "scheduler_actions", "scheduler_actions")
                 )
-            if version == _SCHEMA_VERSION:
+            if version in (4, _SCHEMA_VERSION):
+                expected_successor_sql = (
+                    _CREATE_SUCCESSOR_PLANS_V4_SQL
+                    if version == 4
+                    else _CREATE_SUCCESSOR_PLANS_SQL
+                )
                 if type(successor_plans_schema[0]) is not str or normalize(
                     successor_plans_schema[0]
-                ) != normalize(_CREATE_SUCCESSOR_PLANS_SQL):
+                ) != normalize(expected_successor_sql):
                     raise SchedulerStoreError("scheduler database schema is noncanonical")
                 expected_manifest.append(
                     ("table", "scheduler_successor_plans", "scheduler_successor_plans")
@@ -356,6 +369,10 @@ class SQLiteJobStore:
             if version == 3:
                 SQLiteJobStore._validate_admission_integrity(self)
                 SQLiteJobStore._validate_journal_integrity(self)
+            if version == 4:
+                SQLiteJobStore._validate_admission_integrity(self)
+                SQLiteJobStore._validate_journal_integrity(self)
+                SQLiteJobStore._validate_successor_integrity(self)
 
         if version in (2, 3):
             connection.executescript(
@@ -379,6 +396,20 @@ class SQLiteJobStore:
                 """
             )
 
+        if version == 4:
+            connection.executescript(
+                f"""
+                BEGIN IMMEDIATE;
+                ALTER TABLE scheduler_successor_plans
+                    RENAME TO scheduler_successor_plans_v4;
+                {_CREATE_SUCCESSOR_PLANS_SQL};
+                INSERT INTO scheduler_successor_plans
+                SELECT * FROM scheduler_successor_plans_v4;
+                DROP TABLE scheduler_successor_plans_v4;
+                COMMIT;
+                """
+            )
+
         journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -391,7 +422,7 @@ class SQLiteJobStore:
             {_CREATE_VISITS_V4_SQL};
             {_CREATE_ACTIONS_SQL};
             {_CREATE_SUCCESSOR_PLANS_SQL};
-            PRAGMA user_version = 4;
+            PRAGMA user_version = 5;
             COMMIT;
             """
         )
@@ -1208,6 +1239,11 @@ class SQLiteJobStore:
                 successor.pending_lane.value,
                 successor.state.value,
                 "" if successor.reconcile_at is None else repr(float(successor.reconcile_at)),
+                *(
+                    (SQLiteJobStore._encode_yield_set(successor),)
+                    if successor.yield_set
+                    else ()
+                ),
             )
         ).encode("ascii")
         return hashlib.sha256(material).hexdigest()
@@ -1231,7 +1267,7 @@ class SQLiteJobStore:
             successor.pending_lane.value,
             successor.state.value,
             successor.reconcile_at,
-            "[]",
+            SQLiteJobStore._encode_yield_set(successor),
             None,
             SQLiteJobStore._successor_binding_seal(plan),
         )
@@ -1247,19 +1283,7 @@ class SQLiteJobStore:
             if visit_row is None or visit_row["visit_nonce"] != row["visit_nonce"]:
                 raise ValueError("successor visit binding is invalid")
             admitted = SQLiteJobStore._decode_admitted_visit(visit_row)
-            successor = QueueJob(
-                account_key=AccountKey(row["account_key"]),
-                configuration_generation=ConfigurationGeneration(
-                    row["configuration_generation"]
-                ),
-                job_generation=JobGeneration(row["job_generation"]),
-                availability_event=AvailabilityEvent(row["availability_event"]),
-                available_at=row["available_at"],
-                due_at=row["due_at"],
-                pending_lane=Lane(row["pending_lane"]),
-                state=QueueState(row["state"]),
-                reconcile_at=row["reconcile_at"],
-            )
+            successor = SQLiteJobStore._decode(row)
             return SuccessorPlan(
                 admitted_visit=admitted,
                 plan_nonce=row["plan_nonce"],
@@ -1343,6 +1367,22 @@ class SQLiteJobStore:
                 available_at = observed
                 offset_seconds = 300 + SQLiteJobStore._draw_offset(3301)
                 due_at = observed
+            yield_set = ()
+            if kind is SuccessorKind.RECONCILE_UNKNOWN:
+                peer_rows = connection.execute(
+                    """SELECT * FROM scheduler_jobs
+                       WHERE configuration_generation = ? AND state = 'ELIGIBLE'
+                         AND due_at <= ?
+                       ORDER BY account_key""",
+                    (admitted_visit.configuration_generation.value, observed),
+                ).fetchall()
+                yield_set = tuple(
+                    YieldToken(peer.account_key, peer.job_generation)
+                    for peer in (
+                        SQLiteJobStore._decode(peer_row) for peer_row in peer_rows
+                    )
+                    if peer.account_key != admitted_visit.job.account_key
+                )
             next_state = (
                 QueueState.DEFERRED
                 if kind is SuccessorKind.RECONCILE_UNKNOWN
@@ -1361,6 +1401,7 @@ class SQLiteJobStore:
                     if kind is SuccessorKind.RECONCILE_UNKNOWN
                     else None
                 ),
+                yield_set=yield_set,
             )
             plan = SuccessorPlan(
                 admitted_visit=admitted_visit,
@@ -1508,6 +1549,137 @@ class SQLiteJobStore:
         if plan.admitted_visit != admitted_visit:
             raise SchedulerStoreError("successor plan visit does not match")
         return plan
+
+    def quarantine_current(self, expected: QueueJob) -> QueueJob:
+        """Persist one explicit account quarantine without changing its due work."""
+        expected = SQLiteJobStore._require_job(expected)
+        try:
+            replacement = quarantine(expected)
+        except ValueError as exc:
+            raise SchedulerStoreError("scheduler job cannot be quarantined") from exc
+        return SQLiteJobStore.replace(self, expected, replacement)
+
+    def release_quarantined(self, expected: QueueJob) -> QueueJob:
+        """Restore exactly the state preserved by one durable quarantine."""
+        expected = SQLiteJobStore._require_job(expected)
+        try:
+            replacement = release_quarantine(expected)
+        except ValueError as exc:
+            raise SchedulerStoreError("scheduler quarantine cannot be released") from exc
+        return SQLiteJobStore.replace(self, expected, replacement)
+
+    def refresh_due(
+        self,
+        configuration_generation: ConfigurationGeneration,
+        *,
+        now: float,
+    ) -> tuple[QueueJob, ...]:
+        """Atomically promote timed work whose persisted fairness barrier is clear."""
+        if type(configuration_generation) is not ConfigurationGeneration:
+            raise SchedulerStoreError("configuration generation must be exact")
+        if type(now) not in (int, float) or not math.isfinite(now):
+            raise SchedulerStoreError("scheduler refresh time must be finite")
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT * FROM scheduler_jobs
+                   WHERE configuration_generation = ? ORDER BY account_key""",
+                (configuration_generation.value,),
+            ).fetchall()
+            jobs = tuple(SQLiteJobStore._decode(row) for row in rows)
+            current_by_account = {item.account_key: item for item in jobs}
+            finalized = {
+                (AccountKey(row["account_key"]), JobGeneration(row["job_generation"]))
+                for row in connection.execute(
+                    """SELECT account_key, job_generation FROM scheduler_visits
+                       WHERE configuration_generation = ? AND finalized = 1""",
+                    (configuration_generation.value,),
+                ).fetchall()
+            }
+            promoted: list[tuple[QueueJob, QueueJob]] = []
+            for item in jobs:
+                if item.state is QueueState.WAITING and now >= item.due_at:
+                    promoted.append((item, mark_eligible(item, now=now)))
+                    continue
+                if item.state is not QueueState.DEFERRED or now < item.reconcile_at:
+                    continue
+                unresolved = []
+                for token in item.yield_set:
+                    peer = current_by_account.get(token.account_key)
+                    terminal_visit = (token.account_key, token.job_generation) in finalized
+                    independently_inactive = (
+                        peer is not None
+                        and peer.job_generation == token.job_generation
+                        and peer.state in (QueueState.WAITING, QueueState.QUARANTINED)
+                    )
+                    if not terminal_visit and not independently_inactive:
+                        unresolved.append(token)
+                if not unresolved:
+                    promoted.append((item, mark_eligible(item, now=now)))
+
+            for expected, replacement in promoted:
+                changed = connection.execute(
+                    """UPDATE scheduler_jobs SET state = ?, reconcile_at = NULL,
+                           yield_set = '[]', prior_state = NULL
+                       WHERE account_key = ? AND configuration_generation = ?
+                         AND job_generation = ? AND state = ?""",
+                    (
+                        replacement.state.value,
+                        expected.account_key.value,
+                        expected.configuration_generation.value,
+                        expected.job_generation.value,
+                        expected.state.value,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise SchedulerStoreError("scheduler due refresh changed concurrently")
+            connection.execute("COMMIT")
+            return tuple(replacement for _, replacement in promoted)
+        except BaseException as exc:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            if isinstance(exc, SchedulerStoreError):
+                raise
+            raise SchedulerStoreError("scheduler due refresh failed") from exc
+
+    def next_wake_at(
+        self,
+        configuration_generation: ConfigurationGeneration,
+        *,
+        now: float,
+    ) -> float | None:
+        """Return the next persisted timed boundary; quarantines never wake a run."""
+        if type(configuration_generation) is not ConfigurationGeneration:
+            raise SchedulerStoreError("configuration generation must be exact")
+        if type(now) not in (int, float) or not math.isfinite(now):
+            raise SchedulerStoreError("scheduler wake time must be finite")
+        jobs = SQLiteJobStore.load(self, configuration_generation)
+        if any(
+            item.state is QueueState.DEFERRED
+            and item.reconcile_at is not None
+            and item.reconcile_at <= now
+            for item in jobs
+        ):
+            raise SchedulerStoreError(
+                "overdue deferred fairness barrier requires intervention"
+            )
+        candidates = tuple(
+            item.due_at
+            if item.state is QueueState.WAITING
+            else item.reconcile_at
+            for item in jobs
+            if item.state in (QueueState.WAITING, QueueState.DEFERRED)
+            and (
+                (item.state is QueueState.WAITING and item.due_at > now)
+                or (
+                    item.state is QueueState.DEFERRED
+                    and item.reconcile_at is not None
+                    and item.reconcile_at > now
+                )
+            )
+        )
+        return None if not candidates else min(candidates)
 
     def load(self, configuration_generation: ConfigurationGeneration) -> tuple[QueueJob, ...]:
         if type(configuration_generation) is not ConfigurationGeneration:

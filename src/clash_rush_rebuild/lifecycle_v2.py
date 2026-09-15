@@ -21,6 +21,7 @@ from .lifecycle import (
     MemberSnapshot,
     PlayerBinding,
     ProcessIdentity,
+    StopRecord,
 )
 from .lifecycle_state import BlockReason
 from .lifecycle_state_v2 import ActiveV2, ReadyV2, SchemaV2LifecycleStateStore
@@ -265,6 +266,90 @@ class SchemaV2LifecycleSupervisor:
             binding,
         )
         return binding
+
+    def stop_admitted(self, binding: PlayerBinding, proof: None) -> StopRecord:
+        """Stop one owned admitted visit and advance only the stable tie cursor."""
+        if proof is not None:
+            raise LifecycleError("schema-v2 lifecycle accepts no graceful-close proof")
+        owned = self._owned
+        if (
+            owned is None
+            or type(binding) is not PlayerBinding
+            or binding != owned.binding
+        ):
+            raise LifecycleError("stop binding does not match the owned admitted run")
+
+        try:
+            member_count = SchemaV2LifecycleSupervisor._prove_stopped_and_close_owned(
+                self, owned, binding
+            )
+        except BaseException as exc:
+            blocked = ActiveV2(
+                owned.configuration_generation,
+                owned.account_key,
+                owned.slot.index,
+                owned.run_nonce,
+                BlockReason.STOP_PROOF,
+            )
+            try:
+                self._state.commit(blocked)
+            except BaseException:  # noqa: BLE001 - previous ACTIVE remains fail-closed
+                pass
+            if isinstance(exc, LifecycleError):
+                raise
+            raise LifecycleError("owned admitted stop proof failed") from exc
+
+        ready = ReadyV2(owned.configuration_generation, owned.account_key)
+        committed = self._state.commit(ready)
+        if type(committed) is not ReadyV2 or committed != ready:
+            raise LifecycleError("schema-v2 READY state was not durably committed")
+        self._owned = None
+        return StopRecord(
+            owned.slot.index,
+            owned.run_nonce,
+            member_count,
+            2,
+            True,
+        )
+
+    def _prove_stopped_and_close_owned(
+        self, owned: _OwnedRunV2, binding: PlayerBinding
+    ) -> int:
+        members: MemberSnapshot | None = None
+        membership_proved = False
+        member_count = 0
+        try:
+            members = self._host.stable_job_members(owned.job)
+            member_count = len(members.identities)
+            membership_proved = (
+                member_count >= 1 and owned.binding.identity in members.identities
+            )
+        except BaseException:  # noqa: BLE001 - termination remains authoritative
+            membership_proved = False
+
+        self._host.terminate_job(owned.job)
+        if self._host.wait_process(owned.process, 30_000) is not True:
+            raise LifecycleError("owned admitted process did not signal")
+        if self._host.job_active_count(owned.job) != 0:
+            raise LifecycleError("owned admitted Job did not become empty")
+        if self._host.is_window(binding.root_hwnd) or self._host.is_window(
+            binding.render_hwnd
+        ):
+            raise LifecycleError("owned admitted HWND remained after stop")
+        players = self._host.complete_player_snapshot()
+        try:
+            if players.identities:
+                raise LifecycleError("a BlueStacks player remained after admitted stop")
+        finally:
+            players.close()
+        if members is not None:
+            members.close()
+        owned.members.close()
+        self._host.close_handle(owned.process)
+        self._host.close_handle(owned.job)
+        if not membership_proved:
+            raise LifecycleError("fresh owned Job membership was not proved")
+        return member_count
 
     def _commit_blocked(self, active: ActiveV2, reason: BlockReason) -> None:
         blocked = ActiveV2(

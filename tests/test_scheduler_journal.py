@@ -265,7 +265,7 @@ def test_known_version_two_database_migrates_with_an_empty_action_journal(
         assert store.load_actions() == ()
 
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (5,)
     connection.close()
 
 

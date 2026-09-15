@@ -56,7 +56,7 @@ class SuccessorPlan:
             times += (successor.reconcile_at,)
         if any(type(value) not in (int, float) or not math.isfinite(value) for value in times):
             raise SuccessorPlanError("successor plan time is invalid")
-        if successor.yield_set or successor.prior_state is not None:
+        if successor.prior_state is not None:
             raise SuccessorPlanError("successor plan carries forbidden metadata")
 
         if self.kind is SuccessorKind.IMMEDIATE_FREE:
@@ -65,6 +65,7 @@ class SuccessorPlan:
                 and successor.state is QueueState.WAITING
                 and successor.available_at == successor.due_at
                 and successor.reconcile_at is None
+                and not successor.yield_set
             )
         elif self.kind is SuccessorKind.FUTURE_COMPLETION:
             valid = (
@@ -72,6 +73,7 @@ class SuccessorPlan:
                 and successor.state is QueueState.WAITING
                 and successor.reconcile_at is None
                 and successor.due_at == successor.available_at + self.offset_seconds
+                and not successor.yield_set
             )
         else:
             valid = (
