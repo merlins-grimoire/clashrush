@@ -210,7 +210,7 @@ def test_known_version_one_database_migrates_to_current_without_changing_jobs(tm
         assert store.load_admitted_visits() == ()
 
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (4,)
     connection.close()
 
 

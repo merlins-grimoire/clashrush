@@ -373,8 +373,10 @@ def complete_visit(
     due_at: float,
     pending_lane: Lane,
     next_state: QueueState,
+    reconcile_at: float | None = None,
+    yield_set: tuple[YieldToken, ...] = (),
 ) -> QueueJob:
-    """Consume one admission into one fresh waiting or quarantined successor."""
+    """Consume one admission into one fresh waiting, deferred, or locked successor."""
     if type(admitted_visit) is not AdmittedVisit:
         raise SchedulerContractError("visit completion requires an exact AdmittedVisit")
     job = admitted_visit.job
@@ -383,7 +385,11 @@ def complete_visit(
         or next_generation.value <= job.job_generation.value
     ):
         raise SchedulerContractError("visit completion requires a fresh job generation")
-    if next_state not in (QueueState.WAITING, QueueState.QUARANTINED):
+    if next_state not in (
+        QueueState.WAITING,
+        QueueState.DEFERRED,
+        QueueState.QUARANTINED,
+    ):
         raise SchedulerContractError("visit completion successor state is invalid")
     return QueueJob(
         account_key=job.account_key,
@@ -394,6 +400,8 @@ def complete_visit(
         due_at=due_at,
         pending_lane=pending_lane,
         state=next_state,
+        reconcile_at=reconcile_at,
+        yield_set=yield_set,
         prior_state=(QueueState.WAITING if next_state is QueueState.QUARANTINED else None),
     )
 
