@@ -312,6 +312,56 @@ class SchemaV2LifecycleSupervisor:
             True,
         )
 
+    def emergency_stop_admitted(self, binding: PlayerBinding) -> StopRecord:
+        """Stop an owned run without exposing READY after successor-plan failure."""
+        owned = self._owned
+        if (
+            owned is None
+            or type(binding) is not PlayerBinding
+            or binding != owned.binding
+        ):
+            raise LifecycleError("emergency stop binding does not match the owned admitted run")
+
+        try:
+            member_count = SchemaV2LifecycleSupervisor._prove_stopped_and_close_owned(
+                self, owned, binding
+            )
+        except BaseException as exc:
+            try:
+                self._state.commit(
+                    ActiveV2(
+                        owned.configuration_generation,
+                        owned.account_key,
+                        owned.slot.index,
+                        owned.run_nonce,
+                        BlockReason.STOP_PROOF,
+                    )
+                )
+            except BaseException:  # noqa: BLE001 - prior ACTIVE remains fail-closed
+                pass
+            if isinstance(exc, LifecycleError):
+                raise
+            raise LifecycleError("emergency owned stop proof failed") from exc
+
+        blocked = ActiveV2(
+            owned.configuration_generation,
+            owned.account_key,
+            owned.slot.index,
+            owned.run_nonce,
+            BlockReason.SUCCESSOR_PLAN,
+        )
+        committed = self._state.commit(blocked)
+        if type(committed) is not ActiveV2 or committed != blocked:
+            raise LifecycleError("emergency blocked ACTIVE was not durably committed")
+        self._owned = None
+        return StopRecord(
+            owned.slot.index,
+            owned.run_nonce,
+            member_count,
+            2,
+            True,
+        )
+
     def _prove_stopped_and_close_owned(
         self, owned: _OwnedRunV2, binding: PlayerBinding
     ) -> int:

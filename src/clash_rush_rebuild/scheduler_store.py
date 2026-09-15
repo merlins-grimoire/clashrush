@@ -1203,6 +1203,73 @@ class SQLiteJobStore:
         except BaseException as exc:
             raise SchedulerStoreError("scheduler admissions could not be loaded") from exc
 
+    def release_unstarted_admission(self, admitted_visit: AdmittedVisit) -> QueueJob:
+        """Atomically return a pre-ACTIVE admission to its unchanged eligible job."""
+        if type(admitted_visit) is not AdmittedVisit:
+            raise SchedulerStoreError("unstarted release requires an exact admitted visit")
+        connection = SQLiteJobStore._require_open(self)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            visit_row = connection.execute(
+                """SELECT * FROM scheduler_visits
+                   WHERE visit_generation = ? AND open_singleton = 1""",
+                (admitted_visit.visit_generation.value,),
+            ).fetchone()
+            if (
+                visit_row is None
+                or SQLiteJobStore._decode_admitted_visit(visit_row) != admitted_visit
+            ):
+                raise SchedulerStoreError("unstarted admission is stale")
+            if connection.execute(
+                """SELECT 1 FROM scheduler_actions WHERE visit_generation = ?
+                   UNION ALL
+                   SELECT 1 FROM scheduler_successor_plans WHERE visit_generation = ?""",
+                (
+                    admitted_visit.visit_generation.value,
+                    admitted_visit.visit_generation.value,
+                ),
+            ).fetchone() is not None:
+                raise SchedulerStoreError("started visit cannot be released")
+            changed_job = connection.execute(
+                """UPDATE scheduler_jobs SET state = 'ELIGIBLE'
+                   WHERE account_key = ? AND configuration_generation = ?
+                     AND job_generation = ? AND state = 'ADMITTED'""",
+                (
+                    admitted_visit.job.account_key.value,
+                    admitted_visit.job.configuration_generation.value,
+                    admitted_visit.job.job_generation.value,
+                ),
+            )
+            deleted_visit = connection.execute(
+                """DELETE FROM scheduler_visits
+                   WHERE visit_generation = ? AND visit_nonce = ?
+                     AND open_singleton = 1 AND finalized = 0""",
+                (
+                    admitted_visit.visit_generation.value,
+                    admitted_visit.visit_nonce,
+                ),
+            )
+            if changed_job.rowcount != 1 or deleted_visit.rowcount != 1:
+                raise SchedulerStoreError("unstarted admission release was not atomic")
+            connection.execute("COMMIT")
+            job = admitted_visit.job
+            return QueueJob(
+                account_key=job.account_key,
+                configuration_generation=job.configuration_generation,
+                job_generation=job.job_generation,
+                availability_event=job.availability_event,
+                available_at=job.available_at,
+                due_at=job.due_at,
+                pending_lane=job.pending_lane,
+                state=QueueState.ELIGIBLE,
+            )
+        except BaseException as exc:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            if isinstance(exc, SchedulerStoreError):
+                raise
+            raise SchedulerStoreError("unstarted admission release failed") from exc
+
     @staticmethod
     def _require_successor_plan(value: object) -> SuccessorPlan:
         if type(value) is not SuccessorPlan:
@@ -1464,6 +1531,20 @@ class SQLiteJobStore:
                 raise SchedulerStoreError("stale scheduler successor finalization")
             current = SQLiteJobStore._decode(current_row)
             if visit_row["finalized"] == 1 and visit_row["open_singleton"] is None:
+                successor = plan.successor
+                if current.job_generation.value < successor.job_generation.value or (
+                    current.job_generation == successor.job_generation
+                    and (
+                        current.account_key != successor.account_key
+                        or current.configuration_generation
+                        != successor.configuration_generation
+                        or current.availability_event != successor.availability_event
+                        or current.available_at != successor.available_at
+                        or current.due_at != successor.due_at
+                        or current.pending_lane is not successor.pending_lane
+                    )
+                ):
+                    raise SchedulerStoreError("stale scheduler successor finalization")
                 connection.execute("COMMIT")
                 return plan.successor
             if (
