@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from clash_rush_rebuild.cli import build_native_state_store, main
 
 
@@ -77,3 +79,41 @@ def test_native_state_composition_creates_validated_private_var_before_port(
 
     assert (project / "var").is_dir()
     assert store.__class__.__name__ == "LifecycleStateStore"
+
+
+def test_cli_runs_guided_setup_without_composing_lifecycle() -> None:
+    events: list[str] = []
+
+    status = main(
+        ["setup", "--project-root", "X"],
+        cycle_builder=lambda *_args: events.append("cycle"),
+        setup_runner=lambda root: events.append(f"setup:{root}"),
+    )
+
+    assert status == 0
+    assert events == [f"setup:{Path('X')}"]
+
+
+def test_cli_exports_synthetic_installation_to_selected_file(tmp_path: Path) -> None:
+    output = tmp_path / "example.toml"
+
+    status = main(
+        ["export-setup-example", "--output", str(output)],
+        synthetic_exporter=lambda: "schema = 2\n",
+    )
+
+    assert status == 0
+    assert output.read_text(encoding="utf-8") == "schema = 2\n"
+
+
+def test_cli_does_not_overwrite_an_existing_setup_example(tmp_path: Path) -> None:
+    output = tmp_path / "example.toml"
+    output.write_text("keep\n", encoding="utf-8")
+
+    status = main(
+        ["export-setup-example", "--output", str(output)],
+        synthetic_exporter=lambda: "schema = 2\n",
+    )
+
+    assert status == 1
+    assert output.read_text(encoding="utf-8") == "keep\n"

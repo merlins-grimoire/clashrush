@@ -11,6 +11,7 @@ from typing import Protocol
 
 from .config import load_private_registry
 from .cycle import InertCycle
+from .guided_setup import export_synthetic_installation, run_guided_setup
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
 from .lifecycle_state import LifecycleStateStore
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
@@ -98,6 +99,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     initialize.add_argument("--project-root", required=True)
     initialize.add_argument("--slots", required=True)
+    setup = subcommands.add_parser(
+        "setup",
+        help="interactively create the private installation configuration",
+    )
+    setup.add_argument("--project-root", required=True)
+    export = subcommands.add_parser(
+        "export-setup-example",
+        help="write a public-safe synthetic installation configuration",
+    )
+    export.add_argument("--output", required=True)
     return parser
 
 
@@ -105,11 +116,20 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     cycle_builder: Callable[[str, str], CycleCommand] = build_inert_cycle,
+    setup_runner: Callable[[Path], object] = run_guided_setup,
+    synthetic_exporter: Callable[[], str] = export_synthetic_installation,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "visit-one" and args.owner_approved is not True:
         return 2
     try:
+        if args.command == "export-setup-example":
+            with Path(args.output).open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(synthetic_exporter())
+            return 0
+        if args.command == "setup":
+            setup_runner(Path(args.project_root))
+            return 0
         cycle = cycle_builder(args.project_root, args.slots)
         if args.command == "initialize":
             cycle.initialize()
