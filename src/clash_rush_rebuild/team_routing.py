@@ -211,6 +211,16 @@ class CentralTeamRouter:
         }
         self._team_max_epochs: dict[str, int] = {team: 0 for team in route_records}
         self._inflight: dict[str, str] = {}
+        self._latest_observed_at: int | None = None
+
+    def _observe_time(self, now: int) -> None:
+        if (
+            not _valid_time(now)
+            or self._latest_observed_at is not None
+            and now < self._latest_observed_at
+        ):
+            raise TeamRoutingError("current time is invalid")
+        self._latest_observed_at = now
 
     def _authenticated_team(
         self, runner: AuthenticatedRunner, transport: TransportBinding
@@ -251,8 +261,7 @@ class CentralTeamRouter:
         transport: TransportBinding,
         now: int,
     ) -> _ConnectionRecord:
-        if not _valid_time(now):
-            raise TeamRoutingError("current time is invalid")
+        CentralTeamRouter._observe_time(self, now)
         record = CentralTeamRouter._current_connection(self, runner, transport)
         active_generation = self._routes[record.team_key.value]
         if (
@@ -301,8 +310,7 @@ class CentralTeamRouter:
         heartbeat: ConnectionHeartbeat,
         now: int,
     ) -> int:
-        if not _valid_time(now):
-            raise TeamRoutingError("current time is invalid")
+        CentralTeamRouter._observe_time(self, now)
         record = CentralTeamRouter._current_connection(self, runner, transport)
         heartbeat_copy = _copy_heartbeat(heartbeat)
         active_generation = self._routes[record.team_key.value]
@@ -421,15 +429,14 @@ class CentralTeamRouter:
             acknowledgement, record.command
         ):
             raise TeamRoutingError("acknowledgement does not match in-flight command")
+        if record.command.configuration_generation != self._routes[team]:
+            raise TeamRoutingError("command configuration generation is inactive")
         if record.terminal_acknowledgement is not None:
             if record.terminal_acknowledgement == canonical:
                 return AcknowledgementDecision.DUPLICATE
             raise TeamRoutingError("acknowledgement conflicts with terminal record")
         if self._inflight.get(team) != acknowledgement.command_id.value:
             raise TeamRoutingError("acknowledgement does not match in-flight command")
-        if record.command.configuration_generation != self._routes[team]:
-            raise TeamRoutingError("command configuration generation is inactive")
-
         record.terminal_acknowledgement = bytes(canonical)
         del self._inflight[team]
         return AcknowledgementDecision.RECORDED

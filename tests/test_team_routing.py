@@ -242,6 +242,217 @@ def test_heartbeat_is_freshness_only_and_expires_at_exact_deadline() -> None:
     assert not hasattr(ConnectionHeartbeat(GENERATION), "command")
 
 
+@pytest.mark.parametrize("operation", ("heartbeat", "delivery", "acknowledgement"))
+def test_expiry_observation_prevents_clock_rollback_freshness_resurrection(
+    operation: str,
+) -> None:
+    router, _, _, runner = connected_router()
+    payload = encode_command(command())
+    router.register_command(payload)
+    router.deliver(runner, transport=transport(), now=101)
+    acknowledgement = RunnerCommandPersistence(TEAM, GENERATION).accept_delivery(
+        payload, now=101
+    )
+
+    with pytest.raises(TeamRoutingError, match="heartbeat is stale"):
+        router.deliver(runner, transport=transport(), now=130)
+
+    if operation == "heartbeat":
+        action = lambda: router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION),
+            now=129,
+        )
+    elif operation == "delivery":
+        action = lambda: router.deliver(runner, transport=transport(), now=129)
+    else:
+        action = lambda: router.accept_acknowledgement(
+            runner,
+            transport=transport(),
+            payload=acknowledgement,
+            now=129,
+        )
+
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        action()
+    assert router.terminal_acknowledgement(command().command_id) is None
+
+
+@pytest.mark.parametrize("operation", ("heartbeat", "delivery", "acknowledgement"))
+def test_successful_time_ingress_rejects_later_clock_regression(operation: str) -> None:
+    router, _, _, runner = connected_router()
+    payload = encode_command(command())
+    router.register_command(payload)
+    acknowledgement = RunnerCommandPersistence(TEAM, GENERATION).accept_delivery(
+        payload, now=101
+    )
+
+    if operation == "heartbeat":
+        router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION),
+            now=110,
+        )
+        action = lambda: router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION),
+            now=109,
+        )
+    elif operation == "delivery":
+        assert router.deliver(runner, transport=transport(), now=110) == payload
+        action = lambda: router.deliver(runner, transport=transport(), now=109)
+    else:
+        router.deliver(runner, transport=transport(), now=101)
+        assert router.accept_acknowledgement(
+            runner,
+            transport=transport(),
+            payload=acknowledgement,
+            now=110,
+        ) is AcknowledgementDecision.RECORDED
+        action = lambda: router.accept_acknowledgement(
+            runner,
+            transport=transport(),
+            payload=acknowledgement,
+            now=109,
+        )
+
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        action()
+
+
+def test_rejected_time_bearing_ingress_still_advances_service_clock() -> None:
+    router, _, _, runner = connected_router()
+
+    with pytest.raises(TeamRoutingError, match="heartbeat is invalid"):
+        router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION, protocol_version=2),
+            now=120,
+        )
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION),
+            now=119,
+        )
+
+
+@pytest.mark.parametrize("operation", ("heartbeat", "delivery", "acknowledgement"))
+@pytest.mark.parametrize("now", (True, -1, 2**63, 1.0, None))
+def test_service_clock_rejects_non_exact_or_out_of_range_values(
+    operation: str, now: object
+) -> None:
+    router, _, _, runner = connected_router()
+    payload = encode_command(command())
+    router.register_command(payload)
+    acknowledgement = RunnerCommandPersistence(TEAM, GENERATION).accept_delivery(
+        payload, now=101
+    )
+
+    if operation == "heartbeat":
+        action = lambda: router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION),
+            now=now,  # type: ignore[arg-type]
+        )
+    elif operation == "delivery":
+        action = lambda: router.deliver(
+            runner, transport=transport(), now=now  # type: ignore[arg-type]
+        )
+    else:
+        action = lambda: router.accept_acknowledgement(
+            runner,
+            transport=transport(),
+            payload=acknowledgement,
+            now=now,  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        action()
+    assert router.terminal_acknowledgement(command().command_id) is None
+
+
+def test_service_clock_accepts_signed_64_maximum_only_without_regression() -> None:
+    router, _, _, runner = connected_router()
+    payload = encode_command(command())
+    router.register_command(payload)
+    maximum = 2**63 - 1
+
+    router.record_heartbeat(
+        runner,
+        transport=transport(),
+        heartbeat=ConnectionHeartbeat(GENERATION),
+        now=maximum,
+    )
+    assert router.deliver(runner, transport=transport(), now=maximum) == payload
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        router.deliver(runner, transport=transport(), now=maximum - 1)
+
+
+def test_monotonic_clock_survives_connection_replacement_and_recovers_with_newer_heartbeat() -> None:
+    router, authority, credential, runner = connected_router()
+    with pytest.raises(TeamRoutingError, match="heartbeat is stale"):
+        router.deliver(runner, transport=transport(), now=130)
+
+    challenge = authority.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=50,
+        expires_at=80,
+    )
+    proof = create_authentication_proof(credential, challenge, transport=transport())
+    replacement = authority.complete_authentication(
+        challenge,
+        proof,
+        transport=transport(),
+        now=55,
+    ).runner
+    router.attach(replacement, transport=transport())
+
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        router.record_heartbeat(
+            replacement,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(GENERATION),
+            now=129,
+        )
+    assert router.record_heartbeat(
+        replacement,
+        transport=transport(),
+        heartbeat=ConnectionHeartbeat(GENERATION),
+        now=131,
+    ) == 2
+    assert router.deliver(replacement, transport=transport(), now=131) is None
+
+
+def test_monotonic_clock_survives_route_activation_and_recovers_with_newer_heartbeat() -> None:
+    router, _, _, runner = connected_router()
+    with pytest.raises(TeamRoutingError, match="heartbeat is stale"):
+        router.deliver(runner, transport=transport(), now=130)
+    router.activate_route(TeamRoute(TEAM, NEXT_GENERATION))
+
+    with pytest.raises(TeamRoutingError, match="current time is invalid"):
+        router.record_heartbeat(
+            runner,
+            transport=transport(),
+            heartbeat=ConnectionHeartbeat(NEXT_GENERATION),
+            now=129,
+        )
+    router.record_heartbeat(
+        runner,
+        transport=transport(),
+        heartbeat=ConnectionHeartbeat(NEXT_GENERATION),
+        now=131,
+    )
+    assert router.deliver(runner, transport=transport(), now=131) is None
+
+
 def test_expired_heartbeat_rejects_ack_before_terminal_persistence() -> None:
     router, _, _, runner = connected_router()
     payload = encode_command(command())
@@ -300,6 +511,39 @@ def test_generation_retarget_invalidates_old_heartbeat_command_and_duplicate_rep
     )
     with pytest.raises(TeamRoutingError, match="configuration generation is inactive"):
         router.deliver(runner, transport=transport(), now=104)
+
+
+def test_historical_terminal_acknowledgement_is_rejected_by_active_generation_gate() -> None:
+    router, _, _, runner = connected_router()
+    payload = encode_command(command())
+    router.register_command(payload)
+    router.deliver(runner, transport=transport(), now=101)
+    acknowledgement = RunnerCommandPersistence(TEAM, GENERATION).accept_delivery(
+        payload, now=101
+    )
+    assert router.accept_acknowledgement(
+        runner,
+        transport=transport(),
+        payload=acknowledgement,
+        now=102,
+    ) is AcknowledgementDecision.RECORDED
+
+    router.activate_route(TeamRoute(TEAM, NEXT_GENERATION))
+    router.record_heartbeat(
+        runner,
+        transport=transport(),
+        heartbeat=ConnectionHeartbeat(NEXT_GENERATION),
+        now=103,
+    )
+
+    with pytest.raises(TeamRoutingError, match="configuration generation is inactive"):
+        router.accept_acknowledgement(
+            runner,
+            transport=transport(),
+            payload=acknowledgement,
+            now=104,
+        )
+    assert router.terminal_acknowledgement(command().command_id) == acknowledgement
 
 
 def test_wrong_protocol_command_and_ack_are_rejected_before_state_change() -> None:
