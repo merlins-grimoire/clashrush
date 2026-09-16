@@ -552,14 +552,23 @@ class EnrollmentAuthority:
     ) -> EnrollmentGrant:
         def issue() -> EnrollmentGrant:
             team_snapshot = _copy_team_key(team_key, error=EnrollmentError)
+            if not _valid_time(now) or not _valid_time(expires_at):
+                raise ValueError
+            team_value = team_snapshot.value
             token_id = EnrollmentTokenId(self._random_id())
             secret = EnrollmentSecret(self._random_secret())
-            grant = EnrollmentGrant(token_id, team_snapshot, secret, now, expires_at)
+            grant = EnrollmentGrant(
+                token_id,
+                TeamKey(team_value),
+                secret,
+                now,
+                expires_at,
+            )
             if token_id.value in self._enrollments:
                 raise ValueError
             self._enrollments[token_id.value] = _EnrollmentRecord(
                 token_id=EnrollmentTokenId(token_id.value),
-                team_key=TeamKey(team_key.value),
+                team_key=TeamKey(team_value),
                 verifier=_verifier(
                     _DOMAIN_ENROLLMENT, token_id.value, secret.value
                 ),
@@ -581,18 +590,20 @@ class EnrollmentAuthority:
         transport_error = False
         try:
             _transport_hash(transport)
+            if not _valid_time(now):
+                raise ValueError
             if type(grant) is not EnrollmentGrant:
                 raise ValueError
             token_id = _copy_enrollment_token_id(grant.token_id)
             record = self._enrollments.get(token_id.value)
             if record is None or record.consumed or not record.issued_at <= now < record.expires_at:
                 raise ValueError
-            # Burn any attempted use after transport validation, including a bad secret.
+            # A malformed time cannot consume.  After transport and exact time
+            # validation, burn any attempted use, including a bad secret.
             self._enrollments[record.token_id.value] = replace(record, consumed=True)
             grant_snapshot = _copy_enrollment_grant(grant)
             if (
-                not _valid_time(now)
-                or grant_snapshot.token_id != record.token_id
+                grant_snapshot.token_id != record.token_id
                 or grant_snapshot.team_key != record.team_key
                 or grant_snapshot.issued_at != record.issued_at
                 or grant_snapshot.expires_at != record.expires_at
@@ -675,10 +686,13 @@ class EnrollmentAuthority:
         inactive = False
         try:
             binding_hash = _transport_hash(transport)
+            if not _valid_time(now) or not _valid_time(expires_at):
+                raise ValueError
             credential_snapshot = _copy_credential_id(credential_id)
             record = self._credentials[credential_snapshot.value]
-            if record.revoked_at is not None or not _valid_time(now) or now < record.issued_at:
-                raise AuthenticationError("runner credential is inactive")
+            if record.revoked_at is not None or now < record.issued_at:
+                inactive = True
+                raise ValueError
             raw_id, raw_nonce = self._random_challenge()
             challenge = AuthenticationChallenge(
                 challenge_id=ChallengeId(raw_id),
@@ -696,8 +710,6 @@ class EnrollmentAuthority:
                 consumed=False,
             )
             return challenge
-        except AuthenticationError as exc:
-            inactive = str(exc) == "runner credential is inactive"
         except Exception:
             pass
         if inactive:
@@ -713,13 +725,16 @@ class EnrollmentAuthority:
         now: int,
     ) -> AuthenticationResult:
         try:
+            if not _valid_time(now):
+                raise ValueError
             if type(challenge) is not AuthenticationChallenge:
                 raise ValueError
             challenge_id = _copy_challenge_id(challenge.challenge_id)
             stored = self._challenges.get(challenge_id.value)
             if stored is None or stored.consumed:
                 raise ValueError
-            # A challenge is single-attempt, even if the proof or channel is wrong.
+            # A malformed time cannot consume.  After exact time validation, a
+            # challenge is single-attempt even if the proof or channel is wrong.
             self._challenges[challenge.challenge_id.value] = _ChallengeRecord(
                 challenge=stored.challenge,
                 consumed=True,
@@ -728,10 +743,7 @@ class EnrollmentAuthority:
             proof_snapshot = _copy_authentication_proof(proof)
             if challenge_snapshot != stored.challenge:
                 raise ValueError
-            if (
-                not _valid_time(now)
-                or not challenge_snapshot.issued_at <= now < challenge_snapshot.expires_at
-            ):
+            if not challenge_snapshot.issued_at <= now < challenge_snapshot.expires_at:
                 raise ValueError
             binding_hash = _transport_hash(transport)
             if not hmac.compare_digest(

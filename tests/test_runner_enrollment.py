@@ -49,6 +49,19 @@ class StringSubclass(str):
     pass
 
 
+class HostileTime:
+    def __init__(self) -> None:
+        self.comparisons: list[str] = []
+
+    def __ge__(self, other: object) -> bool:
+        self.comparisons.append("ge")
+        return True
+
+    def __lt__(self, other: object) -> bool:
+        self.comparisons.append("lt")
+        return True
+
+
 def transport(binding: bytes = CHANNEL_BINDING) -> TransportBinding:
     return TransportBinding(
         outbound_from_runner=True,
@@ -916,3 +929,142 @@ def test_public_boundaries_reject_corrupted_values_without_private_exception_con
         create_authentication_proof(credential, challenge, transport=transport())
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("mutating_source", ["id", "secret"])
+def test_enrollment_generators_cannot_retarget_the_service_owned_team_snapshot(
+    mutating_source: str,
+) -> None:
+    def build() -> tuple[EnrollmentAuthority, EnrollmentGrant]:
+        team = TeamKey("synthetic-team")
+        ids = iter((TOKEN_ID, CREDENTIAL_ID))
+
+        def random_id() -> str:
+            if mutating_source == "id":
+                object.__setattr__(team, "value", OTHER_TEAM.value)
+            return next(ids)
+
+        def random_secret() -> bytes:
+            if mutating_source == "secret":
+                object.__setattr__(team, "value", OTHER_TEAM.value)
+            return TOKEN_SECRET
+
+        service = EnrollmentAuthority(random_id=random_id, random_secret=random_secret)
+        return service, service.issue_enrollment(team, now=100, expires_at=160)
+
+    service, grant = build()
+
+    assert grant.team_key == TEAM
+    assert service.enroll(grant, transport=transport(), now=120).team_key == TEAM
+
+    service, grant = build()
+    with pytest.raises(EnrollmentError, match="unavailable"):
+        service.enroll(
+            dataclasses.replace(grant, team_key=OTHER_TEAM),
+            transport=transport(),
+            now=120,
+        )
+
+
+def test_challenge_generator_exception_formatting_is_never_dispatched() -> None:
+    service, credential = enrolled_authority()
+    formatting_calls: list[str] = []
+
+    class RaisingFormatterError(AuthenticationError):
+        def __str__(self) -> str:
+            formatting_calls.append("str")
+            raise KeyError("synthetic-sensitive-value")
+
+    def fail_challenge() -> tuple[str, bytes]:
+        raise RaisingFormatterError("synthetic-sensitive-value")
+
+    service._random_challenge = fail_challenge
+    with pytest.raises(AuthenticationError) as raised:
+        service.begin_authentication(
+            credential.credential_id,
+            transport=transport(),
+            now=200,
+            expires_at=230,
+        )
+
+    assert str(raised.value) == "runner authentication could not begin"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert formatting_calls == []
+
+
+def test_malformed_enrollment_time_dispatches_nothing_and_does_not_consume() -> None:
+    service = authority()
+    grant = service.issue_enrollment(TEAM, now=100, expires_at=160)
+    hostile = HostileTime()
+
+    with pytest.raises(EnrollmentError, match="unavailable") as raised:
+        service.enroll(grant, transport=transport(), now=hostile)  # type: ignore[arg-type]
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert hostile.comparisons == []
+    assert service.enroll(grant, transport=transport(), now=120).team_key == TEAM
+
+
+def test_malformed_completion_time_dispatches_nothing_and_does_not_consume() -> None:
+    service, credential = enrolled_authority()
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    proof = create_authentication_proof(credential, challenge, transport=transport())
+    hostile = HostileTime()
+
+    with pytest.raises(AuthenticationError, match="authentication failed") as raised:
+        service.complete_authentication(
+            challenge,
+            proof,
+            transport=transport(),
+            now=hostile,  # type: ignore[arg-type]
+        )
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert hostile.comparisons == []
+    assert service.complete_authentication(
+        challenge,
+        proof,
+        transport=transport(),
+        now=210,
+    ).action is AuthAction.AUTHENTICATED
+
+
+def test_malformed_issue_and_begin_times_do_not_invoke_generators_or_store_state() -> None:
+    calls: list[str] = []
+
+    def random_id() -> str:
+        calls.append("id")
+        return TOKEN_ID
+
+    def random_secret() -> bytes:
+        calls.append("secret")
+        return TOKEN_SECRET
+
+    service = EnrollmentAuthority(random_id=random_id, random_secret=random_secret)
+    with pytest.raises(EnrollmentError, match="could not be issued"):
+        service.issue_enrollment(TEAM, now=True, expires_at=160)
+    assert calls == []
+
+    service, credential = enrolled_authority()
+
+    def random_challenge() -> tuple[str, bytes]:
+        calls.append("challenge")
+        return CHALLENGE_ID, CHALLENGE_NONCE
+
+    service._random_challenge = random_challenge
+    with pytest.raises(AuthenticationError, match="could not begin"):
+        service.begin_authentication(
+            credential.credential_id,
+            transport=transport(),
+            now=200,
+            expires_at=True,
+        )
+    assert calls == []
