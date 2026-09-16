@@ -61,6 +61,29 @@ def _opaque_id(value: object, *, label: str, error: type[ValueError]) -> None:
         raise error(f"{label} must be exactly 32 lowercase hex characters")
 
 
+def _valid_id_wrapper(value: object, expected_type: type[object]) -> bool:
+    if type(value) is not expected_type:
+        return False
+    try:
+        raw_value = value.value
+    except Exception:
+        return False
+    return type(raw_value) is str and _OPAQUE_ID.fullmatch(raw_value) is not None
+
+
+def _valid_team_wrapper(value: object) -> bool:
+    if type(value) is not TeamKey:
+        return False
+    try:
+        raw_value = value.value
+        if type(raw_value) is not str:
+            return False
+        TeamKey(raw_value)
+    except Exception:
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class EnrollmentTokenId:
     value: str
@@ -135,12 +158,17 @@ class EnrollmentGrant:
     expires_at: int
 
     def __post_init__(self) -> None:
-        if type(self.token_id) is not EnrollmentTokenId:
+        if not _valid_id_wrapper(self.token_id, EnrollmentTokenId):
             raise EnrollmentError("enrollment token ID is invalid")
-        if type(self.team_key) is not TeamKey:
+        if not _valid_team_wrapper(self.team_key):
             raise EnrollmentError("enrollment Team is invalid")
         if type(self.secret) is not EnrollmentSecret:
             raise EnrollmentError("enrollment secret is invalid")
+        _secret_bytes(
+            self.secret.value,
+            label="enrollment secret",
+            error=EnrollmentError,
+        )
         if not _valid_time(self.issued_at) or not _valid_time(self.expires_at):
             raise EnrollmentError("enrollment validity is invalid")
         if not self.issued_at < self.expires_at:
@@ -158,12 +186,17 @@ class IssuedRunnerCredential:
     secret: RunnerSecret = field(repr=False)
 
     def __post_init__(self) -> None:
-        if type(self.credential_id) is not CredentialId:
+        if not _valid_id_wrapper(self.credential_id, CredentialId):
             raise AuthenticationError("runner credential ID is invalid")
-        if type(self.team_key) is not TeamKey:
+        if not _valid_team_wrapper(self.team_key):
             raise AuthenticationError("runner credential Team is invalid")
         if type(self.secret) is not RunnerSecret:
             raise AuthenticationError("runner credential secret is invalid")
+        _secret_bytes(
+            self.secret.value,
+            label="runner secret",
+            error=AuthenticationError,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,9 +210,9 @@ class CredentialRecord:
     revoked_at: int | None = None
 
     def __post_init__(self) -> None:
-        if type(self.credential_id) is not CredentialId:
+        if not _valid_id_wrapper(self.credential_id, CredentialId):
             raise AuthenticationError("credential record ID is invalid")
-        if type(self.team_key) is not TeamKey:
+        if not _valid_team_wrapper(self.team_key):
             raise AuthenticationError("credential record Team is invalid")
         _secret_bytes(self.verifier, label="credential verifier", error=AuthenticationError)
         if not _valid_time(self.issued_at):
@@ -200,11 +233,11 @@ class AuthenticationChallenge:
     expires_at: int
 
     def __post_init__(self) -> None:
-        if type(self.challenge_id) is not ChallengeId:
+        if not _valid_id_wrapper(self.challenge_id, ChallengeId):
             raise AuthenticationError("challenge ID is invalid")
-        if type(self.credential_id) is not CredentialId:
+        if not _valid_id_wrapper(self.credential_id, CredentialId):
             raise AuthenticationError("challenge credential is invalid")
-        if type(self.team_key) is not TeamKey:
+        if not _valid_team_wrapper(self.team_key):
             raise AuthenticationError("challenge Team is invalid")
         _secret_bytes(self.nonce, label="challenge nonce", error=AuthenticationError)
         _secret_bytes(
@@ -228,13 +261,18 @@ class AuthenticationProof:
     secret: RunnerSecret = field(repr=False)
 
     def __post_init__(self) -> None:
-        if type(self.challenge_id) is not ChallengeId:
+        if not _valid_id_wrapper(self.challenge_id, ChallengeId):
             raise AuthenticationError("proof challenge ID is invalid")
-        if type(self.credential_id) is not CredentialId:
+        if not _valid_id_wrapper(self.credential_id, CredentialId):
             raise AuthenticationError("proof credential ID is invalid")
         _secret_bytes(self.nonce, label="proof nonce", error=AuthenticationError)
         if type(self.secret) is not RunnerSecret:
             raise AuthenticationError("authentication proof secret is invalid")
+        _secret_bytes(
+            self.secret.value,
+            label="runner secret",
+            error=AuthenticationError,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,9 +283,9 @@ class AuthenticatedRunner:
     channel_binding_hash: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
-        if type(self.credential_id) is not CredentialId:
+        if not _valid_id_wrapper(self.credential_id, CredentialId):
             raise AuthenticationError("authenticated credential is invalid")
-        if type(self.team_key) is not TeamKey:
+        if not _valid_team_wrapper(self.team_key):
             raise AuthenticationError("authenticated Team is invalid")
         if not _valid_time(self.authenticated_at):
             raise AuthenticationError("authentication time is invalid")
@@ -272,6 +310,128 @@ class AuthenticationResult:
             raise AuthenticationError("authentication result action is invalid")
         if type(self.runner) is not AuthenticatedRunner:
             raise AuthenticationError("authentication result runner is invalid")
+        runner_valid = True
+        try:
+            AuthenticatedRunner(
+                credential_id=self.runner.credential_id,
+                team_key=self.runner.team_key,
+                authenticated_at=self.runner.authenticated_at,
+                channel_binding_hash=self.runner.channel_binding_hash,
+            )
+        except Exception:
+            runner_valid = False
+        if not runner_valid:
+            raise AuthenticationError("authentication result runner is invalid")
+
+
+def _copy_team_key(value: object, *, error: type[ValueError]) -> TeamKey:
+    if type(value) is not TeamKey or type(value.value) is not str:
+        raise error("Team identity is invalid")
+    try:
+        return TeamKey(value.value)
+    except Exception:
+        raise error("Team identity is invalid") from None
+
+
+def _copy_enrollment_token_id(value: object) -> EnrollmentTokenId:
+    if type(value) is not EnrollmentTokenId:
+        raise EnrollmentError("enrollment token ID is invalid")
+    return EnrollmentTokenId(value.value)
+
+
+def _copy_credential_id(value: object) -> CredentialId:
+    if type(value) is not CredentialId:
+        raise AuthenticationError("credential ID is invalid")
+    return CredentialId(value.value)
+
+
+def _copy_challenge_id(value: object) -> ChallengeId:
+    if type(value) is not ChallengeId:
+        raise AuthenticationError("challenge ID is invalid")
+    return ChallengeId(value.value)
+
+
+def _copy_enrollment_grant(value: object) -> EnrollmentGrant:
+    if type(value) is not EnrollmentGrant:
+        raise EnrollmentError("enrollment grant is invalid")
+    token_id = _copy_enrollment_token_id(value.token_id)
+    team_key = _copy_team_key(value.team_key, error=EnrollmentError)
+    if type(value.secret) is not EnrollmentSecret:
+        raise EnrollmentError("enrollment secret is invalid")
+    _secret_bytes(value.secret.value, label="enrollment secret", error=EnrollmentError)
+    return EnrollmentGrant(
+        token_id=token_id,
+        team_key=team_key,
+        secret=EnrollmentSecret(bytes(value.secret.value)),
+        issued_at=value.issued_at,
+        expires_at=value.expires_at,
+    )
+
+
+def _copy_issued_credential(value: object) -> IssuedRunnerCredential:
+    if type(value) is not IssuedRunnerCredential:
+        raise AuthenticationError("runner credential is invalid")
+    credential_id = _copy_credential_id(value.credential_id)
+    team_key = _copy_team_key(value.team_key, error=AuthenticationError)
+    if type(value.secret) is not RunnerSecret:
+        raise AuthenticationError("runner credential secret is invalid")
+    _secret_bytes(value.secret.value, label="runner secret", error=AuthenticationError)
+    return IssuedRunnerCredential(
+        credential_id=credential_id,
+        team_key=team_key,
+        secret=RunnerSecret(bytes(value.secret.value)),
+    )
+
+
+def _copy_authentication_challenge(value: object) -> AuthenticationChallenge:
+    if type(value) is not AuthenticationChallenge:
+        raise AuthenticationError("authentication challenge is invalid")
+    _secret_bytes(value.nonce, label="challenge nonce", error=AuthenticationError)
+    _secret_bytes(
+        value.channel_binding_hash,
+        label="channel binding hash",
+        error=AuthenticationError,
+    )
+    return AuthenticationChallenge(
+        challenge_id=_copy_challenge_id(value.challenge_id),
+        credential_id=_copy_credential_id(value.credential_id),
+        team_key=_copy_team_key(value.team_key, error=AuthenticationError),
+        nonce=bytes(value.nonce),
+        channel_binding_hash=bytes(value.channel_binding_hash),
+        issued_at=value.issued_at,
+        expires_at=value.expires_at,
+    )
+
+
+def _copy_authentication_proof(value: object) -> AuthenticationProof:
+    if type(value) is not AuthenticationProof:
+        raise AuthenticationError("authentication proof is invalid")
+    _secret_bytes(value.nonce, label="proof nonce", error=AuthenticationError)
+    if type(value.secret) is not RunnerSecret:
+        raise AuthenticationError("authentication proof secret is invalid")
+    _secret_bytes(value.secret.value, label="runner secret", error=AuthenticationError)
+    return AuthenticationProof(
+        challenge_id=_copy_challenge_id(value.challenge_id),
+        credential_id=_copy_credential_id(value.credential_id),
+        nonce=bytes(value.nonce),
+        secret=RunnerSecret(bytes(value.secret.value)),
+    )
+
+
+def _copy_authenticated_runner(value: object) -> AuthenticatedRunner:
+    if type(value) is not AuthenticatedRunner:
+        raise AuthenticationError("authenticated runner is invalid")
+    _secret_bytes(
+        value.channel_binding_hash,
+        label="authenticated channel binding hash",
+        error=AuthenticationError,
+    )
+    return AuthenticatedRunner(
+        credential_id=_copy_credential_id(value.credential_id),
+        team_key=_copy_team_key(value.team_key, error=AuthenticationError),
+        authenticated_at=value.authenticated_at,
+        channel_binding_hash=bytes(value.channel_binding_hash),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +448,12 @@ class _EnrollmentRecord:
 class _ChallengeRecord:
     challenge: AuthenticationChallenge
     consumed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionRecord:
+    runner: AuthenticatedRunner
+    snapshot: AuthenticatedRunner
 
 
 def _transport_hash(value: TransportBinding) -> bytes:
@@ -335,21 +501,19 @@ def create_authentication_proof(
     """Create a proof locally without exposing the runner secret."""
 
     def create() -> AuthenticationProof:
-        if type(credential) is not IssuedRunnerCredential:
+        credential_snapshot = _copy_issued_credential(credential)
+        challenge_snapshot = _copy_authentication_challenge(challenge)
+        if credential_snapshot.credential_id != challenge_snapshot.credential_id:
             raise ValueError
-        if type(challenge) is not AuthenticationChallenge:
+        if credential_snapshot.team_key != challenge_snapshot.team_key:
             raise ValueError
-        if credential.credential_id != challenge.credential_id:
-            raise ValueError
-        if credential.team_key != challenge.team_key:
-            raise ValueError
-        if _transport_hash(transport) != challenge.channel_binding_hash:
+        if _transport_hash(transport) != challenge_snapshot.channel_binding_hash:
             raise ValueError
         return AuthenticationProof(
-            challenge_id=ChallengeId(challenge.challenge_id.value),
-            credential_id=CredentialId(challenge.credential_id.value),
-            nonce=bytes(challenge.nonce),
-            secret=RunnerSecret(bytes(credential.secret.value)),
+            challenge_id=ChallengeId(challenge_snapshot.challenge_id.value),
+            credential_id=CredentialId(challenge_snapshot.credential_id.value),
+            nonce=bytes(challenge_snapshot.nonce),
+            secret=RunnerSecret(bytes(credential_snapshot.secret.value)),
         )
 
     return _sanitized(create, "runner authentication proof is invalid", AuthenticationError)
@@ -381,16 +545,16 @@ class EnrollmentAuthority:
         self._enrollments: dict[str, _EnrollmentRecord] = {}
         self._credentials: dict[str, CredentialRecord] = {}
         self._challenges: dict[str, _ChallengeRecord] = {}
+        self._sessions: dict[int, _SessionRecord] = {}
 
     def issue_enrollment(
         self, team_key: TeamKey, *, now: int, expires_at: int
     ) -> EnrollmentGrant:
         def issue() -> EnrollmentGrant:
-            if type(team_key) is not TeamKey:
-                raise ValueError
+            team_snapshot = _copy_team_key(team_key, error=EnrollmentError)
             token_id = EnrollmentTokenId(self._random_id())
             secret = EnrollmentSecret(self._random_secret())
-            grant = EnrollmentGrant(token_id, TeamKey(team_key.value), secret, now, expires_at)
+            grant = EnrollmentGrant(token_id, team_snapshot, secret, now, expires_at)
             if token_id.value in self._enrollments:
                 raise ValueError
             self._enrollments[token_id.value] = _EnrollmentRecord(
@@ -414,19 +578,30 @@ class EnrollmentAuthority:
         transport: TransportBinding,
         now: int,
     ) -> IssuedRunnerCredential:
+        transport_error = False
         try:
             _transport_hash(transport)
-            if type(grant) is not EnrollmentGrant or not _valid_time(now):
+            if type(grant) is not EnrollmentGrant:
                 raise ValueError
-            record = self._enrollments.get(grant.token_id.value)
+            token_id = _copy_enrollment_token_id(grant.token_id)
+            record = self._enrollments.get(token_id.value)
             if record is None or record.consumed or not record.issued_at <= now < record.expires_at:
                 raise ValueError
             # Burn any attempted use after transport validation, including a bad secret.
             self._enrollments[record.token_id.value] = replace(record, consumed=True)
-            if type(grant.secret) is not EnrollmentSecret:
+            grant_snapshot = _copy_enrollment_grant(grant)
+            if (
+                not _valid_time(now)
+                or grant_snapshot.token_id != record.token_id
+                or grant_snapshot.team_key != record.team_key
+                or grant_snapshot.issued_at != record.issued_at
+                or grant_snapshot.expires_at != record.expires_at
+            ):
                 raise ValueError
             supplied = _verifier(
-                _DOMAIN_ENROLLMENT, grant.token_id.value, grant.secret.value
+                _DOMAIN_ENROLLMENT,
+                grant_snapshot.token_id.value,
+                grant_snapshot.secret.value,
             )
             if not hmac.compare_digest(record.verifier, supplied):
                 raise ValueError
@@ -448,17 +623,18 @@ class EnrollmentAuthority:
                 team_key=TeamKey(record.team_key.value),
                 secret=secret,
             )
-        except AuthenticationError as exc:
-            raise EnrollmentError("authenticated outbound transport is required") from None
+        except AuthenticationError:
+            transport_error = True
         except Exception:
             pass
+        if transport_error:
+            raise EnrollmentError("authenticated outbound transport is required")
         raise EnrollmentError("enrollment token is unavailable")
 
     def credential_record(self, credential_id: CredentialId) -> CredentialRecord:
         try:
-            if type(credential_id) is not CredentialId:
-                raise ValueError
-            record = self._credentials[credential_id.value]
+            credential_snapshot = _copy_credential_id(credential_id)
+            record = self._credentials[credential_snapshot.value]
             return CredentialRecord(
                 credential_id=CredentialId(record.credential_id.value),
                 team_key=TeamKey(record.team_key.value),
@@ -471,16 +647,22 @@ class EnrollmentAuthority:
         raise EnrollmentError("unknown credential")
 
     def revoke(self, credential_id: CredentialId, *, now: int) -> None:
+        failed = False
         try:
-            if type(credential_id) is not CredentialId or not _valid_time(now):
+            credential_snapshot = _copy_credential_id(credential_id)
+            if not _valid_time(now):
                 raise ValueError
-            record = self._credentials[credential_id.value]
+            record = self._credentials[credential_snapshot.value]
             if now < record.issued_at:
                 raise ValueError
             if record.revoked_at is None:
-                self._credentials[credential_id.value] = replace(record, revoked_at=now)
+                self._credentials[credential_snapshot.value] = replace(
+                    record, revoked_at=now
+                )
         except Exception:
-            raise AuthenticationError("credential revocation failed") from None
+            failed = True
+        if failed:
+            raise AuthenticationError("credential revocation failed")
 
     def begin_authentication(
         self,
@@ -490,11 +672,11 @@ class EnrollmentAuthority:
         now: int,
         expires_at: int,
     ) -> AuthenticationChallenge:
+        inactive = False
         try:
             binding_hash = _transport_hash(transport)
-            if type(credential_id) is not CredentialId:
-                raise ValueError
-            record = self._credentials[credential_id.value]
+            credential_snapshot = _copy_credential_id(credential_id)
+            record = self._credentials[credential_snapshot.value]
             if record.revoked_at is not None or not _valid_time(now) or now < record.issued_at:
                 raise AuthenticationError("runner credential is inactive")
             raw_id, raw_nonce = self._random_challenge()
@@ -515,10 +697,11 @@ class EnrollmentAuthority:
             )
             return challenge
         except AuthenticationError as exc:
-            if str(exc) == "runner credential is inactive":
-                raise AuthenticationError("runner credential is inactive") from None
+            inactive = str(exc) == "runner credential is inactive"
         except Exception:
             pass
+        if inactive:
+            raise AuthenticationError("runner credential is inactive")
         raise AuthenticationError("runner authentication could not begin")
 
     def complete_authentication(
@@ -532,7 +715,8 @@ class EnrollmentAuthority:
         try:
             if type(challenge) is not AuthenticationChallenge:
                 raise ValueError
-            stored = self._challenges.get(challenge.challenge_id.value)
+            challenge_id = _copy_challenge_id(challenge.challenge_id)
+            stored = self._challenges.get(challenge_id.value)
             if stored is None or stored.consumed:
                 raise ValueError
             # A challenge is single-attempt, even if the proof or channel is wrong.
@@ -540,30 +724,39 @@ class EnrollmentAuthority:
                 challenge=stored.challenge,
                 consumed=True,
             )
-            if challenge != stored.challenge or type(proof) is not AuthenticationProof:
-                raise ValueError
-            if not _valid_time(now) or not challenge.issued_at <= now < challenge.expires_at:
-                raise ValueError
-            binding_hash = _transport_hash(transport)
-            if not hmac.compare_digest(binding_hash, challenge.channel_binding_hash):
+            challenge_snapshot = _copy_authentication_challenge(challenge)
+            proof_snapshot = _copy_authentication_proof(proof)
+            if challenge_snapshot != stored.challenge:
                 raise ValueError
             if (
-                proof.challenge_id != challenge.challenge_id
-                or proof.credential_id != challenge.credential_id
-                or not hmac.compare_digest(proof.nonce, challenge.nonce)
+                not _valid_time(now)
+                or not challenge_snapshot.issued_at <= now < challenge_snapshot.expires_at
             ):
                 raise ValueError
-            record = self._credentials[challenge.credential_id.value]
+            binding_hash = _transport_hash(transport)
+            if not hmac.compare_digest(
+                binding_hash, challenge_snapshot.channel_binding_hash
+            ):
+                raise ValueError
+            if (
+                proof_snapshot.challenge_id != challenge_snapshot.challenge_id
+                or proof_snapshot.credential_id != challenge_snapshot.credential_id
+                or not hmac.compare_digest(
+                    proof_snapshot.nonce, challenge_snapshot.nonce
+                )
+            ):
+                raise ValueError
+            record = self._credentials[challenge_snapshot.credential_id.value]
             if (
                 record.revoked_at is not None
-                or record.team_key != challenge.team_key
+                or record.team_key != challenge_snapshot.team_key
                 or now < record.issued_at
             ):
                 raise ValueError
             supplied_verifier = _verifier(
                 _DOMAIN_CREDENTIAL,
-                proof.credential_id.value,
-                proof.secret.value,
+                proof_snapshot.credential_id.value,
+                proof_snapshot.secret.value,
             )
             if not hmac.compare_digest(supplied_verifier, record.verifier):
                 raise ValueError
@@ -572,6 +765,10 @@ class EnrollmentAuthority:
                 team_key=TeamKey(record.team_key.value),
                 authenticated_at=now,
                 channel_binding_hash=bytes(binding_hash),
+            )
+            self._sessions[id(runner)] = _SessionRecord(
+                runner=runner,
+                snapshot=_copy_authenticated_runner(runner),
             )
             return AuthenticationResult(AuthAction.AUTHENTICATED, runner)
         except Exception:
@@ -585,15 +782,17 @@ class EnrollmentAuthority:
         transport: TransportBinding,
     ) -> TeamKey:
         try:
-            if type(runner) is not AuthenticatedRunner:
+            runner_snapshot = _copy_authenticated_runner(runner)
+            session = self._sessions[id(runner)]
+            if session.runner is not runner or session.snapshot != runner_snapshot:
                 raise ValueError
-            record = self._credentials[runner.credential_id.value]
+            record = self._credentials[runner_snapshot.credential_id.value]
             binding_hash = _transport_hash(transport)
             if (
                 record.revoked_at is not None
-                or record.team_key != runner.team_key
+                or record.team_key != runner_snapshot.team_key
                 or not hmac.compare_digest(
-                    binding_hash, runner.channel_binding_hash
+                    binding_hash, runner_snapshot.channel_binding_hash
                 )
             ):
                 raise ValueError

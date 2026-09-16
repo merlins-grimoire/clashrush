@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 
 import pytest
 
 from clash_rush_rebuild.discord_control_protocol import TeamKey
 from clash_rush_rebuild.runner_enrollment import (
     AuthAction,
+    AuthenticationChallenge,
     AuthenticatedRunner,
     AuthenticationError,
+    AuthenticationProof,
+    AuthenticationResult,
+    ChallengeId,
     CredentialId,
     EnrollmentAuthority,
     EnrollmentError,
+    EnrollmentGrant,
     EnrollmentSecret,
+    EnrollmentTokenId,
+    IssuedRunnerCredential,
     RunnerSecret,
     TransportBinding,
     create_authentication_proof,
@@ -31,6 +39,14 @@ NEXT_CHALLENGE_ID = "a" * 32
 NEXT_CHALLENGE_NONCE = bytes.fromhex("b" * 64)
 CHANNEL_BINDING = bytes.fromhex("7" * 64)
 OTHER_CHANNEL_BINDING = bytes.fromhex("8" * 64)
+
+
+class BytesSubclass(bytes):
+    pass
+
+
+class StringSubclass(str):
+    pass
 
 
 def transport(binding: bytes = CHANNEL_BINDING) -> TransportBinding:
@@ -418,6 +434,437 @@ def test_session_is_bound_to_exact_team_credential_and_channel() -> None:
             dataclasses.replace(runner, team_key=OTHER_TEAM),
             transport=transport(),
         )
+
+
+def test_session_rejects_forged_and_post_issuance_mutated_runner_identity() -> None:
+    service, credential = enrolled_authority()
+    forged = AuthenticatedRunner(
+        credential_id=CredentialId(credential.credential_id.value),
+        team_key=TeamKey(credential.team_key.value),
+        authenticated_at=120,
+        channel_binding_hash=hashlib.sha256(CHANNEL_BINDING).digest(),
+    )
+
+    with pytest.raises(AuthenticationError, match="inactive"):
+        service.validate_session(forged, transport=transport())
+
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    proof = create_authentication_proof(
+        credential,
+        challenge,
+        transport=transport(),
+    )
+    runner = service.complete_authentication(
+        challenge,
+        proof,
+        transport=transport(),
+        now=210,
+    ).runner
+    object.__setattr__(runner, "authenticated_at", 119)
+
+    with pytest.raises(AuthenticationError, match="inactive"):
+        service.validate_session(runner, transport=transport())
+
+
+def test_nested_bytes_subclasses_are_rejected_at_authentication_boundaries() -> None:
+    service, credential = enrolled_authority()
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    object.__setattr__(credential.secret, "value", BytesSubclass(RUNNER_SECRET))
+
+    with pytest.raises(AuthenticationError, match="proof is invalid"):
+        create_authentication_proof(credential, challenge, transport=transport())
+
+    object.__setattr__(credential.secret, "value", RUNNER_SECRET)
+    proof = create_authentication_proof(
+        credential,
+        challenge,
+        transport=transport(),
+    )
+    object.__setattr__(proof, "nonce", BytesSubclass(CHALLENGE_NONCE))
+
+    with pytest.raises(AuthenticationError, match="authentication failed"):
+        service.complete_authentication(
+            challenge,
+            proof,
+            transport=transport(),
+            now=210,
+        )
+
+
+def test_all_secret_channel_and_nonce_ingress_rejects_nested_bytes_subclasses() -> None:
+    service = authority()
+    grant = service.issue_enrollment(TEAM, now=100, expires_at=160)
+    object.__setattr__(grant.secret, "value", BytesSubclass(TOKEN_SECRET))
+    with pytest.raises(EnrollmentError, match="unavailable"):
+        service.enroll(grant, transport=transport(), now=120)
+
+    service, credential = enrolled_authority()
+    connection = transport()
+    object.__setattr__(connection, "channel_binding", BytesSubclass(CHANNEL_BINDING))
+    with pytest.raises(AuthenticationError, match="could not begin"):
+        service.begin_authentication(
+            credential.credential_id,
+            transport=connection,
+            now=200,
+            expires_at=230,
+        )
+
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    object.__setattr__(challenge, "channel_binding_hash", BytesSubclass(b"x" * 32))
+    with pytest.raises(AuthenticationError, match="proof is invalid"):
+        create_authentication_proof(credential, challenge, transport=transport())
+
+    object.__setattr__(challenge, "channel_binding_hash", hashlib.sha256(CHANNEL_BINDING).digest())
+    proof = create_authentication_proof(credential, challenge, transport=transport())
+    object.__setattr__(proof.secret, "value", BytesSubclass(RUNNER_SECRET))
+    with pytest.raises(AuthenticationError, match="authentication failed"):
+        service.complete_authentication(
+            challenge,
+            proof,
+            transport=transport(),
+            now=210,
+        )
+
+    service, credential = enrolled_authority()
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    proof = create_authentication_proof(credential, challenge, transport=transport())
+    runner = service.complete_authentication(
+        challenge,
+        proof,
+        transport=transport(),
+        now=210,
+    ).runner
+    object.__setattr__(runner, "channel_binding_hash", BytesSubclass(runner.channel_binding_hash))
+    with pytest.raises(AuthenticationError, match="inactive"):
+        service.validate_session(runner, transport=transport())
+
+
+def test_every_external_identity_ingress_revalidates_nested_exact_string_types() -> None:
+    malformed_team = TeamKey("local-team")
+    object.__setattr__(malformed_team, "value", StringSubclass("local-team"))
+    with pytest.raises(EnrollmentError):
+        authority().issue_enrollment(malformed_team, now=100, expires_at=160)
+
+    service, credential = enrolled_authority()
+    malformed_id = CredentialId(credential.credential_id.value)
+    object.__setattr__(malformed_id, "value", StringSubclass(credential.credential_id.value))
+    with pytest.raises(EnrollmentError, match="unknown credential"):
+        service.credential_record(malformed_id)
+    with pytest.raises(AuthenticationError, match="revocation failed"):
+        service.revoke(malformed_id, now=200)
+    with pytest.raises(AuthenticationError, match="could not begin"):
+        service.begin_authentication(
+            malformed_id,
+            transport=transport(),
+            now=200,
+            expires_at=230,
+        )
+
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    object.__setattr__(challenge.team_key, "value", StringSubclass(TEAM.value))
+    with pytest.raises(AuthenticationError, match="proof is invalid"):
+        create_authentication_proof(credential, challenge, transport=transport())
+
+
+def test_session_identity_rejects_replacement_alias_and_nested_mutation() -> None:
+    service, credential = enrolled_authority()
+    challenge = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    proof = create_authentication_proof(credential, challenge, transport=transport())
+    runner = service.complete_authentication(
+        challenge,
+        proof,
+        transport=transport(),
+        now=210,
+    ).runner
+
+    with pytest.raises(AuthenticationError, match="inactive"):
+        service.validate_session(dataclasses.replace(runner), transport=transport())
+
+    object.__setattr__(runner.team_key, "value", "other-team")
+    with pytest.raises(AuthenticationError, match="inactive"):
+        service.validate_session(runner, transport=transport())
+
+
+def test_revocation_is_idempotent_and_preserves_the_first_revocation_time() -> None:
+    service, credential = enrolled_authority()
+    service.revoke(credential.credential_id, now=212)
+    service.revoke(credential.credential_id, now=220)
+    assert service.credential_record(credential.credential_id).revoked_at == 212
+
+
+def test_duplicate_challenge_generation_fails_without_replacing_pending_challenge() -> None:
+    service, credential = enrolled_authority()
+    service._random_challenge = lambda: (CHALLENGE_ID, CHALLENGE_NONCE)
+    first = service.begin_authentication(
+        credential.credential_id,
+        transport=transport(),
+        now=200,
+        expires_at=230,
+    )
+    with pytest.raises(AuthenticationError, match="could not begin"):
+        service.begin_authentication(
+            credential.credential_id,
+            transport=transport(),
+            now=201,
+            expires_at=231,
+        )
+    proof = create_authentication_proof(credential, first, transport=transport())
+    assert service.complete_authentication(
+        first,
+        proof,
+        transport=transport(),
+        now=210,
+    ).action is AuthAction.AUTHENTICATED
+
+
+def test_credential_id_collision_burns_grant_without_replacing_existing_record() -> None:
+    second_token_id = "d" * 32
+    ids = iter((TOKEN_ID, CREDENTIAL_ID, second_token_id, CREDENTIAL_ID))
+    secrets_source = iter(
+        (TOKEN_SECRET, RUNNER_SECRET, OTHER_CHANNEL_BINDING, b"\x99" * 32)
+    )
+    service = EnrollmentAuthority(
+        random_id=ids.__next__,
+        random_secret=secrets_source.__next__,
+        random_challenge=lambda: (CHALLENGE_ID, CHALLENGE_NONCE),
+    )
+    first = service.issue_enrollment(TEAM, now=100, expires_at=160)
+    credential = service.enroll(first, transport=transport(), now=120)
+    second = service.issue_enrollment(TEAM, now=200, expires_at=260)
+
+    with pytest.raises(EnrollmentError, match="unavailable"):
+        service.enroll(second, transport=transport(), now=220)
+    with pytest.raises(EnrollmentError, match="unavailable"):
+        service.enroll(second, transport=transport(), now=221)
+
+    record = service.credential_record(credential.credential_id)
+    assert record.issued_at == 120
+    assert record.revoked_at is None
+
+
+@pytest.mark.parametrize("now", [99, 160])
+def test_enrollment_rejects_true_half_open_expiry_boundaries(now: int) -> None:
+    service = authority()
+    grant = service.issue_enrollment(TEAM, now=100, expires_at=160)
+    with pytest.raises(EnrollmentError, match="unavailable"):
+        service.enroll(grant, transport=transport(), now=now)
+
+
+@pytest.mark.parametrize("now", [100, 159])
+def test_enrollment_accepts_true_half_open_validity_boundaries(now: int) -> None:
+    service = authority()
+    grant = service.issue_enrollment(TEAM, now=100, expires_at=160)
+    assert service.enroll(grant, transport=transport(), now=now).team_key == TEAM
+
+
+def test_public_error_drops_internal_credential_id_cause_and_context() -> None:
+    service = authority()
+    unknown_id = CredentialId("f" * 32)
+
+    with pytest.raises(AuthenticationError) as raised:
+        service.revoke(unknown_id, now=200)
+
+    assert str(raised.value) == "credential revocation failed"
+    assert unknown_id.value not in repr(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_public_failure_matrix_has_no_cause_context_or_opaque_identity() -> None:
+    service, credential = enrolled_authority()
+    unknown = CredentialId("f" * 32)
+    malformed_credential = dataclasses.replace(credential, credential_id=unknown)
+    failures = (
+        lambda: service.credential_record(unknown),
+        lambda: service.revoke(unknown, now=200),
+        lambda: service.begin_authentication(
+            unknown,
+            transport=transport(),
+            now=200,
+            expires_at=230,
+        ),
+        lambda: create_authentication_proof(
+            malformed_credential,
+            object(),  # type: ignore[arg-type]
+            transport=transport(),
+        ),
+        lambda: service.complete_authentication(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            transport=transport(),
+            now=210,
+        ),
+        lambda: service.validate_session(
+            AuthenticatedRunner(
+                credential_id=unknown,
+                team_key=TEAM,
+                authenticated_at=200,
+                channel_binding_hash=hashlib.sha256(CHANNEL_BINDING).digest(),
+            ),
+            transport=transport(),
+        ),
+    )
+
+    for fail in failures:
+        with pytest.raises((EnrollmentError, AuthenticationError)) as raised:
+            fail()
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert unknown.value not in str(raised.value)
+        assert unknown.value not in repr(raised.value)
+
+
+def test_enrollment_failure_paths_drop_internal_cause_context_and_identity() -> None:
+    opaque = "e" * 32
+
+    def fail_id() -> str:
+        raise KeyError(opaque)
+
+    issue_service = EnrollmentAuthority(random_id=fail_id)
+    with pytest.raises(EnrollmentError) as issue_error:
+        issue_service.issue_enrollment(TEAM, now=100, expires_at=160)
+
+    ids = iter((TOKEN_ID,))
+
+    def token_then_fail() -> str:
+        try:
+            return next(ids)
+        except StopIteration:
+            raise KeyError(opaque) from None
+
+    enroll_service = EnrollmentAuthority(
+        random_id=token_then_fail,
+        random_secret=iter((TOKEN_SECRET, RUNNER_SECRET)).__next__,
+    )
+    grant = enroll_service.issue_enrollment(TEAM, now=100, expires_at=160)
+    with pytest.raises(EnrollmentError) as enroll_error:
+        enroll_service.enroll(grant, transport=transport(), now=120)
+
+    for raised in (issue_error, enroll_error):
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert opaque not in str(raised.value)
+        assert opaque not in repr(raised.value)
+
+
+def test_composite_values_revalidate_mutated_nested_wrappers_at_construction() -> None:
+    token_id = EnrollmentTokenId(TOKEN_ID)
+    object.__setattr__(token_id, "value", StringSubclass(TOKEN_ID))
+    with pytest.raises(EnrollmentError):
+        EnrollmentGrant(
+            token_id=token_id,
+            team_key=TEAM,
+            secret=EnrollmentSecret(TOKEN_SECRET),
+            issued_at=100,
+            expires_at=160,
+        )
+
+    credential_id = CredentialId(CREDENTIAL_ID)
+    object.__setattr__(credential_id, "value", StringSubclass(CREDENTIAL_ID))
+    with pytest.raises(AuthenticationError):
+        IssuedRunnerCredential(
+            credential_id=credential_id,
+            team_key=TEAM,
+            secret=RunnerSecret(RUNNER_SECRET),
+        )
+
+    challenge_id = ChallengeId(CHALLENGE_ID)
+    object.__setattr__(challenge_id, "value", StringSubclass(CHALLENGE_ID))
+    with pytest.raises(AuthenticationError):
+        AuthenticationChallenge(
+            challenge_id=challenge_id,
+            credential_id=CredentialId(CREDENTIAL_ID),
+            team_key=TEAM,
+            nonce=CHALLENGE_NONCE,
+            channel_binding_hash=hashlib.sha256(CHANNEL_BINDING).digest(),
+            issued_at=200,
+            expires_at=230,
+        )
+
+    malformed_secret = RunnerSecret(RUNNER_SECRET)
+    object.__setattr__(malformed_secret, "value", BytesSubclass(RUNNER_SECRET))
+    with pytest.raises(AuthenticationError):
+        AuthenticationProof(
+            challenge_id=ChallengeId(CHALLENGE_ID),
+            credential_id=CredentialId(CREDENTIAL_ID),
+            nonce=CHALLENGE_NONCE,
+            secret=malformed_secret,
+        )
+
+    malformed_team = TeamKey(TEAM.value)
+    object.__setattr__(malformed_team, "value", StringSubclass(TEAM.value))
+    with pytest.raises(AuthenticationError):
+        AuthenticatedRunner(
+            credential_id=CredentialId(CREDENTIAL_ID),
+            team_key=malformed_team,
+            authenticated_at=210,
+            channel_binding_hash=hashlib.sha256(CHANNEL_BINDING).digest(),
+        )
+
+    runner = AuthenticatedRunner(
+        credential_id=CredentialId(CREDENTIAL_ID),
+        team_key=TEAM,
+        authenticated_at=210,
+        channel_binding_hash=hashlib.sha256(CHANNEL_BINDING).digest(),
+    )
+    object.__setattr__(runner, "authenticated_at", True)
+    with pytest.raises(AuthenticationError):
+        AuthenticationResult(AuthAction.AUTHENTICATED, runner)
+
+
+def test_composite_construction_sanitizes_deleted_nested_fields() -> None:
+    credential_id = CredentialId(CREDENTIAL_ID)
+    object.__delattr__(credential_id, "value")
+    with pytest.raises(AuthenticationError) as credential_error:
+        IssuedRunnerCredential(
+            credential_id=credential_id,
+            team_key=TEAM,
+            secret=RunnerSecret(RUNNER_SECRET),
+        )
+
+    runner = AuthenticatedRunner(
+        credential_id=CredentialId(CREDENTIAL_ID),
+        team_key=TEAM,
+        authenticated_at=210,
+        channel_binding_hash=hashlib.sha256(CHANNEL_BINDING).digest(),
+    )
+    object.__delattr__(runner, "team_key")
+    with pytest.raises(AuthenticationError) as result_error:
+        AuthenticationResult(AuthAction.AUTHENTICATED, runner)
+
+    for raised in (credential_error, result_error):
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
 
 @pytest.mark.parametrize("value", [b"", b"x" * 31, b"x" * 33, "x" * 32, True])
