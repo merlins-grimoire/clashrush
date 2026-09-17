@@ -81,6 +81,43 @@ class AuditPort(Protocol):
     def outcome(self, transaction_ref: str, confirmed: bool) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class HomeDiagnostic:
+    """Scalar-only reduction of the existing HOME ROI, never a capture artifact.
+
+    Counts are independently aggregated predicate components, not extra gates.
+    No account/binding identity, raw color, image, OCR, or digest is retained.
+    """
+
+    width: int
+    height: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+    roi_pixels: int
+    hue_pixels: int
+    saturation_pixels: int
+    value_pixels: int
+    orange_pixels: int
+
+    @property
+    def reason(self) -> str:
+        if self.roi_pixels == 0:
+            return "ROI_EMPTY"
+        if self.orange_pixels == 0:
+            return "COLOR_ABSENT"
+        if self.orange_pixels / self.roi_pixels > 0.30:
+            return "HOME_POSITIVE"
+        return "FRACTION_LOW"
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"schema": 1, "reason": self.reason, **asdict(self)},
+            sort_keys=True, separators=(",", ":"),
+        )
+
+
 class BgraGameplayRecognizer:
     """Pure transient-frame HOME/army/return recognizer for one exact binding.
 
@@ -110,18 +147,30 @@ class BgraGameplayRecognizer:
         self._capture = capture
         self._account_verified = account_verified
         self._scout_source: bytes | None = None
+        self._home_diagnostic: HomeDiagnostic | None = None
+
+    @property
+    def home_diagnostic(self) -> HomeDiagnostic | None:
+        return self._home_diagnostic
 
     def _frame(self) -> tuple[int, int, bytes]:
-        width, height, pixels = self._capture(self._binding)
-        if (
-            type(width) is not int
-            or type(height) is not int
-            or (width, height) != (self._binding.width, self._binding.height)
-            or type(pixels) is not bytes
-            or len(pixels) != width * height * 4
+        frame = self._capture(self._binding)
+        reason = None
+        if type(frame) is not tuple or len(frame) != 3:
+            reason = "FRAME_SHAPE_INVALID"
+        elif (
+            type(frame[0]) is not int
+            or type(frame[1]) is not int
+            or (frame[0], frame[1]) != (self._binding.width, self._binding.height)
         ):
-            raise RuntimeSafetyError("transient PrintWindow frame is malformed")
-        return width, height, pixels
+            reason = "FRAME_GEOMETRY_MISMATCH"
+        elif type(frame[2]) is not bytes or len(frame[2]) != frame[0] * frame[1] * 4:
+            reason = "FRAME_BYTES_INVALID"
+        if reason is not None:
+            # Remove the capture before raising: traceback locals must not keep it.
+            frame = None
+            raise RuntimeSafetyError(f"transient PrintWindow frame is malformed: {reason}")
+        return frame
 
     @staticmethod
     def _fraction(
@@ -146,7 +195,7 @@ class BgraGameplayRecognizer:
         return matches / count
 
     @staticmethod
-    def _orange(blue: int, green: int, red: int) -> bool:
+    def _hsv(blue: int, green: int, red: int) -> tuple[int, int, int]:
         value = max(red, green, blue)
         minimum = min(red, green, blue)
         difference = value - minimum
@@ -172,19 +221,59 @@ class BgraGameplayRecognizer:
             ) >> shift
             if hue < 0:
                 hue += 180
+        return hue, saturation, value
+
+    @staticmethod
+    def _orange(blue: int, green: int, red: int) -> bool:
+        hue, saturation, value = BgraGameplayRecognizer._hsv(blue, green, red)
         return 5 <= hue <= 30 and saturation >= 100 and value >= 120
+
+    @staticmethod
+    def _diagnose_home(frame: tuple[int, int, bytes]) -> HomeDiagnostic:
+        width, height, pixels = frame
+        try:
+            x0, y0, x1, y1 = BgraGameplayRecognizer._HOME_REGION
+            left, right = int(width * x0), int(width * x1)
+            top, bottom = int(height * y0), int(height * y1)
+            count = max(0, right - left) * max(0, bottom - top)
+            hues = saturations = values = oranges = 0
+            for y in range(top, bottom):
+                for x in range(left, right):
+                    offset = (y * width + x) * 4
+                    hue, saturation, value = BgraGameplayRecognizer._hsv(
+                        pixels[offset], pixels[offset + 1], pixels[offset + 2]
+                    )
+                    hue_ok = 5 <= hue <= 30
+                    saturation_ok = saturation >= 100
+                    value_ok = value >= 120
+                    hues += hue_ok
+                    saturations += saturation_ok
+                    values += value_ok
+                    oranges += hue_ok and saturation_ok and value_ok
+            return HomeDiagnostic(
+                width, height, left, top, right, bottom, count,
+                hues, saturations, values, oranges,
+            )
+        finally:
+            frame = pixels = None
 
     @staticmethod
     def _green(blue: int, green: int, red: int) -> bool:
         return green >= 120 and green >= red * 3 // 2 and green >= blue * 3 // 2
 
     def recognize(self, binding: PlayerBinding, account_ref: str) -> Recognition:
+        self._home_diagnostic = None
         if binding != self._binding:
             raise RuntimeSafetyError("capture binding changed")
         if type(account_ref) is not str or _REFERENCE.fullmatch(account_ref) is None:
             raise RuntimeSafetyError("account binding is malformed")
         frame = self._frame()
-        home = self._fraction(frame, self._HOME_REGION, self._orange) > 0.30
+        try:
+            self._home_diagnostic = self._diagnose_home(frame)
+            # Preserve the existing gate; diagnostics never authorize input.
+            home = self._fraction(frame, self._HOME_REGION, self._orange) > 0.30
+        finally:
+            frame = None
         # Clash Anytime removed training/healing waits.  As in the donor, a
         # positive HOME gate is the preflight army-ready signal; the My Army
         # green control is checked again inside the executor before commitment.

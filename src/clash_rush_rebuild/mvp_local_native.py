@@ -476,7 +476,10 @@ def run_native_mvp_visit(
         if source_recognizer.recognize(
             binding, configured.configuration.account_ref
         ).home is not True:
-            raise RuntimeSafetyError("HOME_NOT_VERIFIED")
+            diagnostic = source_recognizer.home_diagnostic
+            if diagnostic is None:
+                raise RuntimeSafetyError("HOME_NOT_VERIFIED")
+            raise RuntimeSafetyError(f"HOME_NOT_VERIFIED {diagnostic.to_json()}")
         input_port = Win32BoundInput(binding, supervisor.capture_owned, enabled)
         summary = capture_world_export(
             binding,
