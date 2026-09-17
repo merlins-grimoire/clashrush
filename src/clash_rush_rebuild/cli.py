@@ -60,7 +60,12 @@ def build_native_state_store(
     )
 
 
-def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
+def build_inert_cycle(
+    project_root: str,
+    slots_path: str,
+    *,
+    preserve_ready_cursor: bool = False,
+) -> InertCycle:
     """Compose native Slice 1 without launching or inspecting until visit_once."""
     project = Path(project_root)
     slots = Path(slots_path)
@@ -87,7 +92,7 @@ def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
             store,
             AcquiredMutexLease(mutex_name),
             nonce_factory=lambda: secrets.token_hex(16),
-            preserve_ready_cursor=True,
+            preserve_ready_cursor=preserve_ready_cursor,
         )
 
     return InertCycle(
@@ -221,6 +226,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm fresh owner approval for this single inert visit",
     )
+    visit.add_argument(
+        "--diagnostic-preserve-cursor",
+        action="store_true",
+        help="preserve the admitted READY cursor for an explicit diagnostic visit",
+    )
     initialize = subcommands.add_parser(
         "initialize",
         help="create READY(0) only when state is absent and no player is running",
@@ -274,7 +284,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None,
     *,
-    cycle_builder: Callable[[str, str], CycleCommand] = build_inert_cycle,
+    cycle_builder: Callable[[str, str], CycleCommand] | None = None,
     setup_runner: Callable[[Path], object] = run_guided_setup,
     synthetic_exporter: Callable[[], str] = export_synthetic_installation,
     approval_issuer_builder: Callable[
@@ -340,7 +350,17 @@ def main(
             reconciler_builder(args.project_root, args.slots).reconcile()
             print("lifecycle reconciliation completed")
             return 0
-        cycle = cycle_builder(args.project_root, args.slots)
+        if cycle_builder is None:
+            cycle = build_inert_cycle(
+                args.project_root,
+                args.slots,
+                preserve_ready_cursor=(
+                    args.command == "visit-one"
+                    and args.diagnostic_preserve_cursor is True
+                ),
+            )
+        else:
+            cycle = cycle_builder(args.project_root, args.slots)
         if args.command == "initialize":
             cycle.initialize()
         else:

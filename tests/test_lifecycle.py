@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import clash_rush_rebuild.cli as cli_module
 from clash_rush_rebuild.lifecycle import (
     AcquiredMutexLease,
     CreatedProcess,
@@ -194,6 +195,74 @@ class FakeHost:
         if self.fail_stage == stage and not self.failed_once:
             self.failed_once = True
             raise RuntimeError(f"synthetic {stage} failure")
+
+
+@pytest.mark.parametrize("initial_slot", [0, 3, 4])
+@pytest.mark.parametrize("preserve_cursor", [False, True])
+def test_composed_visit_one_selects_rotation_or_diagnostic_cursor_preservation(
+    monkeypatch,
+    initial_slot: int,
+    preserve_cursor: bool,
+) -> None:
+    events: list[str] = []
+    state = FakeStateStore(Ready(initial_slot), events)
+    host = FakeHost(events)
+    slots = tuple(
+        Slot(
+            index,
+            "Pie64" if index == 0 else f"Pie64_{index + 1}",
+            f"Example Slot {index}",
+            1280,
+            720,
+            240,
+        )
+        for index in range(5)
+    )
+
+    class SyntheticLease:
+        abandoned = False
+
+        @staticmethod
+        def require_usable() -> None:
+            events.append("mutex:usable")
+
+        @staticmethod
+        def release() -> None:
+            events.append("mutex:release")
+
+    class SyntheticRuntime:
+        @staticmethod
+        def acquire_mutex() -> SyntheticLease:
+            events.append("mutex:acquire")
+            return SyntheticLease()
+
+    monkeypatch.setattr(cli_module, "NativeLifecycleApi", object)
+    monkeypatch.setattr(cli_module, "Win32Runtime", lambda _native: SyntheticRuntime())
+    monkeypatch.setattr(
+        cli_module,
+        "Win32LifecycleHost",
+        lambda _native, nonce_factory: host,
+    )
+    monkeypatch.setattr(cli_module, "build_native_state_store", lambda _root: state)
+    monkeypatch.setattr(cli_module, "load_private_registry", lambda *_args: slots)
+
+    command = [
+        "visit-one",
+        "--project-root",
+        "synthetic-project",
+        "--slots",
+        "synthetic-slots.toml",
+        "--owner-approved",
+    ]
+    if preserve_cursor:
+        command.append("--diagnostic-preserve-cursor")
+
+    status = cli_module.main(command)
+
+    assert status == 0
+    expected_slot = initial_slot if preserve_cursor else (initial_slot + 1) % 5
+    assert state.state == Ready(expected_slot)
+    assert events[-1] == "mutex:release"
 
 
 def test_start_commits_active_before_creating_native_objects() -> None:

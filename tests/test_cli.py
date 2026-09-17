@@ -132,7 +132,9 @@ def test_inert_diagnostic_composition_explicitly_preserves_ready_cursor(
     monkeypatch.setattr(cli_module, "LifecycleSupervisor", capture_supervisor)
     monkeypatch.setattr(cli_module, "InertCycle", CapturingCycle)
 
-    cli_module.build_inert_cycle("project", "slots.toml")
+    cli_module.build_inert_cycle(
+        "project", "slots.toml", preserve_ready_cursor=True
+    )
     make_supervisor = captured["make_supervisor"]
     assert callable(make_supervisor)
     make_supervisor(object(), "Global\\ClashRushRebuildLifecycle-v1")
