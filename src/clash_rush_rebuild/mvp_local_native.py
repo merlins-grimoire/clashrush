@@ -34,6 +34,7 @@ from .mvp_local_world_export import (
     clear_windows_clipboard,
     read_windows_clipboard,
 )
+from .registry import Slot
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import DEFAULT_MUTEX_NAME, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
@@ -258,6 +259,16 @@ def _candidate_tree(project: Path) -> str:
     return tree
 
 
+def _select_configured_slot(
+    slots: tuple[Slot, ...], lifecycle: Ready, instance_ref: str
+) -> Slot:
+    """Bind the public opaque reference to the private lifecycle-selected slot."""
+    expected_ref = f"slot-{lifecycle.next_slot}"
+    if type(instance_ref) is not str or instance_ref != expected_ref:
+        raise RuntimeSafetyError("WINDOW_BINDING")
+    return slots[lifecycle.next_slot]
+
+
 def run_native_mvp_visit(
     project_root: str, slots_path: str, transaction_ref: str
 ) -> VisitResult:
@@ -291,9 +302,9 @@ def run_native_mvp_visit(
         slots = load_private_registry(project, Path(slots_path), _BLUESTACKS_CONF)
         if type(slots) is not tuple or len(slots) != 5:
             raise RuntimeSafetyError("WINDOW_BINDING")
-        slot = slots[lifecycle.next_slot]
-        if slot.display_name != configured.configuration.instance_ref:
-            raise RuntimeSafetyError("WINDOW_BINDING")
+        slot = _select_configured_slot(
+            slots, lifecycle, configured.configuration.instance_ref
+        )
         players = host.complete_player_snapshot()
         try:
             if players.identities:
