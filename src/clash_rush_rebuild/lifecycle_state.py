@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -161,7 +162,8 @@ class LifecycleStateStore:
             raise LifecycleStateError("lifecycle state handle could not close") from exc
         raise LifecycleStateError("lifecycle state already exists")
 
-    def load(self) -> Ready | Active:
+    def load_with_bytes(self) -> tuple[Ready | Active, bytes]:
+        """Return the exact canonical bytes proved by the same exclusive read."""
         self._require_no_transition()
         try:
             reader = self._port.open_read_exclusive_no_reparse(self._path)
@@ -182,9 +184,23 @@ class LifecycleStateStore:
                 raise LifecycleStateError(
                     "lifecycle state handle could not close"
                 ) from exc
-        return decode_state(payload)
+        return decode_state(payload), payload
+
+    def load(self) -> Ready | Active:
+        state, _payload = self.load_with_bytes()
+        return state
 
     def commit(self, state: Ready | Active) -> Ready | Active:
+        return self.commit_with_postcondition(state, lambda: None)
+
+    def commit_with_postcondition(
+        self,
+        state: Ready | Active,
+        postcondition: Callable[[], None],
+    ) -> Ready | Active:
+        """Keep the transition guard until a required durable postcondition passes."""
+        if not callable(postcondition):
+            raise LifecycleStateError("lifecycle postcondition must be callable")
         payload = encode_state(state)
         temporary = self._path.with_name(
             f".{self._path.name}.{secrets.token_hex(8)}.tmp"
@@ -205,6 +221,7 @@ class LifecycleStateStore:
                 raise LifecycleStateError(
                     "lifecycle state read-back changed type or value"
                 )
+            postcondition()
             self._port.delete_file_no_reparse(self._transition)
             return parsed
         except BaseException as exc:

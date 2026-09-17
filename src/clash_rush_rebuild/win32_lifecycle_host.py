@@ -473,6 +473,33 @@ class Win32LifecycleHost:
         )
         return PlayerSnapshot(ordered, lambda: self._close_retained(handles))
 
+    def complete_relevant_root_window_count(self, expected_title: str) -> int:
+        """Count exact configured-title root windows from one complete enumeration."""
+        if (
+            type(expected_title) is not str
+            or not expected_title
+            or expected_title != expected_title.strip()
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in expected_title
+            )
+        ):
+            raise Win32LifecycleHostError("exact configured window title required")
+        windows = self._window_list(self._api.enum_top_level_windows())
+        count = 0
+        for hwnd in windows:
+            is_window = self._api.is_window(hwnd)
+            if type(is_window) is not bool:
+                raise Win32LifecycleHostError("window existence result invalid")
+            if not is_window:
+                raise Win32LifecycleHostError("enumerated window became invalid")
+            if (
+                self._api.get_ancestor_root(hwnd) == hwnd
+                and self._api.window_text(hwnd) == expected_title
+            ):
+                count += 1
+        return count
+
     def create_job(self) -> object:
         return self._runtime.create_job()
 

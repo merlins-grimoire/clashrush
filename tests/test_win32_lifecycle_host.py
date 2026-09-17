@@ -254,6 +254,25 @@ def test_player_snapshot_closes_retained_handles_when_identity_fails() -> None:
     assert ("close", ("process", 101)) in api.calls
 
 
+def test_relevant_root_window_count_uses_complete_exact_title_and_root_proof() -> None:
+    api = SyntheticNative()
+    _windows(api)
+    api.windows[20] = {
+        "parent": None,
+        "visible": True,
+        "title": "Unrelated Slot",
+        "pid": 200,
+        "size": (1300, 760),
+    }
+
+    assert _host(api).complete_relevant_root_window_count("Exact Slot") == 1
+
+
+def test_relevant_root_window_count_rejects_malformed_title() -> None:
+    with pytest.raises(Win32LifecycleHostError, match="title"):
+        _host(SyntheticNative()).complete_relevant_root_window_count("")
+
+
 def test_stable_job_members_are_handle_backed_and_runtime_methods_delegate() -> None:
     api = SyntheticNative()
     api.creation = {100: 9001}

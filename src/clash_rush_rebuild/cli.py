@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import argparse
 import secrets
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from .approval_reconciliation import (
+    DurableReconciliationAudit,
+    OneShotApprovalService,
+    PrivateApprovalStorage,
+    ReconciliationError,
+    StaleStateApprovalIssuer,
+    StaleStateReconciler,
+)
 from .config import load_private_registry
 from .cycle import InertCycle
 from .guided_setup import export_synthetic_installation, run_guided_setup
@@ -17,7 +26,7 @@ from .lifecycle_state import LifecycleStateStore
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
-from .win32_runtime import Win32Runtime
+from .win32_runtime import NativeWin32Api, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
 
 _BLUESTACKS_CONF = Path(r"C:\ProgramData\BlueStacks_nxt\bluestacks.conf")
@@ -26,6 +35,14 @@ _BLUESTACKS_CONF = Path(r"C:\ProgramData\BlueStacks_nxt\bluestacks.conf")
 class CycleCommand(Protocol):
     def initialize(self) -> object: ...
     def visit_once(self) -> object: ...
+
+
+class ApprovalIssuerCommand(Protocol):
+    def issue(self, *, lifetime_seconds: int) -> object: ...
+
+
+class ReconcilerCommand(Protocol):
+    def reconcile(self) -> object: ...
 
 
 def build_native_state_store(
@@ -82,6 +99,97 @@ def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
         make_state_store=make_state_store,
         observe_player_count=observe_player_count,
         make_supervisor=make_supervisor,
+    )
+
+
+def _candidate_tree(project: Path) -> str:
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if status.stdout:
+            raise ReconciliationError("candidate tree is not immutable")
+        result = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD^{tree}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReconciliationError("candidate tree is unavailable") from exc
+    tree = result.stdout.strip()
+    if len(tree) != 40 or any(character not in "0123456789abcdef" for character in tree):
+        raise ReconciliationError("candidate tree is malformed")
+    return tree
+
+
+def build_native_reconciliation_issuer(project_root: str) -> StaleStateApprovalIssuer:
+    project = Path(project_root).resolve(strict=True)
+    runtime = Win32Runtime(NativeWin32Api())
+    build_native_state_store(project)
+    approvals = OneShotApprovalService(PrivateApprovalStorage(project))
+    return StaleStateApprovalIssuer(
+        runtime,
+        make_state_store=lambda: build_native_state_store(project),
+        approvals=approvals,
+        candidate_tree=lambda: _candidate_tree(project),
+    )
+
+
+def build_native_reconciler(
+    project_root: str, slots_path: str
+) -> StaleStateReconciler:
+    project = Path(project_root).resolve(strict=True)
+    slots = Path(slots_path)
+    native = NativeLifecycleApi()
+    runtime = Win32Runtime(native)
+    host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
+    build_native_state_store(project)
+    approvals = OneShotApprovalService(PrivateApprovalStorage(project))
+
+    def observe_absence() -> tuple[int, int]:
+        registry = load_private_registry(project, slots, _BLUESTACKS_CONF)
+        if (
+            type(registry) is not tuple
+            or len(registry) != 5
+            or tuple(slot.index for slot in registry) != (0, 1, 2, 3, 4)
+        ):
+            raise ReconciliationError("exact ordered five-slot registry required")
+        def player_count() -> int:
+            snapshot = host.complete_player_snapshot()
+            try:
+                return len(snapshot.identities)
+            finally:
+                snapshot.close()
+
+        process_count_before = player_count()
+        window_count = host.complete_relevant_root_window_count(
+            registry[0].display_name
+        )
+        process_count_after = player_count()
+        return max(process_count_before, process_count_after), window_count
+
+    return StaleStateReconciler(
+        runtime,
+        make_state_store=lambda: build_native_state_store(project),
+        approvals=approvals,
+        candidate_tree=lambda: _candidate_tree(project),
+        observe_absence=observe_absence,
+        audit=DurableReconciliationAudit(
+            project / "var" / "reconciliation-audit.jsonl"
+        ),
     )
 
 
@@ -145,6 +253,20 @@ def _parser() -> argparse.ArgumentParser:
     mvp_visit.add_argument("--project-root", required=True)
     mvp_visit.add_argument("--slots", required=True)
     mvp_visit.add_argument("--transaction-ref", required=True)
+    issue_reconciliation = subcommands.add_parser(
+        "issue-reconciliation-approval",
+        help="issue one exact-state-bound stale-state reconciliation approval",
+    )
+    issue_reconciliation.add_argument("--project-root", required=True)
+    issue_reconciliation.add_argument(
+        "--lifetime-seconds", type=int, default=300
+    )
+    reconcile = subcommands.add_parser(
+        "reconcile-window-binding",
+        help="consume one approval and reconcile the exact stale blocked state",
+    )
+    reconcile.add_argument("--project-root", required=True)
+    reconcile.add_argument("--slots", required=True)
     return parser
 
 
@@ -154,6 +276,12 @@ def main(
     cycle_builder: Callable[[str, str], CycleCommand] = build_inert_cycle,
     setup_runner: Callable[[Path], object] = run_guided_setup,
     synthetic_exporter: Callable[[], str] = export_synthetic_installation,
+    approval_issuer_builder: Callable[
+        [str], ApprovalIssuerCommand
+    ] = build_native_reconciliation_issuer,
+    reconciler_builder: Callable[
+        [str, str], ReconcilerCommand
+    ] = build_native_reconciler,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "visit-one" and args.owner_approved is not True:
@@ -201,6 +329,16 @@ def main(
                 raise RuntimeSafetyError("visit result is malformed")
             print(f"visit status={result.status} reason={result.reason_code}")
             return 0 if result.confirmed else 1
+        if args.command == "issue-reconciliation-approval":
+            approval_issuer_builder(args.project_root).issue(
+                lifetime_seconds=args.lifetime_seconds
+            )
+            print("reconciliation approval issued")
+            return 0
+        if args.command == "reconcile-window-binding":
+            reconciler_builder(args.project_root, args.slots).reconcile()
+            print("lifecycle reconciliation completed")
+            return 0
         cycle = cycle_builder(args.project_root, args.slots)
         if args.command == "initialize":
             cycle.initialize()

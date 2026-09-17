@@ -179,6 +179,7 @@ def test_explicit_initialization_creates_only_ready_zero_from_missing_state(
 
     assert store.initialize_ready() == Ready(0)
     assert store.load() == Ready(0)
+    assert store.load_with_bytes() == (Ready(0), encode_state(Ready(0)))
     with pytest.raises(LifecycleStateError, match="already exists"):
         store.initialize_ready()
 
@@ -197,3 +198,22 @@ def test_post_replace_read_failure_leaves_transition_guard_that_blocks_ready(
     assert port.guard_present is True
     with pytest.raises(LifecycleStateError, match="transition"):
         store.load()
+
+
+def test_postcondition_failure_leaves_transition_guard_after_exact_readback(
+    tmp_path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    port = RecordingFilePort()
+    store = LifecycleStateStore(project, port)
+
+    def fail_after_readback() -> None:
+        port.events.append("postcondition")
+        raise OSError("synthetic outcome failure")
+
+    with pytest.raises(LifecycleStateError, match="commit failed"):
+        store.commit_with_postcondition(Ready(0), fail_after_readback)
+
+    assert port.guard_present is True
+    assert port.events[-2:] == ["close", "postcondition"]

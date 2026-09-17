@@ -107,6 +107,8 @@ The one-shot approval service, reconciliation command, evaluator integration, an
 - `src/clash_rush_rebuild/win32_lifecycle_host.py`
 - `src/clash_rush_rebuild/lifecycle.py` solely for the separately pinned render-owner identity in `PlayerBinding`
 - one narrowly scoped diagnostic module under `src/clash_rush_rebuild/`
+- one narrowly scoped approval/reconciliation module under `src/clash_rush_rebuild/`
+- `src/clash_rush_rebuild/lifecycle_state.py` solely to expose the exact canonical bytes already held during a state load
 - the composition-root command in `src/clash_rush_rebuild/cli.py`
 - focused synthetic tests under `tests/`
 - static privacy/forbidden-transport tests under `tests/`

@@ -20,6 +20,24 @@ class FakeCycle:
         return object()
 
 
+class FakeApprovalIssuer:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def issue(self, *, lifetime_seconds: int) -> object:
+        self.events.append(f"issue:{lifetime_seconds}")
+        return object()
+
+
+class FakeReconciler:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def reconcile(self) -> object:
+        self.events.append("reconcile")
+        return object()
+
+
 def test_cli_refuses_inert_visit_without_explicit_owner_approval() -> None:
     events: list[str] = []
 
@@ -196,3 +214,46 @@ def test_local_mvp_cli_runs_only_the_sealed_native_entry(monkeypatch, capsys) ->
     assert events == ["visit:X:Y:tx-one"]
     output = capsys.readouterr().out
     assert output.strip() == "visit status=completed reason=RETURNED_HOME"
+
+
+def test_cli_issues_separate_short_lived_reconciliation_approval(capsys) -> None:
+    events: list[str] = []
+
+    status = main(
+        [
+            "issue-reconciliation-approval",
+            "--project-root",
+            "X",
+            "--lifetime-seconds",
+            "240",
+        ],
+        approval_issuer_builder=lambda root: (
+            events.append(f"build-issuer:{root}") or FakeApprovalIssuer(events)
+        ),
+    )
+
+    assert status == 0
+    assert events == ["build-issuer:X", "issue:240"]
+    assert capsys.readouterr().out.strip() == "reconciliation approval issued"
+
+
+def test_cli_consumes_reconciliation_without_launch_or_input_callbacks(capsys) -> None:
+    events: list[str] = []
+
+    status = main(
+        [
+            "reconcile-window-binding",
+            "--project-root",
+            "X",
+            "--slots",
+            "Y",
+        ],
+        reconciler_builder=lambda root, slots: (
+            events.append(f"build-reconciler:{root}:{slots}")
+            or FakeReconciler(events)
+        ),
+    )
+
+    assert status == 0
+    assert events == ["build-reconciler:X:Y", "reconcile"]
+    assert capsys.readouterr().out.strip() == "lifecycle reconciliation completed"
