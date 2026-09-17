@@ -132,6 +132,10 @@ class FakeHost:
         if self.fail_capture_ready:
             raise RuntimeError("synthetic capture readiness failure")
 
+    def capture_bgra(self, binding: PlayerBinding) -> tuple[int, int, bytes]:
+        self.events.append("capture:bgra")
+        return binding.width, binding.height, b"x" * (binding.width * binding.height * 4)
+
     def terminate_job(self, job_handle: object) -> None:
         self.events.append("job:terminate")
         if self.fail_job_termination:
@@ -197,6 +201,24 @@ def test_start_commits_active_before_creating_native_objects() -> None:
         "window:bind",
         "capture:ready",
     ]
+
+
+def test_owned_capture_revalidates_exact_binding_and_job_before_pixels() -> None:
+    events: list[str] = []
+    host = FakeHost(events)
+    supervisor = LifecycleSupervisor(
+        host,
+        FakeStateStore(Ready(0), events),
+        AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
+        nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+    )
+    binding = supervisor.start(Slot(0, "Pie64", "Example Slot 0", 1280, 720, 240))
+    events.clear()
+
+    width, height, pixels = supervisor.capture_owned(binding)
+
+    assert (width, height, len(pixels)) == (1280, 720, 1280 * 720 * 4)
+    assert events == ["capture:ready", "capture:bgra"]
 
 
 def test_start_waits_boundedly_for_the_exact_post_resume_identity() -> None:

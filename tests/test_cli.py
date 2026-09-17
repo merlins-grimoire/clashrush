@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clash_rush_rebuild.cli import build_native_state_store, main
+from clash_rush_rebuild.mvp_local_gameplay import VisitResult
 
 
 class FakeCycle:
@@ -117,3 +118,68 @@ def test_cli_does_not_overwrite_an_existing_setup_example(tmp_path: Path) -> Non
 
     assert status == 1
     assert output.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
+    tmp_path: Path, capsys,
+) -> None:
+    common = ["--project-root", str(tmp_path)]
+    assert main([
+        "mvp-setup", *common,
+        "--team-ref", "team-secret",
+        "--account-ref", "account-secret",
+        "--instance-ref", "instance-secret",
+    ]) == 0
+    assert main(["mvp-run", *common]) == 0
+    assert main(["mvp-status", *common]) == 0
+    assert main(["mvp-pause", *common]) == 0
+    assert main(["mvp-status", *common]) == 0
+    assert main(["mvp-stop", *common]) == 0
+
+    output = capsys.readouterr().out
+    assert "RUNNING" in output
+    assert "PAUSED" in output
+    assert "team-secret" not in output
+    assert "account-secret" not in output
+    assert "instance-secret" not in output
+
+
+def test_local_mvp_visit_requires_live_approval_before_composition() -> None:
+    events: list[str] = []
+
+    status = main(
+        [
+            "mvp-visit-one",
+            "--project-root", "X",
+            "--slots", "Y",
+            "--transaction-ref", "tx-one",
+        ],
+        mvp_visit_runner=lambda *_args: events.append("visit"),
+    )
+
+    assert status == 2
+    assert events == []
+
+
+def test_local_mvp_cli_runs_one_bounded_attack_composition(capsys) -> None:
+    events: list[str] = []
+
+    def run(project_root: str, slots: str, transaction_ref: str) -> VisitResult:
+        events.append(f"visit:{project_root}:{slots}:{transaction_ref}")
+        return VisitResult("completed", "RETURNED_HOME", True, True)
+
+    status = main(
+        [
+            "mvp-visit-one",
+            "--project-root", "X",
+            "--slots", "Y",
+            "--transaction-ref", "tx-one",
+            "--owner-approved-live",
+        ],
+        mvp_visit_runner=run,
+    )
+
+    assert status == 0
+    assert events == ["visit:X:Y:tx-one"]
+    output = capsys.readouterr().out
+    assert output.strip() == "visit status=completed reason=RETURNED_HOME"

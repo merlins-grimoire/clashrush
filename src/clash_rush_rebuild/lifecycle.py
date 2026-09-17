@@ -186,6 +186,7 @@ class LifecycleHostPort(Protocol):
         members: MemberSnapshot,
     ) -> PlayerBinding | None: ...
     def capture_ready(self, binding: PlayerBinding, job: object) -> None: ...
+    def capture_bgra(self, binding: PlayerBinding) -> tuple[int, int, bytes]: ...
     def terminate_job(self, job: object) -> None: ...
     def terminate_retained_process(self, process: object) -> None: ...
     def wait_process(self, process: object, milliseconds: int) -> bool: ...
@@ -363,6 +364,29 @@ class LifecycleSupervisor:
             binding,
         )
         return binding
+
+    def capture_owned(self, binding: PlayerBinding) -> tuple[int, int, bytes]:
+        """Revalidate and capture only the currently owned exact binding."""
+        owned = self._owned
+        if (
+            owned is None
+            or type(binding) is not PlayerBinding
+            or binding != owned.binding
+        ):
+            raise LifecycleError("capture binding does not match the owned run")
+        self._host.capture_ready(binding, owned.job)
+        frame = self._host.capture_bgra(binding)
+        if (
+            type(frame) is not tuple
+            or len(frame) != 3
+            or type(frame[0]) is not int
+            or type(frame[1]) is not int
+            or (frame[0], frame[1]) != (binding.width, binding.height)
+            or type(frame[2]) is not bytes
+            or len(frame[2]) != binding.width * binding.height * 4
+        ):
+            raise LifecycleError("owned capture result is malformed")
+        return frame
 
     def _commit_blocked(self, active: Active, reason: BlockReason) -> None:
         blocked = Active(active.slot, active.run_nonce, reason)

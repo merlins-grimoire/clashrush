@@ -14,6 +14,8 @@ from .cycle import InertCycle
 from .guided_setup import export_synthetic_installation, run_guided_setup
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
 from .lifecycle_state import LifecycleStateStore
+from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
+from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
@@ -79,6 +81,19 @@ def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
     )
 
 
+def _local_control_store(project_root: str | Path) -> LocalControlStore:
+    return LocalControlStore(Path(project_root) / "var" / "mvp-local-control.json")
+
+
+def run_native_mvp_visit(
+    project_root: str, slots_path: str, transaction_ref: str
+) -> VisitResult:
+    """Late-bind the native implementation so ordinary controls stay inert."""
+    from .mvp_local_native import run_native_mvp_visit as run
+
+    return run(project_root, slots_path, transaction_ref)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="clash-rush-rebuild")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -109,6 +124,23 @@ def _parser() -> argparse.ArgumentParser:
         help="write a public-safe synthetic installation configuration",
     )
     export.add_argument("--output", required=True)
+    mvp_setup = subcommands.add_parser(
+        "mvp-setup", help="configure exactly one local Team/account/instance"
+    )
+    mvp_setup.add_argument("--project-root", required=True)
+    mvp_setup.add_argument("--team-ref", required=True)
+    mvp_setup.add_argument("--account-ref", required=True)
+    mvp_setup.add_argument("--instance-ref", required=True)
+    for name in ("mvp-run", "mvp-pause", "mvp-stop", "mvp-status"):
+        control = subcommands.add_parser(name)
+        control.add_argument("--project-root", required=True)
+    mvp_visit = subcommands.add_parser(
+        "mvp-visit-one", help="run one owner-approved attack-only local visit"
+    )
+    mvp_visit.add_argument("--project-root", required=True)
+    mvp_visit.add_argument("--slots", required=True)
+    mvp_visit.add_argument("--transaction-ref", required=True)
+    mvp_visit.add_argument("--owner-approved-live", action="store_true")
     return parser
 
 
@@ -118,9 +150,12 @@ def main(
     cycle_builder: Callable[[str, str], CycleCommand] = build_inert_cycle,
     setup_runner: Callable[[Path], object] = run_guided_setup,
     synthetic_exporter: Callable[[], str] = export_synthetic_installation,
+    mvp_visit_runner: Callable[[str, str, str], VisitResult] = run_native_mvp_visit,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "visit-one" and args.owner_approved is not True:
+        return 2
+    if args.command == "mvp-visit-one" and args.owner_approved_live is not True:
         return 2
     try:
         if args.command == "export-setup-example":
@@ -130,6 +165,35 @@ def main(
         if args.command == "setup":
             setup_runner(Path(args.project_root))
             return 0
+        if args.command == "mvp-setup":
+            _local_control_store(args.project_root).setup(
+                MvpConfiguration(args.team_ref, args.account_ref, args.instance_ref)
+            )
+            print("local MVP configured mode=STOPPED")
+            return 0
+        transitions = {
+            "mvp-run": LocalBotMode.RUNNING,
+            "mvp-pause": LocalBotMode.PAUSED,
+            "mvp-stop": LocalBotMode.STOPPED,
+        }
+        if args.command in transitions:
+            state = _local_control_store(args.project_root).transition(
+                transitions[args.command]
+            )
+            print(f"local MVP mode={state.mode.value}")
+            return 0
+        if args.command == "mvp-status":
+            state = _local_control_store(args.project_root).load()
+            print(f"local MVP mode={state.mode.value} configured=yes")
+            return 0
+        if args.command == "mvp-visit-one":
+            result = mvp_visit_runner(
+                args.project_root, args.slots, args.transaction_ref
+            )
+            if type(result) is not VisitResult:
+                raise RuntimeSafetyError("visit result is malformed")
+            print(f"visit status={result.status} reason={result.reason_code}")
+            return 0 if result.confirmed else 1
         cycle = cycle_builder(args.project_root, args.slots)
         if args.command == "initialize":
             cycle.initialize()
