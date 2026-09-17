@@ -61,6 +61,8 @@ def test_runner_restores_control_and_cleans_only_its_owned_active_approval(
 ) -> None:
     runner = _load_runner()
     slots = [f"synthetic-{index}" for index in range(5)]
+    events: list[str] = []
+    state = SimpleNamespace(configuration=None, mode=LocalBotMode.UNCONFIGURED)
     monkeypatch.setattr(runner, "SLOTS", SimpleNamespace(read_text=lambda **_kw: "slots"))
     monkeypatch.setattr(
         runner, "OLD_CONFIG", SimpleNamespace(read_text=lambda **_kw: "old")
@@ -85,18 +87,16 @@ def test_runner_restores_control_and_cleans_only_its_owned_active_approval(
             else ""
         ),
     )
-    monkeypatch.setattr(
-        runner,
-        "build_native_reconciler",
-        lambda *_args: SimpleNamespace(
-            _make_state_store=lambda: SimpleNamespace(load=lambda: Ready(0)),
-            _observe_absence=lambda: (0, 0),
-        ),
-    )
-    monkeypatch.setattr(runner, "CONTROL", SimpleNamespace(exists=lambda: False))
+    def prepare(root, slots_path, hashes):
+        events.append("prepare-current-ready-slot")
+        state.configuration = runner.MvpConfiguration(
+            "local-team-0", "local-account-1", "slot-1", hashes[1]
+        )
+        state.mode = LocalBotMode.STOPPED
+        return Ready(1)
 
-    state = SimpleNamespace(configuration=None, mode=LocalBotMode.UNCONFIGURED)
-    events: list[str] = []
+    monkeypatch.setattr(runner, "prepare_native_mvp_control", prepare)
+    monkeypatch.setattr(runner, "CONTROL", SimpleNamespace(exists=lambda: False))
 
     def setup(configuration):
         state.configuration = configuration
@@ -182,6 +182,9 @@ def test_runner_restores_control_and_cleans_only_its_owned_active_approval(
             runner.main()
 
     assert state.mode is LocalBotMode.STOPPED
+    assert state.configuration.instance_ref == "slot-1"
+    assert state.configuration.account_ref == "local-account-1"
+    assert events[0] == "prepare-current-ready-slot"
     assert "load-STOPPED" in events
     if failure == "foreign_active":
         assert active["payload"] == b"foreign"

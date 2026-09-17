@@ -9,9 +9,11 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -19,7 +21,7 @@ from .config import load_private_registry
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, PlayerBinding
 from .lifecycle_state import LifecycleStateStore, Ready, encode_state
 from .mvp_local_approval import LiveApprovalStore
-from .mvp_local_gameplay import LocalBotMode, VisitResult
+from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import (
     BgraGameplayRecognizer,
     BoundedAttackExecutor,
@@ -269,6 +271,149 @@ def _select_configured_slot(
     return slots[lifecycle.next_slot]
 
 
+class StoppedControlPreparer:
+    """Prepare the lifecycle-selected STOPPED control under the host mutex."""
+
+    def __init__(
+        self,
+        runtime: object,
+        *,
+        make_state_store: Callable[[], object],
+        control: object,
+        observe_absence: Callable[[int], tuple[int, int]],
+        approval_exists: Callable[[], bool],
+    ) -> None:
+        self._runtime = runtime
+        self._make_state_store = make_state_store
+        self._control = control
+        self._observe_absence = observe_absence
+        self._approval_exists = approval_exists
+
+    def _require_boundary(self, slot_index: int) -> None:
+        try:
+            approval = self._approval_exists()
+        except BaseException as exc:
+            raise RuntimeSafetyError("active approval state is unavailable") from exc
+        if type(approval) is not bool or approval:
+            raise RuntimeSafetyError("active approval forbids control preparation")
+        try:
+            observation = self._observe_absence(slot_index)
+        except BaseException as exc:
+            raise RuntimeSafetyError("complete process/window absence is unproved") from exc
+        if (
+            type(observation) is not tuple
+            or len(observation) != 2
+            or any(type(count) is not int or count != 0 for count in observation)
+        ):
+            raise RuntimeSafetyError("complete process/window absence is unproved")
+
+    def prepare(self, configurations: tuple[MvpConfiguration, ...]) -> Ready:
+        if (
+            type(configurations) is not tuple
+            or len(configurations) != 5
+            or any(
+                type(configuration) is not MvpConfiguration
+                or configuration.instance_ref != f"slot-{index}"
+                for index, configuration in enumerate(configurations)
+            )
+        ):
+            raise RuntimeSafetyError("exact five-slot control mapping required")
+        lease = self._runtime.acquire_mutex()
+        try:
+            if type(lease.abandoned) is not bool or lease.abandoned:
+                raise RuntimeSafetyError("abandoned mutex forbids control preparation")
+            lease.require_usable()
+            store = self._make_state_store()
+            lifecycle = store.load()
+            if type(lifecycle) is not Ready:
+                raise RuntimeSafetyError("lifecycle is not READY")
+            self._require_boundary(lifecycle.next_slot)
+            configuration = configurations[lifecycle.next_slot]
+            prepared = self._control.prepare_stopped(configuration)
+            current = store.load()
+            if type(current) is not Ready or current != lifecycle:
+                raise RuntimeSafetyError("lifecycle changed during control preparation")
+            self._require_boundary(lifecycle.next_slot)
+            read_back = self._control.load()
+            if (
+                type(prepared) is not type(read_back)
+                or prepared != read_back
+                or read_back.configuration != configuration
+                or read_back.mode is not LocalBotMode.STOPPED
+            ):
+                raise RuntimeSafetyError("control preparation read-back mismatch")
+            return lifecycle
+        finally:
+            try:
+                lease.release()
+            except BaseException as exc:
+                raise RuntimeSafetyError(
+                    "mutex release is unresolved after control preparation"
+                ) from exc
+
+
+def prepare_native_mvp_control(
+    project_root: str,
+    slots_path: str,
+    player_tag_hashes: tuple[str, ...],
+) -> Ready:
+    """Prepare the current READY slot without launching or sending input."""
+    if (
+        type(player_tag_hashes) is not tuple
+        or len(player_tag_hashes) != 5
+        or any(
+            type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in player_tag_hashes
+        )
+    ):
+        raise RuntimeSafetyError("exact five-slot tag mapping required")
+    project = Path(project_root).resolve(strict=True)
+    slots_file = Path(slots_path)
+    native = NativeLifecycleApi()
+    runtime = Win32Runtime(native)
+    host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
+
+    def observe_absence(slot_index: int) -> tuple[int, int]:
+        registry = load_private_registry(project, slots_file, _BLUESTACKS_CONF)
+        if (
+            type(registry) is not tuple
+            or len(registry) != 5
+            or tuple(slot.index for slot in registry) != (0, 1, 2, 3, 4)
+        ):
+            raise RuntimeSafetyError("exact ordered five-slot registry required")
+
+        def player_count() -> int:
+            snapshot = host.complete_player_snapshot()
+            try:
+                return len(snapshot.identities)
+            finally:
+                snapshot.close()
+
+        before = player_count()
+        windows = host.complete_relevant_root_window_count(
+            registry[slot_index].display_name
+        )
+        after = player_count()
+        return max(before, after), windows
+
+    configurations = tuple(
+        MvpConfiguration(
+            "local-team-0",
+            f"local-account-{index}",
+            f"slot-{index}",
+            player_tag_hashes[index],
+        )
+        for index in range(5)
+    )
+    return StoppedControlPreparer(
+        runtime,
+        make_state_store=lambda: _state_store(project),
+        control=LocalControlStore(project / "var" / "mvp-local-control.json"),
+        observe_absence=observe_absence,
+        approval_exists=lambda: (project / "var" / "mvp-live-approval.json").exists(),
+    ).prepare(configurations)
+
+
 def run_native_mvp_visit(
     project_root: str, slots_path: str, transaction_ref: str
 ) -> VisitResult:
@@ -400,4 +545,10 @@ def run_native_mvp_visit(
     return result
 
 
-__all__ = ["LocalAuditLog", "Win32BoundInput", "run_native_mvp_visit"]
+__all__ = [
+    "LocalAuditLog",
+    "StoppedControlPreparer",
+    "Win32BoundInput",
+    "prepare_native_mvp_control",
+    "run_native_mvp_visit",
+]

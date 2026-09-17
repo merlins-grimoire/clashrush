@@ -236,9 +236,8 @@ class LocalControlStore:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
 
-    def setup(self, configuration: MvpConfiguration) -> PersistentControl:
-        if self._path.exists():
-            raise RuntimeSafetyError("local MVP is already configured")
+    @staticmethod
+    def _require_configuration(configuration: MvpConfiguration) -> None:
         if type(configuration) is not MvpConfiguration:
             raise RuntimeSafetyError("exact local MVP configuration required")
         references = (configuration.team_ref, configuration.account_ref)
@@ -253,9 +252,35 @@ class LocalControlStore:
             or re.fullmatch(r"[0-9a-f]{64}", configuration.player_tag_sha256) is None
         ):
             raise RuntimeSafetyError("one exact Team, account, and instance are required")
+
+    def setup(self, configuration: MvpConfiguration) -> PersistentControl:
+        if self._path.exists():
+            raise RuntimeSafetyError("local MVP is already configured")
+        self._require_configuration(configuration)
         state = PersistentControl(configuration, LocalBotMode.STOPPED)
         self._write(state, exclusive=True)
         return state
+
+    def prepare_stopped(self, configuration: MvpConfiguration) -> PersistentControl:
+        """Create or rebind control only while its durable mode is STOPPED.
+
+        The caller owns the surrounding lifecycle mutex and absence/approval
+        checks.  This store method only owns the stopped-only durable rewrite.
+        """
+        self._require_configuration(configuration)
+        if not self._path.exists():
+            return self.setup(configuration)
+        current = self.load()
+        if current.mode is not LocalBotMode.STOPPED:
+            raise RuntimeSafetyError("control preparation requires STOPPED mode")
+        if current.configuration == configuration:
+            return current
+        expected = PersistentControl(configuration, LocalBotMode.STOPPED)
+        self._write(expected, exclusive=False)
+        persisted = self.load()
+        if persisted != expected:
+            raise RuntimeSafetyError("control preparation read-back mismatch")
+        return persisted
 
     def load(self) -> PersistentControl:
         try:

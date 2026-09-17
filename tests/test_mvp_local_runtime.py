@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -106,6 +107,54 @@ def test_control_store_rejects_second_team_account_or_instance(tmp_path: Path) -
 
     with pytest.raises(RuntimeSafetyError, match="already configured"):
         store.setup(MvpConfiguration("team-other", ACCOUNT, INSTANCE, TAG_HASH))
+
+
+def test_control_store_rebinds_only_an_exact_stopped_configuration(tmp_path: Path) -> None:
+    path = tmp_path / "control.json"
+    store = LocalControlStore(path)
+    store.setup(CONFIG)
+    replacement = MvpConfiguration(TEAM, "account-synthetic-two", "slot-1", "b" * 64)
+
+    assert store.prepare_stopped(replacement).configuration == replacement
+    assert store.load().configuration == replacement
+    assert store.load().mode is LocalBotMode.STOPPED
+
+
+@pytest.mark.parametrize("mode", [LocalBotMode.RUNNING, LocalBotMode.PAUSED])
+def test_control_store_never_rebinds_an_active_configuration(
+    tmp_path: Path, mode: LocalBotMode
+) -> None:
+    path = tmp_path / "control.json"
+    store = LocalControlStore(path)
+    store.setup(CONFIG)
+    store.transition(LocalBotMode.RUNNING)
+    if mode is LocalBotMode.PAUSED:
+        store.transition(LocalBotMode.PAUSED)
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeSafetyError, match="STOPPED"):
+        store.prepare_stopped(
+            MvpConfiguration(TEAM, "account-synthetic-two", "slot-1", "b" * 64)
+        )
+
+    assert path.read_bytes() == before
+
+
+def test_control_store_never_rebinds_a_malformed_configuration(tmp_path: Path) -> None:
+    path = tmp_path / "control.json"
+    store = LocalControlStore(path)
+    store.setup(CONFIG)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["configuration"]["instance_ref"] = "slot-01"
+    path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeSafetyError, match="malformed"):
+        store.prepare_stopped(
+            MvpConfiguration(TEAM, "account-synthetic-two", "slot-1", "b" * 64)
+        )
+
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("index", range(5))
