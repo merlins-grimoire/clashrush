@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import clash_rush_rebuild.cli as cli_module
 from clash_rush_rebuild.cli import main as cli_main
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
@@ -28,7 +29,8 @@ from clash_rush_rebuild.mvp_local_runtime import (
 TEAM = "team-synthetic-one"
 ACCOUNT = "account-synthetic-one"
 INSTANCE = "instance-synthetic-one"
-CONFIG = MvpConfiguration(TEAM, ACCOUNT, INSTANCE)
+TAG_HASH = "a" * 64
+CONFIG = MvpConfiguration(TEAM, ACCOUNT, INSTANCE, TAG_HASH)
 BINDING = PlayerBinding(
     ProcessIdentity(100, 200),
     ProcessIdentity(100, 200),
@@ -103,7 +105,34 @@ def test_control_store_rejects_second_team_account_or_instance(tmp_path: Path) -
     store.setup(CONFIG)
 
     with pytest.raises(RuntimeSafetyError, match="already configured"):
-        store.setup(MvpConfiguration("team-other", ACCOUNT, INSTANCE))
+        store.setup(MvpConfiguration("team-other", ACCOUNT, INSTANCE, TAG_HASH))
+
+
+@pytest.mark.parametrize(
+    "key,replacement",
+    [
+        ("schema", True),
+        ("configuration.account_ref", True),
+        ("configuration.player_tag_sha256", True),
+    ],
+)
+def test_control_store_rejects_booleans_and_malformed_types(
+    tmp_path: Path, key: str, replacement: object
+) -> None:
+    import json
+
+    path = tmp_path / "control.json"
+    store = LocalControlStore(path)
+    store.setup(CONFIG)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if key.startswith("configuration."):
+        value["configuration"][key.split(".", 1)[1]] = replacement
+    else:
+        value[key] = replacement
+    path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
+
+    with pytest.raises(RuntimeSafetyError, match="malformed"):
+        store.load()
 
 
 def test_executor_rechecks_kill_switch_immediately_before_every_input() -> None:
@@ -150,7 +179,7 @@ def test_executor_adapts_bounded_attack_deploy_and_return_home_sequence() -> Non
 
 
 def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postcondition(
-    tmp_path: Path, capsys,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
 ) -> None:
     store = LocalControlStore(tmp_path / "control.json")
     store.setup(CONFIG)
@@ -189,15 +218,15 @@ def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postco
         result_holder.append(result)
         return result
 
+    monkeypatch.setattr(cli_module, "run_native_mvp_visit", run)
+
     status = cli_main(
         [
             "mvp-visit-one",
             "--project-root", str(tmp_path),
             "--slots", "synthetic-slots",
             "--transaction-ref", "tx-synthetic-e2e",
-            "--owner-approved-live",
         ],
-        mvp_visit_runner=run,
     )
     result = result_holder[0]
 
@@ -278,6 +307,7 @@ def test_bgra_recognizer_adapts_donor_home_army_and_return_home_regions() -> Non
     recognizer = BgraGameplayRecognizer(
         BINDING,
         lambda binding: (binding.width, binding.height, next(frames)),
+        account_verified=True,
     )
 
     assert recognizer.recognize(BINDING, ACCOUNT) == Recognition(True, True, True)
@@ -290,6 +320,7 @@ def test_bgra_recognizer_rejects_changed_binding_without_capture() -> None:
     recognizer = BgraGameplayRecognizer(
         BINDING,
         lambda _binding: calls.append("capture") or (1280, 720, b""),
+        account_verified=True,
     )
     changed = PlayerBinding(
         BINDING.identity,
@@ -304,3 +335,22 @@ def test_bgra_recognizer_rejects_changed_binding_without_capture() -> None:
     with pytest.raises(RuntimeSafetyError, match="binding"):
         recognizer.recognize(changed, ACCOUNT)
     assert calls == []
+
+
+def test_scout_requires_fresh_material_transition_and_target_signature() -> None:
+    colorful = bytes((30, 180, 40, 255)) * (BINDING.width * BINDING.height)
+    changed = bytearray(colorful)
+    for y in range(120, 600):
+        for x in range(250, 1030):
+            offset = (y * BINDING.width + x) * 4
+            changed[offset : offset + 4] = bytes((25, 80, 190, 255))
+    frames = iter([colorful, colorful, bytes(changed)])
+    recognizer = BgraGameplayRecognizer(
+        BINDING,
+        lambda binding: (binding.width, binding.height, next(frames)),
+        account_verified=True,
+    )
+
+    recognizer.capture_scout_source()
+    assert recognizer.scout_ready() is False
+    assert recognizer.scout_ready() is True

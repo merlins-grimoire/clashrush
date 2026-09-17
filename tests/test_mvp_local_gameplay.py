@@ -18,6 +18,7 @@ from clash_rush_rebuild.mvp_local_gameplay import (
 ACCOUNT = "account-synthetic-a"
 TEAM = "team-synthetic-a"
 INSTANCE = "instance-synthetic-a"
+TAG_HASH = "a" * 64
 
 
 @dataclass
@@ -66,7 +67,7 @@ def observation(
 
 def configured_bot(ports: FakeAttackPorts) -> LocalMvpBot:
     bot = LocalMvpBot(ports)
-    bot.setup(MvpConfiguration(TEAM, ACCOUNT, INSTANCE))
+    bot.setup(MvpConfiguration(TEAM, ACCOUNT, INSTANCE, TAG_HASH))
     bot.run()
     return bot
 
@@ -129,7 +130,39 @@ def test_kill_switch_is_rechecked_immediately_before_attack() -> None:
         "KILL_SWITCH",
         False,
     )
-    assert ports.events == ["kill-switch", "observe", "intent", "kill-switch"]
+    assert ports.events == [
+        "kill-switch", "observe", "intent", "kill-switch", "outcome:False"
+    ]
+
+
+def test_second_kill_switch_failure_surfaces_outcome_audit_failure() -> None:
+    class OutcomeFailure(FakeAttackPorts):
+        def record_outcome(
+            self, account_ref: str, transaction_ref: str, confirmed: bool
+        ) -> None:
+            self.events.append(f"outcome:{confirmed}")
+            raise OSError("synthetic audit failure")
+
+    ports = OutcomeFailure([observation()], kill_switch_values=[True, False])
+
+    result = configured_bot(ports).visit_once("tx-synthetic-audit-failure")
+
+    assert result == VisitResult("failed", "OUTCOME_AUDIT_UNAVAILABLE", False, False)
+    assert ports.events[-1] == "outcome:False"
+
+
+def test_intent_exception_still_attempts_terminal_outcome() -> None:
+    class RaisesAfterIntent(FakeAttackPorts):
+        def record_intent(self, account_ref: str, transaction_ref: str) -> None:
+            self.events.append("intent")
+            raise OSError("synthetic post-write failure")
+
+    ports = RaisesAfterIntent([observation()])
+
+    result = configured_bot(ports).visit_once("tx-synthetic-intent-error")
+
+    assert result == VisitResult("failed", "INTENT_AUDIT_UNAVAILABLE", False, False)
+    assert ports.events[-2:] == ["intent", "outcome:False"]
 
 
 def test_unknown_post_attack_state_is_audited_unconfirmed_and_fails_closed() -> None:
@@ -151,7 +184,7 @@ def test_setup_run_pause_stop_status_are_local_and_redacted() -> None:
     assert repr(initial).find(ACCOUNT) == -1
     assert repr(initial).find(INSTANCE) == -1
 
-    bot.setup(MvpConfiguration(TEAM, ACCOUNT, INSTANCE))
+    bot.setup(MvpConfiguration(TEAM, ACCOUNT, INSTANCE, TAG_HASH))
     assert bot.status().mode is LocalBotMode.STOPPED
     bot.run()
     assert bot.status().mode is LocalBotMode.RUNNING
@@ -169,15 +202,15 @@ def test_setup_accepts_exactly_one_local_team_account_and_instance() -> None:
     bot = LocalMvpBot(ports)
 
     with pytest.raises(MvpGameplayError):
-        bot.setup(MvpConfiguration("", ACCOUNT, INSTANCE))
+        bot.setup(MvpConfiguration("", ACCOUNT, INSTANCE, TAG_HASH))
     with pytest.raises(MvpGameplayError):
-        bot.setup(MvpConfiguration(TEAM, "", INSTANCE))
+        bot.setup(MvpConfiguration(TEAM, "", INSTANCE, TAG_HASH))
     with pytest.raises(MvpGameplayError):
-        bot.setup(MvpConfiguration(TEAM, ACCOUNT, ""))
+        bot.setup(MvpConfiguration(TEAM, ACCOUNT, "", TAG_HASH))
 
-    bot.setup(MvpConfiguration(TEAM, ACCOUNT, INSTANCE))
+    bot.setup(MvpConfiguration(TEAM, ACCOUNT, INSTANCE, TAG_HASH))
     with pytest.raises(MvpGameplayError, match="stopped"):
-        bot.setup(MvpConfiguration(TEAM, ACCOUNT, "instance-synthetic-b"))
+        bot.setup(MvpConfiguration(TEAM, ACCOUNT, "instance-synthetic-b", TAG_HASH))
 
 
 def test_attack_only_surface_has_no_upgrade_reward_or_purchase_executor() -> None:

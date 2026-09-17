@@ -18,6 +18,7 @@ from typing import Protocol
 
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _TRANSACTION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_TAG_HASH = re.compile(r"[0-9a-f]{64}")
 
 
 class MvpGameplayError(RuntimeError):
@@ -42,6 +43,7 @@ class MvpConfiguration:
     team_ref: str
     account_ref: str
     instance_ref: str
+    player_tag_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,8 @@ class LocalMvpBot:
             or not _valid_reference(configuration.team_ref)
             or not _valid_reference(configuration.account_ref)
             or not _valid_reference(configuration.instance_ref)
+            or type(configuration.player_tag_sha256) is not str
+            or _TAG_HASH.fullmatch(configuration.player_tag_sha256) is None
         ):
             raise MvpGameplayError(
                 "setup requires one exact local team, account, and instance"
@@ -122,6 +126,7 @@ class LocalMvpBot:
             configuration.team_ref,
             configuration.account_ref,
             configuration.instance_ref,
+            configuration.player_tag_sha256,
         )
         self._mode = LocalBotMode.STOPPED
 
@@ -170,12 +175,18 @@ class LocalMvpBot:
                 configuration.account_ref, transaction_ref
             )
         except BaseException:
+            if not self._record_outcome(configuration, transaction_ref, False):
+                return _failed("OUTCOME_AUDIT_UNAVAILABLE")
             return _failed("INTENT_AUDIT_UNAVAILABLE")
         if intent_result is not None:
+            if not self._record_outcome(configuration, transaction_ref, False):
+                return _failed("OUTCOME_AUDIT_UNAVAILABLE")
             return _failed("INTENT_AUDIT_MALFORMED")
 
         gate = self._kill_switch_gate()
         if gate is not None:
+            if not self._record_outcome(configuration, transaction_ref, False):
+                return _failed("OUTCOME_AUDIT_UNAVAILABLE")
             return gate
 
         executed = False
@@ -203,16 +214,19 @@ class LocalMvpBot:
                 cleanup_failed = True
 
         if cleanup_failed:
-            self._record_outcome(configuration, transaction_ref, False)
+            if not self._record_outcome(configuration, transaction_ref, False):
+                return _failed("OUTCOME_AUDIT_UNAVAILABLE", executed=executed)
             return _failed("CLEANUP_FAILED", executed=executed)
         if executed is not True:
-            self._record_outcome(configuration, transaction_ref, False)
+            if not self._record_outcome(configuration, transaction_ref, False):
+                return _failed("OUTCOME_AUDIT_UNAVAILABLE")
             return _failed(execute_reason)
 
         try:
             after = self._ports.observe()
         except BaseException:
-            self._record_outcome(configuration, transaction_ref, False)
+            if not self._record_outcome(configuration, transaction_ref, False):
+                return _failed("OUTCOME_AUDIT_UNAVAILABLE", executed=True)
             return _failed("POST_OBSERVATION_UNAVAILABLE", executed=True)
         reason = self._validate_observation(
             after, configuration.account_ref, post_attack=True

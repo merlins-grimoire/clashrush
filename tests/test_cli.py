@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import clash_rush_rebuild.cli as cli_module
 from clash_rush_rebuild.cli import build_native_state_store, main
 from clash_rush_rebuild.mvp_local_gameplay import VisitResult
 
@@ -70,13 +71,19 @@ def test_cli_initializes_state_without_live_approval_or_visit() -> None:
     assert events == ["build:X:Y", "initialize"]
 
 
-def test_native_state_composition_creates_validated_private_var_before_port(
+def test_native_state_composition_injects_state_adapter_without_constructing_native(
     tmp_path,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
 
-    store = build_native_state_store(project)
+    class FakeStateApi:
+        @staticmethod
+        def get_file_attributes(_path: str) -> int:
+            return 0
+
+    fake_state_api = FakeStateApi()
+    store = build_native_state_store(project, state_api_factory=lambda: fake_state_api)
 
     assert (project / "var").is_dir()
     assert store.__class__.__name__ == "LifecycleStateStore"
@@ -129,6 +136,7 @@ def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
         "--team-ref", "team-secret",
         "--account-ref", "account-secret",
         "--instance-ref", "instance-secret",
+        "--player-tag-sha256", "a" * 64,
     ]) == 0
     assert main(["mvp-run", *common]) == 0
     assert main(["mvp-status", *common]) == 0
@@ -144,8 +152,14 @@ def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
     assert "instance-secret" not in output
 
 
-def test_local_mvp_visit_requires_live_approval_before_composition() -> None:
+def test_local_mvp_visit_cannot_use_a_callback_to_bypass_approval(monkeypatch) -> None:
     events: list[str] = []
+
+    def reject(*_args):
+        events.append("native-entry")
+        raise RuntimeError("approval unavailable")
+
+    monkeypatch.setattr(cli_module, "run_native_mvp_visit", reject)
 
     status = main(
         [
@@ -154,29 +168,28 @@ def test_local_mvp_visit_requires_live_approval_before_composition() -> None:
             "--slots", "Y",
             "--transaction-ref", "tx-one",
         ],
-        mvp_visit_runner=lambda *_args: events.append("visit"),
     )
 
-    assert status == 2
-    assert events == []
+    assert status == 1
+    assert events == ["native-entry"]
 
 
-def test_local_mvp_cli_runs_one_bounded_attack_composition(capsys) -> None:
+def test_local_mvp_cli_runs_only_the_sealed_native_entry(monkeypatch, capsys) -> None:
     events: list[str] = []
 
     def run(project_root: str, slots: str, transaction_ref: str) -> VisitResult:
         events.append(f"visit:{project_root}:{slots}:{transaction_ref}")
         return VisitResult("completed", "RETURNED_HOME", True, True)
 
+    monkeypatch.setattr(cli_module, "run_native_mvp_visit", run)
+
     status = main(
         [
             "mvp-visit-one",
             "--project-root", "X",
             "--slots", "Y",
             "--transaction-ref", "tx-one",
-            "--owner-approved-live",
         ],
-        mvp_visit_runner=run,
     )
 
     assert status == 0

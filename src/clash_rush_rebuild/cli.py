@@ -28,11 +28,15 @@ class CycleCommand(Protocol):
     def visit_once(self) -> object: ...
 
 
-def build_native_state_store(project_root: Path) -> LifecycleStateStore:
+def build_native_state_store(
+    project_root: Path,
+    *,
+    state_api_factory: Callable[[], object] = NativeWin32StateApi,
+) -> LifecycleStateStore:
     project = Path(project_root).resolve(strict=True)
     var = project / "var"
     var.mkdir(exist_ok=True)
-    state_api = NativeWin32StateApi()
+    state_api = state_api_factory()
     return LifecycleStateStore(
         project,
         Win32StateFilePort(project, state_api),
@@ -131,6 +135,7 @@ def _parser() -> argparse.ArgumentParser:
     mvp_setup.add_argument("--team-ref", required=True)
     mvp_setup.add_argument("--account-ref", required=True)
     mvp_setup.add_argument("--instance-ref", required=True)
+    mvp_setup.add_argument("--player-tag-sha256", required=True)
     for name in ("mvp-run", "mvp-pause", "mvp-stop", "mvp-status"):
         control = subcommands.add_parser(name)
         control.add_argument("--project-root", required=True)
@@ -140,7 +145,6 @@ def _parser() -> argparse.ArgumentParser:
     mvp_visit.add_argument("--project-root", required=True)
     mvp_visit.add_argument("--slots", required=True)
     mvp_visit.add_argument("--transaction-ref", required=True)
-    mvp_visit.add_argument("--owner-approved-live", action="store_true")
     return parser
 
 
@@ -150,13 +154,11 @@ def main(
     cycle_builder: Callable[[str, str], CycleCommand] = build_inert_cycle,
     setup_runner: Callable[[Path], object] = run_guided_setup,
     synthetic_exporter: Callable[[], str] = export_synthetic_installation,
-    mvp_visit_runner: Callable[[str, str, str], VisitResult] = run_native_mvp_visit,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "visit-one" and args.owner_approved is not True:
         return 2
-    if args.command == "mvp-visit-one" and args.owner_approved_live is not True:
-        return 2
+
     try:
         if args.command == "export-setup-example":
             with Path(args.output).open("x", encoding="utf-8", newline="\n") as stream:
@@ -167,7 +169,12 @@ def main(
             return 0
         if args.command == "mvp-setup":
             _local_control_store(args.project_root).setup(
-                MvpConfiguration(args.team_ref, args.account_ref, args.instance_ref)
+                MvpConfiguration(
+                    args.team_ref,
+                    args.account_ref,
+                    args.instance_ref,
+                    args.player_tag_sha256,
+                )
             )
             print("local MVP configured mode=STOPPED")
             return 0
@@ -187,7 +194,7 @@ def main(
             print(f"local MVP mode={state.mode.value} configured=yes")
             return 0
         if args.command == "mvp-visit-one":
-            result = mvp_visit_runner(
+            result = run_native_mvp_visit(
                 args.project_root, args.slots, args.transaction_ref
             )
             if type(result) is not VisitResult:

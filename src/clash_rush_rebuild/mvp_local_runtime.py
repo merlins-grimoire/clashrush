@@ -96,11 +96,19 @@ class BgraGameplayRecognizer:
         self,
         binding: PlayerBinding,
         capture: Callable[[PlayerBinding], tuple[int, int, bytes]],
+        *,
+        account_verified: bool,
     ) -> None:
-        if type(binding) is not PlayerBinding or not callable(capture):
+        if (
+            type(binding) is not PlayerBinding
+            or not callable(capture)
+            or type(account_verified) is not bool
+        ):
             raise RuntimeSafetyError("exact binding and capture seam required")
         self._binding = binding
         self._capture = capture
+        self._account_verified = account_verified
+        self._scout_source: bytes | None = None
 
     def _frame(self) -> tuple[int, int, bytes]:
         width, height, pixels = self._capture(self._binding)
@@ -154,7 +162,7 @@ class BgraGameplayRecognizer:
         # Clash Anytime removed training/healing waits.  As in the donor, a
         # positive HOME gate is the preflight army-ready signal; the My Army
         # green control is checked again inside the executor before commitment.
-        return Recognition(home, True if home else None, home)
+        return Recognition(home, True if home else None, self._account_verified)
 
     def army_ready(self) -> bool | None:
         return self._fraction(self._frame(), self._ARMY_REGION, self._green) > 0.25
@@ -162,11 +170,27 @@ class BgraGameplayRecognizer:
     def return_home_visible(self) -> bool:
         return self._fraction(self._frame(), self._RETURN_REGION, self._green) > 0.20
 
+    def capture_scout_source(self) -> None:
+        """Bind later scout evidence to the frame immediately before input."""
+        self._scout_source = self._frame()[2]
+
     def scout_ready(self) -> bool:
         frame = self._frame()
+        source = self._scout_source
+        if source is None or len(source) != len(frame[2]):
+            return False
+        changed = sum(
+            1
+            for offset in range(0, len(source), 4)
+            if max(
+                abs(source[offset] - frame[2][offset]),
+                abs(source[offset + 1] - frame[2][offset + 1]),
+                abs(source[offset + 2] - frame[2][offset + 2]),
+            ) >= 35
+        ) / (len(source) // 4)
         colorful = self._fraction(
             frame,
-            (0.0, 0.0, 1.0, 1.0),
+            (0.20, 0.15, 0.80, 0.85),
             lambda blue, green, red: (
                 max(blue, green, red) >= 80
                 and max(blue, green, red) - min(blue, green, red) >= 40
@@ -177,7 +201,7 @@ class BgraGameplayRecognizer:
             (0.0, 0.0, 1.0, 1.0),
             lambda blue, green, red: min(blue, green, red) >= 250,
         )
-        return colorful >= 0.05 and near_white < 0.90
+        return changed >= 0.03 and colorful >= 0.05 and near_white < 0.90
 
 
 class LocalControlStore:
@@ -196,7 +220,14 @@ class LocalControlStore:
             configuration.account_ref,
             configuration.instance_ref,
         )
-        if any(type(value) is not str or _REFERENCE.fullmatch(value) is None for value in values):
+        if (
+            any(
+                type(value) is not str or _REFERENCE.fullmatch(value) is None
+                for value in values
+            )
+            or type(configuration.player_tag_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", configuration.player_tag_sha256) is None
+        ):
             raise RuntimeSafetyError("one exact Team, account, and instance are required")
         state = PersistentControl(configuration, LocalBotMode.STOPPED)
         self._write(state, exclusive=True)
@@ -215,25 +246,38 @@ class LocalControlStore:
             "team_ref",
             "account_ref",
             "instance_ref",
+            "player_tag_sha256",
         }:
             raise RuntimeSafetyError("local control configuration is malformed")
         try:
+            if type(data["mode"]) is not str:
+                raise TypeError
             configuration = MvpConfiguration(**config)
             mode = LocalBotMode(data["mode"])
         except (TypeError, ValueError) as exc:
             raise RuntimeSafetyError("local control state is malformed") from exc
-        if data["schema"] != 1 or any(
-            _REFERENCE.fullmatch(value) is None
-            for value in (
-                configuration.team_ref,
-                configuration.account_ref,
-                configuration.instance_ref,
+        references = (
+            configuration.team_ref,
+            configuration.account_ref,
+            configuration.instance_ref,
+        )
+        if (
+            type(data["schema"]) is not int
+            or data["schema"] != 2
+            or any(
+                type(value) is not str or _REFERENCE.fullmatch(value) is None
+                for value in references
             )
+            or type(configuration.player_tag_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", configuration.player_tag_sha256) is None
         ):
             raise RuntimeSafetyError("local control state is malformed")
         if mode is LocalBotMode.UNCONFIGURED:
             raise RuntimeSafetyError("persisted control state cannot be unconfigured")
-        return PersistentControl(configuration, mode)
+        state = PersistentControl(configuration, mode)
+        if encode_control_state(state) != raw.encode("utf-8"):
+            raise RuntimeSafetyError("local control state is malformed")
+        return state
 
     def transition(self, target: LocalBotMode) -> PersistentControl:
         if type(target) is not LocalBotMode or target is LocalBotMode.UNCONFIGURED:
@@ -252,16 +296,7 @@ class LocalControlStore:
 
     def _write(self, state: PersistentControl, *, exclusive: bool) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            {
-                "schema": 1,
-                "mode": state.mode.value,
-                "configuration": asdict(state.configuration),
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        ) + "\n"
+        payload = encode_control_state(state).decode("ascii")
         if exclusive:
             try:
                 with self._path.open("x", encoding="utf-8", newline="\n") as stream:
@@ -285,6 +320,24 @@ class LocalControlStore:
                 pass
 
 
+def encode_control_state(state: PersistentControl) -> bytes:
+    if type(state) is not PersistentControl:
+        raise RuntimeSafetyError("local control state is malformed")
+    return (
+        json.dumps(
+            {
+                "schema": 2,
+                "mode": state.mode.value,
+                "configuration": asdict(state.configuration),
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+
+
 class BoundedAttackExecutor:
     """Attack-only donor gesture seam with a fresh gate before every input."""
 
@@ -294,6 +347,7 @@ class BoundedAttackExecutor:
         input_port: InputPort,
         *,
         army_ready: Callable[[], bool | None],
+        begin_scout_transition: Callable[[], None] = lambda: None,
         scout_ready: Callable[[], bool] = lambda: True,
         return_home_visible: Callable[[], bool],
         kill_switch_enabled: Callable[[], bool],
@@ -304,6 +358,7 @@ class BoundedAttackExecutor:
         self._binding = binding
         self._input = input_port
         self._army_ready = army_ready
+        self._begin_scout_transition = begin_scout_transition
         self._scout_ready = scout_ready
         self._return_home_visible = return_home_visible
         self._kill_switch = kill_switch_enabled
@@ -341,6 +396,12 @@ class BoundedAttackExecutor:
             return False, "MY_ARMY_READINESS_UNKNOWN"
         if not army:
             return False, "MY_ARMY_NOT_READY"
+        try:
+            source_result = self._begin_scout_transition()
+        except BaseException:
+            return False, "SCOUT_SOURCE_UNAVAILABLE"
+        if source_result is not None:
+            return False, "SCOUT_SOURCE_UNAVAILABLE"
         sent, reason = self._click(ARMY_ATTACK_BTN)
         if not sent:
             return False, reason if reason == "KILL_SWITCH" else "ARMY_ATTACK_CLICK_FAILED"
@@ -488,4 +549,5 @@ __all__ = [
     "PersistentControl",
     "Recognition",
     "RuntimeSafetyError",
+    "encode_control_state",
 ]
