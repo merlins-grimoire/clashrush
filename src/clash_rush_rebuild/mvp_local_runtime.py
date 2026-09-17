@@ -8,6 +8,7 @@ no upgrade, research, reward, placement, donation, cart, or purchase action.
 
 from __future__ import annotations
 
+import colorsys
 import json
 import os
 import re
@@ -147,7 +148,14 @@ class BgraGameplayRecognizer:
 
     @staticmethod
     def _orange(blue: int, green: int, red: int) -> bool:
-        return red >= 120 and 30 <= green <= 190 and blue <= 100 and red > green
+        hue, saturation, value = colorsys.rgb_to_hsv(
+            red / 255, green / 255, blue / 255
+        )
+        return (
+            10 / 360 <= hue <= 60 / 360
+            and saturation >= 100 / 255
+            and value >= 120 / 255
+        )
 
     @staticmethod
     def _green(blue: int, green: int, red: int) -> bool:

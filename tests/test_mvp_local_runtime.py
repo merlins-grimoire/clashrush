@@ -328,7 +328,11 @@ def test_non_running_persistent_mode_emits_no_capture_or_input(tmp_path: Path) -
 
 
 def _bgra_frame(
-    *, home: bool = False, army: bool = False, return_home: bool = False
+    *,
+    home: bool = False,
+    army: bool = False,
+    return_home: bool = False,
+    home_color: tuple[int, int, int] = (20, 100, 220),
 ) -> bytes:
     width, height = BINDING.width, BINDING.height
     pixels = bytearray(width * height * 4)
@@ -341,7 +345,7 @@ def _bgra_frame(
                 pixels[offset : offset + 4] = bytes((*color, 255))
 
     if home:
-        paint((0.035, 0.90, 0.085, 0.97), (20, 100, 220))
+        paint((0.035, 0.90, 0.085, 0.97), home_color)
     if army:
         paint((0.89, 0.84, 0.99, 0.93), (30, 220, 30))
     if return_home:
@@ -366,6 +370,28 @@ def test_bgra_recognizer_adapts_donor_home_army_and_return_home_regions() -> Non
     assert recognizer.recognize(BINDING, ACCOUNT) == Recognition(True, True, True)
     assert recognizer.army_ready() is True
     assert recognizer.return_home_visible() is True
+
+
+@pytest.mark.parametrize(
+    ("bgra", "expected"),
+    [
+        ((110, 150, 200), True),  # donor OpenCV HSV: H=13, S=115, V=200
+        ((120, 140, 160), False),  # saturation below donor floor
+        ((20, 220, 180), False),  # hue outside donor orange range
+        ((30, 70, 110), False),  # value below donor floor
+    ],
+)
+def test_bgra_home_recognition_preserves_donor_hsv_boundary(
+    bgra: tuple[int, int, int], expected: bool
+) -> None:
+    frame = _bgra_frame(home=True, home_color=bgra)
+    recognizer = BgraGameplayRecognizer(
+        BINDING,
+        lambda binding: (binding.width, binding.height, frame),
+        account_verified=False,
+    )
+
+    assert recognizer.recognize(BINDING, ACCOUNT).home is expected
 
 
 def test_bgra_recognizer_rejects_changed_binding_without_capture() -> None:
