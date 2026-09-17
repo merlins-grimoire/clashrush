@@ -192,7 +192,7 @@ def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
         "mvp-setup", *common,
         "--team-ref", "team-secret",
         "--account-ref", "account-secret",
-        "--instance-ref", "instance-secret",
+        "--instance-ref", "slot-0",
         "--player-tag-sha256", "a" * 64,
     ]) == 0
     assert main(["mvp-run", *common]) == 0
@@ -206,7 +206,7 @@ def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
     assert "PAUSED" in output
     assert "team-secret" not in output
     assert "account-secret" not in output
-    assert "instance-secret" not in output
+    assert "slot-0" not in output
 
 
 def test_local_mvp_visit_cannot_use_a_callback_to_bypass_approval(monkeypatch) -> None:

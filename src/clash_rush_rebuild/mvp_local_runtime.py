@@ -33,6 +33,7 @@ DEPLOY_SLOTS = tuple((0.03183 + 0.070023 * index, 0.92) for index in range(5))
 DEPLOY_KEYS = (0x52, 0x4A, 0x56)
 RETURN_HOME_BTN = (0.511, 0.834)
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_V1_SLOT_REFS = frozenset(f"slot-{index}" for index in range(5))
 
 
 class RuntimeSafetyError(RuntimeError):
@@ -215,16 +216,14 @@ class LocalControlStore:
             raise RuntimeSafetyError("local MVP is already configured")
         if type(configuration) is not MvpConfiguration:
             raise RuntimeSafetyError("exact local MVP configuration required")
-        values = (
-            configuration.team_ref,
-            configuration.account_ref,
-            configuration.instance_ref,
-        )
+        references = (configuration.team_ref, configuration.account_ref)
         if (
             any(
                 type(value) is not str or _REFERENCE.fullmatch(value) is None
-                for value in values
+                for value in references
             )
+            or type(configuration.instance_ref) is not str
+            or configuration.instance_ref not in _V1_SLOT_REFS
             or type(configuration.player_tag_sha256) is not str
             or re.fullmatch(r"[0-9a-f]{64}", configuration.player_tag_sha256) is None
         ):
@@ -256,11 +255,7 @@ class LocalControlStore:
             mode = LocalBotMode(data["mode"])
         except (TypeError, ValueError) as exc:
             raise RuntimeSafetyError("local control state is malformed") from exc
-        references = (
-            configuration.team_ref,
-            configuration.account_ref,
-            configuration.instance_ref,
-        )
+        references = (configuration.team_ref, configuration.account_ref)
         if (
             type(data["schema"]) is not int
             or data["schema"] != 2
@@ -268,6 +263,8 @@ class LocalControlStore:
                 type(value) is not str or _REFERENCE.fullmatch(value) is None
                 for value in references
             )
+            or type(configuration.instance_ref) is not str
+            or configuration.instance_ref not in _V1_SLOT_REFS
             or type(configuration.player_tag_sha256) is not str
             or re.fullmatch(r"[0-9a-f]{64}", configuration.player_tag_sha256) is None
         ):

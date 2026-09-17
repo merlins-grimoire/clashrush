@@ -28,7 +28,7 @@ from clash_rush_rebuild.mvp_local_runtime import (
 
 TEAM = "team-synthetic-one"
 ACCOUNT = "account-synthetic-one"
-INSTANCE = "instance-synthetic-one"
+INSTANCE = "slot-0"
 TAG_HASH = "a" * 64
 CONFIG = MvpConfiguration(TEAM, ACCOUNT, INSTANCE, TAG_HASH)
 BINDING = PlayerBinding(
@@ -106,6 +106,59 @@ def test_control_store_rejects_second_team_account_or_instance(tmp_path: Path) -
 
     with pytest.raises(RuntimeSafetyError, match="already configured"):
         store.setup(MvpConfiguration("team-other", ACCOUNT, INSTANCE, TAG_HASH))
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_control_store_accepts_each_canonical_v1_slot_reference(
+    tmp_path: Path, index: int
+) -> None:
+    store = LocalControlStore(tmp_path / f"control-{index}.json")
+    configuration = MvpConfiguration(TEAM, ACCOUNT, f"slot-{index}", TAG_HASH)
+
+    assert store.setup(configuration).configuration == configuration
+    assert store.load().configuration == configuration
+
+
+@pytest.mark.parametrize(
+    "instance_ref",
+    [
+        "SyntheticDisplayName",
+        "slot",
+        "slot-",
+        "slot-00",
+        "slot-01",
+        "slot-5",
+        "Slot-0",
+    ],
+)
+def test_control_store_setup_rejects_noncanonical_v1_slot_references(
+    tmp_path: Path, instance_ref: str
+) -> None:
+    store = LocalControlStore(tmp_path / "control.json")
+
+    with pytest.raises(RuntimeSafetyError, match="instance"):
+        store.setup(MvpConfiguration(TEAM, ACCOUNT, instance_ref, TAG_HASH))
+
+    assert not (tmp_path / "control.json").exists()
+
+
+@pytest.mark.parametrize(
+    "instance_ref", ["SyntheticDisplayName", "slot-00", "slot-5"]
+)
+def test_control_store_load_rejects_noncanonical_v1_slot_references(
+    tmp_path: Path, instance_ref: str
+) -> None:
+    import json
+
+    path = tmp_path / "control.json"
+    store = LocalControlStore(path)
+    store.setup(CONFIG)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["configuration"]["instance_ref"] = instance_ref
+    path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
+
+    with pytest.raises(RuntimeSafetyError, match="malformed"):
+        store.load()
 
 
 @pytest.mark.parametrize(
