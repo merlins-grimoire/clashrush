@@ -12,7 +12,7 @@ from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
 from clash_rush_rebuild.mvp_local_runtime import (
-    BgraGameplayRecognizer, PersistentControl, RuntimeSafetyError,
+    BgraGameplayRecognizer, HomeDiagnostic, PersistentControl, RuntimeSafetyError,
 )
 
 
@@ -179,8 +179,26 @@ def test_diagnostic_processing_failure_releases_frame_locals(monkeypatch):
 
 
 @pytest.mark.parametrize("positive", [False, True])
-def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_cleanup(monkeypatch, tmp_path, positive):
+@pytest.mark.parametrize("diagnostic_mode", ["normal", "none", "fake", "mutated", "positive", "shadow"])
+def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_cleanup(monkeypatch, tmp_path, positive, diagnostic_mode):
     events = []
+    if diagnostic_mode != "normal":
+        def get_diagnostic(self):
+            if diagnostic_mode == "none":
+                return None
+            if diagnostic_mode == "fake":
+                return SimpleNamespace(to_json=lambda: "synthetic-private")
+            value = self._home_diagnostic
+            if diagnostic_mode == "mutated":
+                object.__setattr__(value, "orange_pixels", True)
+            if diagnostic_mode == "positive":
+                for name in ("hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels"):
+                    object.__setattr__(value, name, value.roi_pixels)
+            return value
+        monkeypatch.setattr(BgraGameplayRecognizer, "home_diagnostic", property(get_diagnostic))
+        if diagnostic_mode == "shadow":
+            monkeypatch.setattr(HomeDiagnostic, "to_json", lambda _self: "synthetic-private")
+            monkeypatch.setattr(HomeDiagnostic, "reason", property(lambda _self: "synthetic-private"))
     configuration = MvpConfiguration("synthetic-team", ACCOUNT, "slot-2", "a" * 64)
     control = SimpleNamespace(load=lambda: PersistentControl(configuration, LocalBotMode.RUNNING))
     lease = SimpleNamespace(abandoned=False, require_usable=lambda: None,
@@ -209,6 +227,8 @@ def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_clean
         native.run_native_mvp_visit(str(tmp_path), "unused", "synthetic-visit")
     if positive:
         assert str(caught.value) == "SYNTHETIC_INPUT_SENTINEL"
+    elif diagnostic_mode in {"none", "fake", "mutated", "positive"}:
+        assert str(caught.value) == "HOME_NOT_VERIFIED"
     else:
         prefix, payload = str(caught.value).split(" ", 1)
         assert prefix == "HOME_NOT_VERIFIED"

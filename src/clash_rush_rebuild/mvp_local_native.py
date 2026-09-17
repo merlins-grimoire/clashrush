@@ -30,6 +30,7 @@ from .mvp_local_runtime import (
     LocalMvpComposition,
     RuntimeSafetyError,
     encode_control_state,
+    home_not_verified_message,
 )
 from .mvp_local_world_export import (
     capture_world_export,
@@ -477,9 +478,7 @@ def run_native_mvp_visit(
             binding, configured.configuration.account_ref
         ).home is not True:
             diagnostic = source_recognizer.home_diagnostic
-            if diagnostic is None:
-                raise RuntimeSafetyError("HOME_NOT_VERIFIED")
-            raise RuntimeSafetyError(f"HOME_NOT_VERIFIED {diagnostic.to_json()}")
+            raise RuntimeSafetyError(home_not_verified_message(diagnostic))
         input_port = Win32BoundInput(binding, supervisor.capture_owned, enabled)
         summary = capture_world_export(
             binding,

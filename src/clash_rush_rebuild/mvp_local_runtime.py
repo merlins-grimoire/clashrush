@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import traceback
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -101,21 +102,95 @@ class HomeDiagnostic:
     value_pixels: int
     orange_pixels: int
 
+    def __post_init__(self) -> None:
+        _home_payload(self)
+
     @property
     def reason(self) -> str:
-        if self.roi_pixels == 0:
-            return "ROI_EMPTY"
-        if self.orange_pixels == 0:
-            return "COLOR_ABSENT"
-        if self.orange_pixels / self.roi_pixels > 0.30:
-            return "HOME_POSITIVE"
-        return "FRACTION_LOW"
+        return _home_payload(self)["reason"]
 
     def to_json(self) -> str:
-        return json.dumps(
-            {"schema": 1, "reason": self.reason, **asdict(self)},
-            sort_keys=True, separators=(",", ":"),
+        return _serialize_home_payload(_home_payload(self))
+
+
+def _home_payload(diagnostic: HomeDiagnostic) -> dict[str, int | str]:
+    """Snapshot exact scalars before comparisons; never dispatch on the value."""
+    if type(diagnostic) is not HomeDiagnostic:
+        raise RuntimeSafetyError("HOME_DIAGNOSTIC_INVALID")
+    names = (
+        "width", "height", "left", "top", "right", "bottom", "roi_pixels",
+        "hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels",
+    )
+    values = {}
+    missing = False
+    try:
+        for name in names:
+            values[name] = object.__getattribute__(diagnostic, name)
+    except AttributeError:
+        missing = True
+    if missing or any(type(value) is not int for value in values.values()):
+        raise RuntimeSafetyError("HOME_DIAGNOSTIC_INVALID")
+    width, height = values["width"], values["height"]
+    left, top, right, bottom = (values[name] for name in names[2:6])
+    count = values["roi_pixels"]
+    hue, saturation, value, orange = (values[name] for name in names[7:])
+    if (
+        not (640 <= width <= 64 * 1024 * 1024 // (360 * 4))
+        or not (360 <= height <= 64 * 1024 * 1024 // (640 * 4))
+        or width * height * 4 > 64 * 1024 * 1024
+        or (left, top, right, bottom) != (
+            int(width * .035), int(height * .90),
+            int(width * .085), int(height * .97),
         )
+        or not (0 <= left <= right <= width and 0 <= top <= bottom <= height)
+        or count != (right - left) * (bottom - top)
+        or not all(0 <= component <= count for component in (hue, saturation, value, orange))
+        or not (max(0, hue + saturation + value - 2 * count) <= orange <= min(hue, saturation, value))
+    ):
+        raise RuntimeSafetyError("HOME_DIAGNOSTIC_INVALID")
+    reason = (
+        "ROI_EMPTY" if count == 0 else
+        "COLOR_ABSENT" if orange == 0 else
+        "HOME_POSITIVE" if orange / count > 0.30 else "FRACTION_LOW"
+    )
+    return {"schema": 1, "reason": reason, **values}
+
+
+def _serialize_home_payload(payload: dict[str, int | str]) -> str:
+    result = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if type(result) is not str:
+        raise RuntimeSafetyError("HOME_DIAGNOSTIC_INVALID")
+    return result
+
+
+def home_not_verified_message(diagnostic: HomeDiagnostic | None) -> str:
+    """Native negative emission: no caller-controlled serializer or reason."""
+    try:
+        payload = _home_payload(diagnostic)
+        if payload["reason"] != "HOME_POSITIVE":
+            return "HOME_NOT_VERIFIED " + _serialize_home_payload(payload)
+    except RuntimeSafetyError:
+        pass
+    return "HOME_NOT_VERIFIED"
+
+
+def _clear_capture_tracebacks(error: BaseException) -> None:
+    """Clear unwound callback frames, including chained exceptions, in memory."""
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback.clear_frames(BaseException.__traceback__.__get__(current))
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(BaseExceptionGroup.exceptions.__get__(current))
+        for linked in (
+            BaseException.__cause__.__get__(current),
+            BaseException.__context__.__get__(current),
+        ):
+            if linked is not None:
+                pending.append(linked)
 
 
 class BgraGameplayRecognizer:
@@ -154,23 +229,29 @@ class BgraGameplayRecognizer:
         return self._home_diagnostic
 
     def _frame(self) -> tuple[int, int, bytes]:
-        frame = self._capture(self._binding)
-        reason = None
-        if type(frame) is not tuple or len(frame) != 3:
-            reason = "FRAME_SHAPE_INVALID"
-        elif (
-            type(frame[0]) is not int
-            or type(frame[1]) is not int
-            or (frame[0], frame[1]) != (self._binding.width, self._binding.height)
-        ):
-            reason = "FRAME_GEOMETRY_MISMATCH"
-        elif type(frame[2]) is not bytes or len(frame[2]) != frame[0] * frame[1] * 4:
-            reason = "FRAME_BYTES_INVALID"
-        if reason is not None:
-            # Remove the capture before raising: traceback locals must not keep it.
+        frame = None
+        reason = "FRAME_CAPTURE_FAILED"
+        try:
+            frame = self._capture(self._binding)
+            reason = "FRAME_VALIDATION_FAILED"
+            if type(frame) is not tuple or len(frame) != 3:
+                reason = "FRAME_SHAPE_INVALID"
+            elif (
+                type(frame[0]) is not int
+                or type(frame[1]) is not int
+                or (frame[0], frame[1]) != (self._binding.width, self._binding.height)
+            ):
+                reason = "FRAME_GEOMETRY_MISMATCH"
+            elif type(frame[2]) is not bytes or len(frame[2]) != frame[0] * frame[1] * 4:
+                reason = "FRAME_BYTES_INVALID"
+            else:
+                return frame
+        except BaseException as error:
+            _clear_capture_tracebacks(error)
+        finally:
             frame = None
-            raise RuntimeSafetyError(f"transient PrintWindow frame is malformed: {reason}")
-        return frame
+        # Raise outside the handler: the discarded exception is not a context.
+        raise RuntimeSafetyError(reason)
 
     @staticmethod
     def _fraction(
@@ -178,21 +259,25 @@ class BgraGameplayRecognizer:
         region: tuple[float, float, float, float],
         predicate: Callable[[int, int, int], bool],
     ) -> float:
-        width, height, pixels = frame
-        x0, y0, x1, y1 = region
-        left, right = int(width * x0), int(width * x1)
-        top, bottom = int(height * y0), int(height * y1)
-        count = max(0, right - left) * max(0, bottom - top)
-        if count <= 0:
-            return 0.0
-        matches = 0
-        for y in range(top, bottom):
-            row = y * width * 4
-            for x in range(left, right):
-                offset = row + x * 4
-                if predicate(pixels[offset], pixels[offset + 1], pixels[offset + 2]):
-                    matches += 1
-        return matches / count
+        pixels = None
+        try:
+            width, height, pixels = frame
+            x0, y0, x1, y1 = region
+            left, right = int(width * x0), int(width * x1)
+            top, bottom = int(height * y0), int(height * y1)
+            count = max(0, right - left) * max(0, bottom - top)
+            if count <= 0:
+                return 0.0
+            matches = 0
+            for y in range(top, bottom):
+                row = y * width * 4
+                for x in range(left, right):
+                    offset = row + x * 4
+                    if predicate(pixels[offset], pixels[offset + 1], pixels[offset + 2]):
+                        matches += 1
+            return matches / count
+        finally:
+            frame = pixels = width = height = None
 
     @staticmethod
     def _hsv(blue: int, green: int, red: int) -> tuple[int, int, int]:
@@ -230,8 +315,9 @@ class BgraGameplayRecognizer:
 
     @staticmethod
     def _diagnose_home(frame: tuple[int, int, bytes]) -> HomeDiagnostic:
-        width, height, pixels = frame
+        pixels = hsv = hue = saturation = value = None
         try:
+            width, height, pixels = frame
             x0, y0, x1, y1 = BgraGameplayRecognizer._HOME_REGION
             left, right = int(width * x0), int(width * x1)
             top, bottom = int(height * y0), int(height * y1)
@@ -240,9 +326,18 @@ class BgraGameplayRecognizer:
             for y in range(top, bottom):
                 for x in range(left, right):
                     offset = (y * width + x) * 4
-                    hue, saturation, value = BgraGameplayRecognizer._hsv(
+                    hsv = BgraGameplayRecognizer._hsv(
                         pixels[offset], pixels[offset + 1], pixels[offset + 2]
                     )
+                    if type(hsv) is not tuple or len(hsv) != 3:
+                        raise RuntimeSafetyError("HOME_REDUCTION_FAILED")
+                    hue, saturation, value = hsv
+                    if (
+                        type(hue) is not int or type(saturation) is not int
+                        or type(value) is not int or not 0 <= hue <= 179
+                        or not 0 <= saturation <= 255 or not 0 <= value <= 255
+                    ):
+                        raise RuntimeSafetyError("HOME_REDUCTION_FAILED")
                     hue_ok = 5 <= hue <= 30
                     saturation_ok = saturation >= 100
                     value_ok = value >= 120
@@ -255,7 +350,7 @@ class BgraGameplayRecognizer:
                 hues, saturations, values, oranges,
             )
         finally:
-            frame = pixels = None
+            frame = pixels = width = height = hsv = hue = saturation = value = None
 
     @staticmethod
     def _green(blue: int, green: int, red: int) -> bool:
@@ -267,13 +362,22 @@ class BgraGameplayRecognizer:
             raise RuntimeSafetyError("capture binding changed")
         if type(account_ref) is not str or _REFERENCE.fullmatch(account_ref) is None:
             raise RuntimeSafetyError("account binding is malformed")
-        frame = self._frame()
+        frame = BgraGameplayRecognizer._frame(self)
+        failed = False
+        diagnostic = None
         try:
-            self._home_diagnostic = self._diagnose_home(frame)
-            # Preserve the existing gate; diagnostics never authorize input.
-            home = self._fraction(frame, self._HOME_REGION, self._orange) > 0.30
+            diagnostic = BgraGameplayRecognizer._diagnose_home(frame)
+            # One scalar reduction owns both the strict joint fraction and report.
+            home = _home_payload(diagnostic)["reason"] == "HOME_POSITIVE"
+        except BaseException as error:
+            _clear_capture_tracebacks(error)
+            failed = True
         finally:
             frame = None
+        if failed:
+            diagnostic = None
+            raise RuntimeSafetyError("HOME_REDUCTION_FAILED")
+        self._home_diagnostic = diagnostic
         # Clash Anytime removed training/healing waits.  As in the donor, a
         # positive HOME gate is the preflight army-ready signal; the My Army
         # green control is checked again inside the executor before commitment.
@@ -292,31 +396,34 @@ class BgraGameplayRecognizer:
     def scout_ready(self) -> bool:
         frame = self._frame()
         source = self._scout_source
-        if source is None or len(source) != len(frame[2]):
-            return False
-        changed = sum(
-            1
-            for offset in range(0, len(source), 4)
-            if max(
-                abs(source[offset] - frame[2][offset]),
-                abs(source[offset + 1] - frame[2][offset + 1]),
-                abs(source[offset + 2] - frame[2][offset + 2]),
-            ) >= 35
-        ) / (len(source) // 4)
-        colorful = self._fraction(
-            frame,
-            (0.20, 0.15, 0.80, 0.85),
-            lambda blue, green, red: (
-                max(blue, green, red) >= 80
-                and max(blue, green, red) - min(blue, green, red) >= 40
-            ),
-        )
-        near_white = self._fraction(
-            frame,
-            (0.0, 0.0, 1.0, 1.0),
-            lambda blue, green, red: min(blue, green, red) >= 250,
-        )
-        return changed >= 0.03 and colorful >= 0.05 and near_white < 0.90
+        try:
+            if source is None or len(source) != len(frame[2]):
+                return False
+            changed = sum(
+                1
+                for offset in range(0, len(source), 4)
+                if max(
+                    abs(source[offset] - frame[2][offset]),
+                    abs(source[offset + 1] - frame[2][offset + 1]),
+                    abs(source[offset + 2] - frame[2][offset + 2]),
+                ) >= 35
+            ) / (len(source) // 4)
+            colorful = self._fraction(
+                frame,
+                (0.20, 0.15, 0.80, 0.85),
+                lambda blue, green, red: (
+                    max(blue, green, red) >= 80
+                    and max(blue, green, red) - min(blue, green, red) >= 40
+                ),
+            )
+            near_white = self._fraction(
+                frame,
+                (0.0, 0.0, 1.0, 1.0),
+                lambda blue, green, red: min(blue, green, red) >= 250,
+            )
+            return changed >= 0.03 and colorful >= 0.05 and near_white < 0.90
+        finally:
+            frame = source = None
 
 
 class LocalControlStore:

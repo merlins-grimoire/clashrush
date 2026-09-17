@@ -1,4 +1,4 @@
-# Initial HOME reassessment: diagnostics-only candidate
+# Initial HOME reassessment: diagnostics-only candidate and R6 seal
 
 ## Decision and evidence boundary
 
@@ -28,8 +28,8 @@ No new third-party code or assets are copied by this slice.
 - The recognizer validates exact tuple, integer geometry, exact bytes and width*height*4 length. It uses the bound render dimensions, not root-window/chrome dimensions.
 - HOME ROI stays `(0.035, 0.90, 0.085, 0.97)`, with integer-truncated, half-open bounds. At synthetic 1280x720 this is x=[44,108), y=[648,698): 3200 pixels.
 - The existing OpenCV-compatible 8-bit HSV arithmetic is extracted unchanged into `_hsv` for reuse by diagnostics and `_orange`. Predicate remains H=5..30 inclusive, S>=100, V>=120.
-- `_fraction` still divides matching pixels by ROI pixels, not channel elements. The HOME decision remains exactly `_fraction(...) > 0.30`. At the synthetic reference geometry, 960 matches reject and 961 accept.
-- Diagnostics do not supply the HOME boolean. The existing gate independently evaluates the same immutable frame, with no recapture or optional fallback.
+- `_fraction` still divides matching pixels by ROI pixels, not channel elements. R6 makes the single HOME scalar reduction authoritative: `orange_pixels / roi_pixels > 0.30`. At the synthetic reference geometry, 960 matches reject and 961 accept.
+- R5's independent second evaluation was rejected in review: mutable helper behavior could contradict the report and its exception path could retain pixels. R6 derives both HOME and the report from one reduction, with no recapture or optional fallback.
 - `run_native_mvp_visit` still consumes state-bound approval before lifecycle launch, checks HOME before constructing input or exporting account state, and retains exact account/army gates and one bounded attack. Its existing finally still attempts owned stop and lease release. The external wrapper still owns STOPPED/read-back and approval cleanup.
 
 ## Diagnostic output contract
@@ -48,9 +48,19 @@ A valid negative initial HOME observation raises `RuntimeSafetyError` with the u
 
 Malformed frames instead raise fixed reasons `FRAME_SHAPE_INVALID`, `FRAME_GEOMETRY_MISMATCH`, or `FRAME_BYTES_INVALID`, without echoing malformed values. Native lifecycle failures that occur before recognition keep their existing failure behavior; diagnostics do not bypass them to inspect an unsafe capture.
 
-Only already validated bounded integer geometry/counts and fixed reason/schema values leave the reduction. No pixel samples, frame hashes, image paths, account references, tags, native handles, window titles, or OCR enter the report. The reducer and recognizer clear frame locals in finally; rejected frames are removed before raising. No file or network sink is added. The current external wrapper lets the sanitized HOME exception reach its existing error output after cleanup. The general CLI retains its generic error output; no broad exception-printing change is introduced.
+R6 enforces the bounded scalar contract at construction and emission. No pixel samples, frame hashes, image paths, account references, tags, native handles, window titles, or OCR enter the report. The reducer and recognizer clear frame locals in finally; rejected frames are removed before raising. No file or network sink is added. The current external wrapper lets the sanitized HOME exception reach its existing error output after cleanup. The general CLI retains its generic error output; no broad exception-printing change is introduced.
 
 These numbers distinguish malformed geometry/bytes, empty ROI, lack of eligible hue/saturation/value, and insufficient joint fraction. They do not establish which UI screen was shown, whether the ROI is correctly calibrated for a changed UI, or whether a threshold should be changed. Component counts individually never authorize HOME.
+
+## R6 deterministic scalar and exception boundary
+
+- The same pinned donor seams above were re-inspected from immutable Git objects. No alternative provides the allowed no-input, no-persistence initial HOME diagnostic. No new donor code or asset is copied.
+- `recognize` class-qualifies `_frame` and `_diagnose_home`, avoiding instance/subclass helper replacement. `_hsv` still uses the unchanged OpenCV-compatible arithmetic, once per ROI pixel. Its result must be an exact three-integer tuple in the HSV range. The joint count alone supplies the unchanged strict fraction gate.
+- `HomeDiagnostic` is frozen/slotted. Its module-owned scalar snapshot checks exact type, exact non-boolean/non-subclass integers, minimum binding geometry and the existing 64 MiB native frame ceiling, exact normalized ROI, exact denominator, component count bounds, and feasible joint intersection bounds `max(0, H+S+V-2N) <= O <= min(H,S,V)`. These checks neither broaden the detector nor introduce a configurable threshold.
+- Construction, the public serializer, and native emission use that snapshot; fields are read once before comparisons. Deleted or post-construction-invalid fields reject. Native emission never dispatches to an instance/subclass `reason` or `to_json`; it emits only a canonical compact exact string with fixed schema/keys and a derived closed reason. A missing, malformed, or positive diagnostic on the negative path yields only `HOME_NOT_VERIFIED`, never input authority.
+- Capture/validation and reduction errors are replaced by closed errors raised outside exception handlers. Unwound callback traceback frames, including cause/context chains and exception-group members, are cleared without formatting the original exception. Executing frame/pixel locals are cleared in finally; malformed reduction return aliases are also discarded. The shared `_fraction` and scout caller receive finally-only local cleanup, with no predicate, transition, capture-count, or input changes.
+- Synthetic RED reproduced the contradictory two-scan result, second-pass exception, and unsealed construction; the initial matrix had 90 failures and two passes on R5. Expanded tests cover malformed/mutating fields and HSV results, forged subclasses, helper/serializer shadowing, retained/chained/group exceptions, malformed reducer returns, shared fraction callers, and native HOME-before-input/owned-stop ordering.
+- Service module code and standard-library serialization are trusted code, not an arbitrary monkeypatch-resistant interpreter sandbox. Callback data, scalar objects crossing emission, and subclass/instance helper dispatch do not gain that trust. No live observation, private-state access, approval issue/consume, or retry is authorized by this repair.
 
 ## Static verification and next gate
 
