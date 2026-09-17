@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 
 import pytest
 
+import clash_rush_rebuild.approval_reconciliation as approval_reconciliation
 from clash_rush_rebuild.approval_reconciliation import (
     ApprovalAction,
     ApprovalError,
@@ -131,6 +131,55 @@ def test_validate_then_consume_is_action_tree_state_bound_and_nonreplayable() ->
         approval.validate_then_consume(
             ApprovalAction.RECONCILE_WINDOW_BINDING, TREE, STATE, STATE_BYTES
         )
+
+
+def test_decoded_wrong_action_at_requested_storage_key_is_rejected() -> None:
+    storage = FakeApprovalStorage()
+    approval = service(storage)
+    approval.grant(
+        ApprovalAction.LAUNCH_WINDOW_BINDING_DIAGNOSTIC,
+        TREE,
+        STATE,
+        STATE_BYTES,
+        lifetime_seconds=600,
+    )
+    storage.artifacts[ApprovalAction.RECONCILE_WINDOW_BINDING] = storage.artifacts[
+        ApprovalAction.LAUNCH_WINDOW_BINDING_DIAGNOSTIC
+    ]
+    before = storage.artifacts[ApprovalAction.RECONCILE_WINDOW_BINDING]
+
+    with pytest.raises(ApprovalError, match="action"):
+        approval.validate_then_consume(
+            ApprovalAction.RECONCILE_WINDOW_BINDING, TREE, STATE, STATE_BYTES
+        )
+
+    assert storage.artifacts[ApprovalAction.RECONCILE_WINDOW_BINDING] == before
+
+
+@pytest.mark.parametrize("consumption_time", [1_600, 1_601])
+def test_expiry_is_rechecked_at_consumption_instant(consumption_time: int) -> None:
+    storage = FakeApprovalStorage()
+    times = iter((1_000, 1_599, consumption_time))
+    approval = OneShotApprovalService(
+        storage,
+        utc_now=lambda: next(times),
+        approval_id_factory=lambda: "a" * 32,
+    )
+    approval.grant(
+        ApprovalAction.RECONCILE_WINDOW_BINDING,
+        TREE,
+        STATE,
+        STATE_BYTES,
+        lifetime_seconds=600,
+    )
+    before = storage.artifacts[ApprovalAction.RECONCILE_WINDOW_BINDING]
+
+    with pytest.raises(ApprovalError, match="expired"):
+        approval.validate_then_consume(
+            ApprovalAction.RECONCILE_WINDOW_BINDING, TREE, STATE, STATE_BYTES
+        )
+
+    assert storage.artifacts[ApprovalAction.RECONCILE_WINDOW_BINDING] == before
 
 
 @pytest.mark.parametrize(
@@ -514,12 +563,88 @@ def test_private_storage_atomically_reads_back_and_marks_consumed(tmp_path) -> N
     assert any(name.endswith(".json") and not directory for name, directory in sealed)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows DACL verification")
-def test_private_storage_sets_and_reads_back_exact_operator_system_dacl(tmp_path) -> None:
+def test_private_storage_reopens_committed_destination_after_issuance(
+    tmp_path, monkeypatch
+) -> None:
     project = tmp_path / "project"
     (project / "var").mkdir(parents=True)
+    storage = PrivateApprovalStorage(project, permission_sealer=lambda _path, _directory: None)
+    replace = approval_reconciliation._replace_write_through
+
+    def corrupt_destination(source, target) -> None:
+        replace(source, target)
+        target.write_bytes(b"corrupt\n")
+
+    monkeypatch.setattr(
+        approval_reconciliation, "_replace_write_through", corrupt_destination
+    )
+
+    with pytest.raises(ApprovalError, match="issuance"):
+        service(storage).grant(
+            ApprovalAction.RECONCILE_WINDOW_BINDING,
+            TREE,
+            STATE,
+            STATE_BYTES,
+            lifetime_seconds=300,
+        )
+
+
+def test_private_storage_reopens_committed_destination_after_consumption(
+    tmp_path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    (project / "var").mkdir(parents=True)
+    storage = PrivateApprovalStorage(project, permission_sealer=lambda _path, _directory: None)
+    approval = service(storage)
+    approval.grant(
+        ApprovalAction.RECONCILE_WINDOW_BINDING,
+        TREE,
+        STATE,
+        STATE_BYTES,
+        lifetime_seconds=300,
+    )
+    replace = approval_reconciliation._replace_write_through
+
+    def corrupt_destination(source, target) -> None:
+        replace(source, target)
+        target.write_bytes(b"corrupt\n")
+
+    monkeypatch.setattr(
+        approval_reconciliation, "_replace_write_through", corrupt_destination
+    )
+
+    with pytest.raises(ApprovalError, match="consumption"):
+        approval.validate_then_consume(
+            ApprovalAction.RECONCILE_WINDOW_BINDING, TREE, STATE, STATE_BYTES
+        )
+
+
+def test_private_storage_uses_fully_injected_synthetic_windows_security(
+    tmp_path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    (project / "var").mkdir(parents=True)
+    descriptors: list[tuple[str, str]] = []
+
+    def forbid_native_security(*_args, **_kwargs) -> None:
+        raise AssertionError("real Windows security call")
+
+    monkeypatch.setattr(
+        approval_reconciliation,
+        "_native_current_operator_sid",
+        forbid_native_security,
+    )
+    monkeypatch.setattr(
+        approval_reconciliation,
+        "_set_and_verify_windows_dacl",
+        forbid_native_security,
+    )
+    security = approval_reconciliation.WindowsPrivatePathSecurity(
+        current_operator_sid=lambda: "S-1-5-21-1000",
+        set_and_verify_dacl=lambda path, sddl: descriptors.append((path.name, sddl)),
+    )
     approval = OneShotApprovalService(
-        PrivateApprovalStorage(project),
+        PrivateApprovalStorage(project, permission_sealer=security.seal),
         utc_now=lambda: 1_000,
         approval_id_factory=lambda: "a" * 32,
     )
@@ -535,6 +660,26 @@ def test_private_storage_sets_and_reads_back_exact_operator_system_dacl(tmp_path
     assert approval.validate(
         ApprovalAction.RECONCILE_WINDOW_BINDING, TREE, STATE, STATE_BYTES
     ).consumed_at is None
+    assert descriptors == [
+        (
+            "approvals",
+            "D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;S-1-5-21-1000)",
+        ),
+        (
+            descriptors[1][0],
+            "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-1000)",
+        ),
+        (
+            "reconcile_window_binding.json",
+            "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-1000)",
+        ),
+        (
+            "reconcile_window_binding.json",
+            "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-1000)",
+        ),
+    ]
+    assert descriptors[1][0].startswith(".reconcile_window_binding.json.")
+    assert descriptors[1][0].endswith(".tmp")
 
 
 def test_reconciliation_audit_is_sanitized_durable_and_ordered(tmp_path) -> None:

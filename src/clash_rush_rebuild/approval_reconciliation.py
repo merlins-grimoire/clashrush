@@ -122,6 +122,26 @@ class ReconciliationAuditPort(Protocol):
     def append_outcome(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class WindowsPrivatePathSecurity:
+    """Injectable Windows SID/DACL boundary for private approval paths."""
+
+    current_operator_sid: Callable[[], str]
+    set_and_verify_dacl: Callable[[Path, str], None]
+
+    def seal(self, path: Path, directory: bool) -> None:
+        sid = self.current_operator_sid()
+        flags = "OICI" if directory else ""
+        expected_sddl = f"D:P(A;{flags};GA;;;SY)(A;{flags};GA;;;{sid})"
+        self.set_and_verify_dacl(path, expected_sddl)
+
+
+def _native_current_operator_sid() -> str:
+    from .win32_runtime import NativeWin32Api
+
+    return NativeWin32Api().current_operator_sid()
+
+
 def _seal_private_path(path: Path, directory: bool) -> None:
     """Restrict a private path to the current operator and SYSTEM."""
     if os.name != "nt":
@@ -131,12 +151,10 @@ def _seal_private_path(path: Path, directory: bool) -> None:
             raise ApprovalError("private path permissions are not restrictive")
         return
 
-    from .win32_runtime import NativeWin32Api
-
-    sid = NativeWin32Api().current_operator_sid()
-    flags = "OICI" if directory else ""
-    expected_sddl = f"D:P(A;{flags};GA;;;SY)(A;{flags};GA;;;{sid})"
-    _set_and_verify_windows_dacl(path, expected_sddl)
+    WindowsPrivatePathSecurity(
+        current_operator_sid=_native_current_operator_sid,
+        set_and_verify_dacl=_set_and_verify_windows_dacl,
+    ).seal(path, directory)
 
 
 def _set_and_verify_windows_dacl(path: Path, expected_sddl: str) -> None:
@@ -357,7 +375,12 @@ class PrivateApprovalStorage:
                 raise OSError("approval temporary read-back mismatch")
             _replace_write_through(temporary, path)
             replaced = True
-            return payload
+            self._seal(path, False)
+            read_back = self._read(path)
+            if not hmac.compare_digest(read_back, payload):
+                raise OSError("approval destination read-back mismatch")
+            _decode_approval(read_back)
+            return read_back
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -567,6 +590,8 @@ class OneShotApprovalService:
             raise ApprovalError("approval is unavailable") from exc
         approval = _decode_approval(payload)
         now = self._utc_now()
+        if approval.action is not action:
+            raise ApprovalError("approval action mismatch")
         if approval.consumed_at is not None:
             raise ApprovalError("approval was already consumed")
         if not approval.issued_at <= now < approval.expires_at:
@@ -587,6 +612,12 @@ class OneShotApprovalService:
     ) -> OneShotApproval:
         approval = self.validate(action, candidate_tree, state, state_bytes)
         payload = _encode_approval(approval)
+        consumed_at = self._utc_now()
+        if (
+            type(consumed_at) is not int
+            or not approval.issued_at <= consumed_at < approval.expires_at
+        ):
+            raise ApprovalError("approval is expired or not yet valid at consumption")
         consumed = OneShotApproval(
             approval.action,
             approval.approval_id,
@@ -594,7 +625,7 @@ class OneShotApprovalService:
             approval.issued_at,
             approval.expires_at,
             approval.state_sha256,
-            self._utc_now(),
+            consumed_at,
         )
         consumed_payload = _encode_approval(consumed)
         try:
@@ -770,4 +801,5 @@ __all__ = [
     "ReconciliationError",
     "StaleStateApprovalIssuer",
     "StaleStateReconciler",
+    "WindowsPrivatePathSecurity",
 ]
