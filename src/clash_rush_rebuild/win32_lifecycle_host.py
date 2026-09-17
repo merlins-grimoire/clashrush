@@ -44,6 +44,7 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
 SYNCHRONIZE = 0x00100000
 JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS = 3
 ERROR_MORE_DATA = 234
+GA_PARENT = 1
 GA_ROOT = 2
 DESKTOP_SWITCHDESKTOP = 0x0100
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -295,6 +296,12 @@ class NativeLifecycleApi(NativeWin32Api):
         if not root:
             raise Win32LifecycleHostError("window root ancestry query failed")
         return int(root)
+
+    def get_ancestor_parent(self, hwnd: int) -> int:
+        parent = self._user32.GetAncestor(hwnd, GA_PARENT)
+        if not parent:
+            raise Win32LifecycleHostError("window parent ancestry query failed")
+        return int(parent)
 
     def client_size(self, hwnd: int) -> tuple[int, int]:
         rect = wintypes.RECT()
@@ -625,9 +632,15 @@ class Win32LifecycleHost:
         root = root_windows[root_selection.selected_index]
 
         render_windows = self._window_list(self._api.enum_child_windows(root))
+        render_window_set = frozenset(render_windows)
+        render_parents: list[int] = []
         render_facts: list[RenderWindowFact] = []
         render_identities: list[ProcessIdentity | None] = []
         for hwnd in render_windows:
+            parent = self._api.get_ancestor_parent(hwnd)
+            if parent != root and parent not in render_window_set:
+                raise Win32LifecycleHostError("render parent is outside enumeration")
+            render_parents.append(parent)
             visible = self._window_is_visible(hwnd)
             ancestry_matches = (
                 visible and self._api.get_ancestor_root(hwnd) == root
@@ -647,6 +660,48 @@ class Win32LifecycleHost:
                     self._api.client_size(hwnd) if in_private_job else (0, 0),
                 )
             )
+
+        # EnumChildWindows returns every descendant, not only direct children.
+        # BlueStacks can expose equal-sized nested wrapper and render HWNDs.  They
+        # are one lineage, not ambiguous sibling surfaces: retain only the deepest
+        # viable member of an equal-geometry lineage before applying the strict
+        # largest-area/tie rule.
+        viable = {
+            index
+            for index, fact in enumerate(render_facts)
+            if fact.visible
+            and fact.ancestry_matches
+            and fact.in_private_job
+            and type(fact.client_size) is tuple
+            and len(fact.client_size) == 2
+            and all(type(value) is int and value > 0 for value in fact.client_size)
+        }
+        wrappers: set[int] = set()
+        index_by_hwnd = {hwnd: index for index, hwnd in enumerate(render_windows)}
+        for descendant_index in viable:
+            descendant_size = render_facts[descendant_index].client_size
+            parent = render_parents[descendant_index]
+            traversed = 0
+            while parent != root:
+                traversed += 1
+                if traversed > len(render_windows):
+                    raise Win32LifecycleHostError("render ancestry cycle detected")
+                parent_index = index_by_hwnd.get(parent)
+                if parent_index is None:
+                    raise Win32LifecycleHostError("render ancestry is incomplete")
+                if (
+                    parent_index in viable
+                    and render_facts[parent_index].client_size == descendant_size
+                ):
+                    wrappers.add(parent_index)
+                parent = render_parents[parent_index]
+        if wrappers:
+            retained = tuple(
+                index for index in range(len(render_windows)) if index not in wrappers
+            )
+            render_windows = tuple(render_windows[index] for index in retained)
+            render_facts = [render_facts[index] for index in retained]
+            render_identities = [render_identities[index] for index in retained]
         render_selection = select_render_window(tuple(render_facts), complete=True)
         if (
             render_selection.reason is not DiagnosticReason.BINDING_READY

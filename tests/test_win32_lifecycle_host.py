@@ -145,9 +145,18 @@ class SyntheticNative:
         )
 
     def enum_child_windows(self, root: int) -> tuple[int, ...]:
-        return tuple(
-            hwnd for hwnd, data in self.windows.items() if data["parent"] == root
-        )
+        descendants: list[int] = []
+        pending = [root]
+        while pending:
+            parent = pending.pop(0)
+            children = [
+                hwnd
+                for hwnd, data in self.windows.items()
+                if data["parent"] == parent
+            ]
+            descendants.extend(children)
+            pending.extend(children)
+        return tuple(descendants)
 
     def is_window(self, hwnd: int) -> bool:
         return hwnd in self.windows
@@ -162,6 +171,12 @@ class SyntheticNative:
         return int(self.windows[hwnd]["pid"])
 
     def get_ancestor_root(self, hwnd: int) -> int:
+        root = hwnd
+        while self.windows[root]["parent"] is not None:
+            root = int(self.windows[root]["parent"])
+        return root
+
+    def get_ancestor_parent(self, hwnd: int) -> int:
         parent = self.windows[hwnd]["parent"]
         return hwnd if parent is None else int(parent)
 
@@ -382,6 +397,50 @@ def test_bind_exact_rejects_multiple_roots_and_equal_largest_render_areas() -> N
         "size": (1280, 720),
     }
     assert host.bind_exact(ProcessIdentity(100, 9001), "Exact Slot", members) is None
+
+
+def test_bind_exact_collapses_equal_area_ancestor_wrapper_before_tie_check() -> None:
+    api = SyntheticNative()
+    api.creation = {100: 9001}
+    _windows(api)
+    api.windows[12] = {
+        "parent": 11,
+        "visible": True,
+        "title": "",
+        "pid": 100,
+        "size": (1280, 720),
+    }
+
+    binding = _host(api).bind_exact(
+        ProcessIdentity(100, 9001),
+        "Exact Slot",
+        _members(ProcessIdentity(100, 9001)),
+    )
+
+    assert binding is not None
+    assert binding.render_hwnd == 12
+
+
+def test_bind_exact_still_rejects_equal_area_sibling_render_candidates() -> None:
+    api = SyntheticNative()
+    api.creation = {100: 9001}
+    _windows(api)
+    api.windows[12] = {
+        "parent": 10,
+        "visible": True,
+        "title": "",
+        "pid": 100,
+        "size": (1280, 720),
+    }
+
+    assert (
+        _host(api).bind_exact(
+            ProcessIdentity(100, 9001),
+            "Exact Slot",
+            _members(ProcessIdentity(100, 9001)),
+        )
+        is None
+    )
 
 
 def test_bind_exact_pins_child_owned_render_when_owner_is_in_private_job() -> None:
