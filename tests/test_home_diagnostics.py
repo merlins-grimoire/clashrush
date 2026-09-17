@@ -179,16 +179,25 @@ def test_diagnostic_processing_failure_releases_frame_locals(monkeypatch):
 
 
 @pytest.mark.parametrize("positive", [False, True])
-@pytest.mark.parametrize("diagnostic_mode", ["normal", "none", "fake", "mutated", "positive", "shadow"])
+@pytest.mark.parametrize("diagnostic_mode", ["normal", "none", "fake", "mutated", "positive", "shadow", "valid_mutation", "valid_replacement", "raise"])
 def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_cleanup(monkeypatch, tmp_path, positive, diagnostic_mode):
     events = []
     if diagnostic_mode != "normal":
         def get_diagnostic(self):
+            if diagnostic_mode == "raise":
+                raise AssertionError("native must not read exposed diagnostic")
             if diagnostic_mode == "none":
                 return None
             if diagnostic_mode == "fake":
                 return SimpleNamespace(to_json=lambda: "synthetic-private")
             value = self._home_diagnostic
+            if diagnostic_mode == "valid_replacement":
+                values = asdict(value)
+                values.update(dict.fromkeys(("hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels"), 1))
+                return HomeDiagnostic(**values)
+            if diagnostic_mode == "valid_mutation":
+                for name in ("hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels"):
+                    object.__setattr__(value, name, 959)
             if diagnostic_mode == "mutated":
                 object.__setattr__(value, "orange_pixels", True)
             if diagnostic_mode == "positive":
@@ -227,8 +236,6 @@ def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_clean
         native.run_native_mvp_visit(str(tmp_path), "unused", "synthetic-visit")
     if positive:
         assert str(caught.value) == "SYNTHETIC_INPUT_SENTINEL"
-    elif diagnostic_mode in {"none", "fake", "mutated", "positive"}:
-        assert str(caught.value) == "HOME_NOT_VERIFIED"
     else:
         prefix, payload = str(caught.value).split(" ", 1)
         assert prefix == "HOME_NOT_VERIFIED"

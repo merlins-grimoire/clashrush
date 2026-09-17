@@ -164,7 +164,10 @@ def _serialize_home_payload(payload: dict[str, int | str]) -> str:
 
 
 def home_not_verified_message(diagnostic: HomeDiagnostic | None) -> str:
-    """Native negative emission: no caller-controlled serializer or reason."""
+    """Format an unbound scalar value; not authoritative native evidence.
+
+    Native emission is owned atomically by recognize(require_home=True).
+    """
     try:
         payload = _home_payload(diagnostic)
         if payload["reason"] != "HOME_POSITIVE":
@@ -356,8 +359,18 @@ class BgraGameplayRecognizer:
     def _green(blue: int, green: int, red: int) -> bool:
         return green >= 120 and green >= red * 3 // 2 and green >= blue * 3 // 2
 
-    def recognize(self, binding: PlayerBinding, account_ref: str) -> Recognition:
+    def recognize(
+        self, binding: PlayerBinding, account_ref: str, *, require_home: bool = False,
+    ) -> Recognition:
+        """Reduce once; native rejection is sealed before exposing any object.
+
+        The property is observational, not an emission/provenance boundary.
+        No caller callback or property read separates the local HOME decision
+        from serialization of that exact local scalar payload.
+        """
         self._home_diagnostic = None
+        if type(require_home) is not bool:
+            raise RuntimeSafetyError("HOME_REQUIREMENT_INVALID")
         if binding != self._binding:
             raise RuntimeSafetyError("capture binding changed")
         if type(account_ref) is not str or _REFERENCE.fullmatch(account_ref) is None:
@@ -365,10 +378,14 @@ class BgraGameplayRecognizer:
         frame = BgraGameplayRecognizer._frame(self)
         failed = False
         diagnostic = None
+        message = None
         try:
             diagnostic = BgraGameplayRecognizer._diagnose_home(frame)
             # One scalar reduction owns both the strict joint fraction and report.
-            home = _home_payload(diagnostic)["reason"] == "HOME_POSITIVE"
+            payload = _home_payload(diagnostic)
+            home = payload["reason"] == "HOME_POSITIVE"
+            if require_home and not home:
+                message = "HOME_NOT_VERIFIED " + _serialize_home_payload(payload)
         except BaseException as error:
             _clear_capture_tracebacks(error)
             failed = True
@@ -377,6 +394,11 @@ class BgraGameplayRecognizer:
         if failed:
             diagnostic = None
             raise RuntimeSafetyError("HOME_REDUCTION_FAILED")
+        if message is not None:
+            # Raise before publication/Recognition construction: no mutable
+            # public object can substitute valid-but-unrelated scalar counts.
+            diagnostic = None
+            raise RuntimeSafetyError(message)
         self._home_diagnostic = diagnostic
         # Clash Anytime removed training/healing waits.  As in the donor, a
         # positive HOME gate is the preflight army-ready signal; the My Army

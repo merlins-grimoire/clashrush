@@ -1,4 +1,4 @@
-# Initial HOME reassessment: diagnostics-only candidate and R6 seal
+# Initial HOME reassessment: diagnostics-only candidate and R7 provenance seal
 
 ## Decision and evidence boundary
 
@@ -34,7 +34,7 @@ No new third-party code or assets are copied by this slice.
 
 ## Diagnostic output contract
 
-`BgraGameplayRecognizer.home_diagnostic` is None before observation and after a failed validation. Successful reduction stores one frozen scalar snapshot; each `recognize` call clears any prior snapshot before validation.
+`BgraGameplayRecognizer.home_diagnostic` is None before observation and after a failed validation. Ordinary `recognize` calls expose a frozen scalar observation; each call clears any prior observation before validation. This property is not authoritative native evidence. With `require_home=True`, negative HOME raises before publishing a diagnostic or constructing a returned Recognition.
 
 A valid negative initial HOME observation raises `RuntimeSafetyError` with the unchanged `HOME_NOT_VERIFIED` prefix followed by canonical compact JSON:
 
@@ -61,6 +61,17 @@ These numbers distinguish malformed geometry/bytes, empty ROI, lack of eligible 
 - Capture/validation and reduction errors are replaced by closed errors raised outside exception handlers. Unwound callback traceback frames, including cause/context chains and exception-group members, are cleared without formatting the original exception. Executing frame/pixel locals are cleared in finally; malformed reduction return aliases are also discarded. The shared `_fraction` and scout caller receive finally-only local cleanup, with no predicate, transition, capture-count, or input changes.
 - Synthetic RED reproduced the contradictory two-scan result, second-pass exception, and unsealed construction; the initial matrix had 90 failures and two passes on R5. Expanded tests cover malformed/mutating fields and HSV results, forged subclasses, helper/serializer shadowing, retained/chained/group exceptions, malformed reducer returns, shared fraction callers, and native HOME-before-input/owned-stop ordering.
 - Service module code and standard-library serialization are trusted code, not an arbitrary monkeypatch-resistant interpreter sandbox. Callback data, scalar objects crossing emission, and subclass/instance helper dispatch do not gain that trust. No live observation, private-state access, approval issue/consume, or retry is authorized by this repair.
+
+## R7 atomic provenance boundary
+
+R6 grammar validation did not prove provenance: an exact valid-negative diagnostic could be mutated or replaced after the HOME decision and still serialize unrelated counts. Frozen dataclasses alone do not prevent `object.__setattr__`. R7 removes this native seam instead of adding another mutable seal.
+
+- Native calls the class-qualified `BgraGameplayRecognizer.recognize(..., require_home=True)`. The default remains observational for other existing callers. The requirement flag must be an exact bool before capture.
+- One local `_home_payload` snapshot supplies both the strict HOME decision and canonical negative serialization inside that same service call. Serialization completes before diagnostic publication, returned Recognition construction, or any caller/property callback. After frame cleanup the service raises the already-built exact string. Native never retrieves `home_diagnostic` and never supplies a caller-created diagnostic to an emitter.
+- The exposed diagnostic can still be changed by explicit Python bypasses, but it has no path to native emission. The legacy `home_not_verified_message` scalar formatter is not a provenance validator and has no native caller. Native does not dynamically invoke public `reason`, `to_json`, or instance `recognize` helpers.
+- Serialization failures pass through the existing scrubbed, closed `HOME_REDUCTION_FAILED` boundary. Negative rejection leaves the observational property empty. No extra capture, HSV scan, input construction, retry, identifier, or lifecycle/approval change is introduced.
+- RED native tests reproduced valid-negative count replacement and mutation, missing/malformed/positive property substitution, and a raising property (seven failures against R6). R7 tests require the original exact scalar output in all cases, preserve positive HOME-before-input/stop/release ordering, and cover post-emission valid mutation/replacement/deletion, stateful HSV, strict boundary counts, nonexact requirement flags, serialization failure and traceback cleanup.
+- Trust remains the existing service-module/standard-library-code boundary, not an interpreter sandbox against arbitrary code replacement, frame introspection, or exception-argument rewriting. No exposed diagnostic object or post-decision callback is trusted to supply native scalars.
 
 ## Static verification and next gate
 
