@@ -107,6 +107,43 @@ def test_native_state_composition_injects_state_adapter_without_constructing_nat
     assert store.__class__.__name__ == "LifecycleStateStore"
 
 
+def test_inert_diagnostic_composition_explicitly_preserves_ready_cursor(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class CapturingCycle:
+        def __init__(self, runtime: object, **kwargs: object) -> None:
+            captured["runtime"] = runtime
+            captured.update(kwargs)
+
+    def capture_supervisor(*args: object, **kwargs: object) -> object:
+        captured["supervisor_args"] = args
+        captured["supervisor_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(cli_module, "NativeLifecycleApi", lambda: "native")
+    monkeypatch.setattr(cli_module, "Win32Runtime", lambda native: ("runtime", native))
+    monkeypatch.setattr(
+        cli_module,
+        "Win32LifecycleHost",
+        lambda native, nonce_factory: ("host", native, nonce_factory),
+    )
+    monkeypatch.setattr(cli_module, "LifecycleSupervisor", capture_supervisor)
+    monkeypatch.setattr(cli_module, "InertCycle", CapturingCycle)
+
+    cli_module.build_inert_cycle("project", "slots.toml")
+    make_supervisor = captured["make_supervisor"]
+    assert callable(make_supervisor)
+    make_supervisor(object(), "Global\\ClashRushRebuildLifecycle-v1")
+
+    supervisor_kwargs = captured["supervisor_kwargs"]
+    assert isinstance(supervisor_kwargs, dict)
+    assert supervisor_kwargs["preserve_ready_cursor"] is True
+    assert callable(supervisor_kwargs["nonce_factory"])
+    assert set(supervisor_kwargs) == {"nonce_factory", "preserve_ready_cursor"}
+
+
 def test_cli_runs_guided_setup_without_composing_lifecycle() -> None:
     events: list[str] = []
 

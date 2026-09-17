@@ -205,6 +205,7 @@ class LifecycleSupervisor:
         nonce_factory: Callable[[], str],
         readiness_wait: Callable[[int], None] | None = None,
         readiness_attempts: int = 180,
+        preserve_ready_cursor: bool = False,
     ) -> None:
         if type(mutex) is not AcquiredMutexLease or mutex.abandoned:
             raise LifecycleError("non-abandoned acquired lifecycle mutex required")
@@ -216,6 +217,8 @@ class LifecycleSupervisor:
             or not 1 <= readiness_attempts <= 240
         ):
             raise LifecycleError("bounded readiness policy required")
+        if type(preserve_ready_cursor) is not bool:
+            raise LifecycleError("exact READY cursor policy required")
         self._host = host
         self._state = state
         self._mutex = mutex
@@ -226,6 +229,7 @@ class LifecycleSupervisor:
             else lambda milliseconds: time.sleep(milliseconds / 1000)
         )
         self._readiness_attempts = readiness_attempts
+        self._preserve_ready_cursor = preserve_ready_cursor
         self._owned: _OwnedRun | None = None
 
     def start(self, slot: Slot) -> PlayerBinding:
@@ -422,8 +426,15 @@ class LifecycleSupervisor:
                 raise
             raise LifecycleError("owned stop proof failed") from exc
 
-        ready = Ready((owned.slot + 1) % 5)
-        committed = self._state.commit(ready)
+        ready = Ready(
+            owned.slot if self._preserve_ready_cursor else (owned.slot + 1) % 5
+        )
+        try:
+            committed = self._state.commit(ready)
+        except BaseException as exc:
+            raise LifecycleError(
+                "READY lifecycle state was not durably committed"
+            ) from exc
         if type(committed) is not Ready or committed != ready:
             raise LifecycleError("READY lifecycle state was not durably committed")
         self._owned = None

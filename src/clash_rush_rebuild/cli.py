@@ -87,6 +87,7 @@ def build_inert_cycle(project_root: str, slots_path: str) -> InertCycle:
             store,
             AcquiredMutexLease(mutex_name),
             nonce_factory=lambda: secrets.token_hex(16),
+            preserve_ready_cursor=True,
         )
 
     return InertCycle(

@@ -23,6 +23,7 @@ from clash_rush_rebuild.registry import Slot
 class FakeStateStore:
     state: Ready | Active
     events: list[str]
+    fail_ready_commit: str | None = None
 
     def load(self) -> Ready | Active:
         self.events.append("state:load")
@@ -30,6 +31,8 @@ class FakeStateStore:
 
     def commit(self, state: Ready | Active) -> Ready | Active:
         self.events.append(f"state:commit:{state.state_name}")
+        if type(state) is Ready and self.fail_ready_commit is not None:
+            raise OSError(self.fail_ready_commit)
         self.state = state
         return state
 
@@ -58,15 +61,26 @@ class FakeHost:
         self.fail_job_termination = fail_job_termination
         self.post_launch_empty_reads = post_launch_empty_reads
         self.surviving_hwnd = surviving_hwnd
+        self.stop_failure: str | None = None
+        self.membership_query_count = 0
 
     def complete_player_snapshot(self) -> PlayerSnapshot:
         self.events.append("players:snapshot")
-        if self.running and self.post_launch_empty_reads > 0:
+        if self.stop_failure == "player_snapshot_query":
+            raise RuntimeError("synthetic post-stop player query failure")
+        if self.stop_failure == "player_absence":
+            identities = (self.identity,)
+        elif self.running and self.post_launch_empty_reads > 0:
             self.post_launch_empty_reads -= 1
             identities = ()
         else:
             identities = (self.identity,) if self.running else ()
-        return PlayerSnapshot(identities, lambda: self.events.append("players:close"))
+        return PlayerSnapshot(identities, self._close_player_snapshot)
+
+    def _close_player_snapshot(self) -> None:
+        self.events.append("players:close")
+        if self.stop_failure == "player_snapshot_close":
+            raise RuntimeError("synthetic post-stop player snapshot close failure")
 
     def create_job(self) -> object:
         self.events.append("job:create")
@@ -110,10 +124,23 @@ class FakeHost:
 
     def stable_job_members(self, job: object) -> MemberSnapshot:
         self.events.append("job:members")
+        self.membership_query_count += 1
+        query = self.membership_query_count
+        if self.stop_failure == "membership_query":
+            raise RuntimeError("synthetic post-stop membership query failure")
         self._fail_once("job:members")
         return MemberSnapshot(
-            (self.identity,), lambda: self.events.append("members:close")
+            (self.identity,), lambda: self._close_members(query)
         )
+
+    def _close_members(self, query: int) -> None:
+        self.events.append("members:close")
+        if (
+            self.stop_failure == "fresh_members_close" and query == 2
+        ) or (
+            self.stop_failure == "launch_members_close" and query == 1
+        ):
+            raise RuntimeError("synthetic member snapshot close failure")
 
     def bind_exact(
         self,
@@ -138,7 +165,7 @@ class FakeHost:
 
     def terminate_job(self, job_handle: object) -> None:
         self.events.append("job:terminate")
-        if self.fail_job_termination:
+        if self.fail_job_termination or self.stop_failure == "terminate_job":
             raise OSError("synthetic Job termination failure")
         self.running = False
 
@@ -148,18 +175,20 @@ class FakeHost:
 
     def wait_process(self, process: object, milliseconds: int) -> bool:
         self.events.append("process:wait")
-        return True
+        return self.stop_failure != "process_wait"
 
     def job_active_count(self, job: object) -> int:
         self.events.append("job:active-count")
-        return 0
+        return 1 if self.stop_failure == "job_not_empty" else 0
 
     def is_window(self, hwnd: int) -> bool:
         self.events.append(f"window:is:{hwnd}")
-        return hwnd == self.surviving_hwnd
+        return self.stop_failure == "window_valid" or hwnd == self.surviving_hwnd
 
     def close_handle(self, handle: object) -> None:
         self.events.append(f"handle:close:{handle}")
+        if self.stop_failure == f"close_{handle}_handle":
+            raise RuntimeError("synthetic retained handle close failure")
 
     def _fail_once(self, stage: str) -> None:
         if self.fail_stage == stage and not self.failed_once:
@@ -326,6 +355,112 @@ def test_forced_stop_proves_job_windows_and_players_before_ready() -> None:
 
     assert record == StopRecord(0, "0123456789abcdef0123456789abcdef", 1, 2, True)
     assert state.state == Ready(1)
+
+
+@pytest.mark.parametrize("initial_slot", [0, 3])
+def test_diagnostic_stop_preserves_exact_pre_admission_ready_cursor(
+    initial_slot: int,
+) -> None:
+    events: list[str] = []
+    state = FakeStateStore(Ready(initial_slot), events)
+    host = FakeHost(events)
+    supervisor = LifecycleSupervisor(
+        host,
+        state,
+        AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
+        nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+        preserve_ready_cursor=True,
+    )
+    slot = Slot(
+        initial_slot,
+        "Pie64" if initial_slot == 0 else f"Pie64_{initial_slot + 1}",
+        f"Example Slot {initial_slot}",
+        1280,
+        720,
+        240,
+    )
+    binding = supervisor.start(slot)
+
+    supervisor.stop(binding, None)
+
+    assert state.state == Ready(initial_slot)
+    ready_commit = events.index("state:commit:READY")
+    assert events.index("job:terminate") < ready_commit
+    assert events.index("job:active-count") < ready_commit
+    assert events.index(f"window:is:{binding.root_hwnd}") < ready_commit
+    assert events.index(f"window:is:{binding.render_hwnd}") < ready_commit
+    assert events.index("players:close", events.index("job:terminate")) < ready_commit
+    assert events.index("handle:close:process") < ready_commit
+    assert events.index("handle:close:job") < ready_commit
+
+
+@pytest.mark.parametrize("failure", ["write failure", "read-back failure"])
+def test_diagnostic_ready_commit_failure_leaves_active_state_blocked(
+    failure: str,
+) -> None:
+    events: list[str] = []
+    state = FakeStateStore(Ready(0), events, fail_ready_commit=failure)
+    supervisor = LifecycleSupervisor(
+        FakeHost(events),
+        state,
+        AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
+        nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+        preserve_ready_cursor=True,
+    )
+    binding = supervisor.start(Slot(0, "Pie64", "Example Slot 0", 1280, 720, 240))
+
+    with pytest.raises(LifecycleError, match="READY lifecycle state"):
+        supervisor.stop(binding, None)
+
+    assert state.state == Active(
+        0,
+        "0123456789abcdef0123456789abcdef",
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "membership_query",
+        "terminate_job",
+        "process_wait",
+        "job_not_empty",
+        "window_valid",
+        "player_snapshot_query",
+        "player_absence",
+        "player_snapshot_close",
+        "fresh_members_close",
+        "launch_members_close",
+        "close_process_handle",
+        "close_job_handle",
+    ],
+)
+def test_every_diagnostic_pre_ready_proof_or_cleanup_failure_remains_active(
+    failure: str,
+) -> None:
+    events: list[str] = []
+    state = FakeStateStore(Ready(0), events)
+    host = FakeHost(events)
+    supervisor = LifecycleSupervisor(
+        host,
+        state,
+        AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
+        nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+        preserve_ready_cursor=True,
+    )
+    binding = supervisor.start(Slot(0, "Pie64", "Example Slot 0", 1280, 720, 240))
+    host.stop_failure = failure
+
+    with pytest.raises(LifecycleError):
+        supervisor.stop(binding, None)
+
+    assert state.state == Active(
+        0,
+        "0123456789abcdef0123456789abcdef",
+        BlockReason.STOP_PROOF,
+    )
+    assert "state:commit:READY" not in events
 
 
 def test_stop_fresh_membership_failure_still_terminates_owned_job() -> None:
