@@ -8,7 +8,6 @@ no upgrade, research, reward, placement, donation, cart, or purchase action.
 
 from __future__ import annotations
 
-import colorsys
 import json
 import os
 import re
@@ -148,14 +147,32 @@ class BgraGameplayRecognizer:
 
     @staticmethod
     def _orange(blue: int, green: int, red: int) -> bool:
-        hue, saturation, value = colorsys.rgb_to_hsv(
-            red / 255, green / 255, blue / 255
-        )
-        return (
-            10 / 360 <= hue <= 60 / 360
-            and saturation >= 100 / 255
-            and value >= 120 / 255
-        )
+        value = max(red, green, blue)
+        minimum = min(red, green, blue)
+        difference = value - minimum
+        if value == 0 or difference == 0:
+            saturation = 0
+            hue = 0
+        else:
+            # Match OpenCV's 8-bit BGR-to-HSV lookup-table arithmetic.
+            shift = 12
+            saturation_divisor = round((255 << shift) / value)
+            hue_divisor = round((180 << shift) / (6 * difference))
+            saturation = (
+                difference * saturation_divisor + (1 << (shift - 1))
+            ) >> shift
+            if value == red:
+                hue_numerator = green - blue
+            elif value == green:
+                hue_numerator = blue - red + 2 * difference
+            else:
+                hue_numerator = red - green + 4 * difference
+            hue = (
+                hue_numerator * hue_divisor + (1 << (shift - 1))
+            ) >> shift
+            if hue < 0:
+                hue += 180
+        return 5 <= hue <= 30 and saturation >= 100 and value >= 120
 
     @staticmethod
     def _green(blue: int, green: int, red: int) -> bool:

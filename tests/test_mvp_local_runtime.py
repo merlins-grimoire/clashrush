@@ -333,19 +333,28 @@ def _bgra_frame(
     army: bool = False,
     return_home: bool = False,
     home_color: tuple[int, int, int] = (20, 100, 220),
+    home_pixels: int | None = None,
 ) -> bytes:
     width, height = BINDING.width, BINDING.height
     pixels = bytearray(width * height * 4)
 
-    def paint(region: tuple[float, float, float, float], color: tuple[int, int, int]) -> None:
+    def paint(
+        region: tuple[float, float, float, float],
+        color: tuple[int, int, int],
+        limit: int | None = None,
+    ) -> None:
         x0, y0, x1, y1 = region
+        painted = 0
         for y in range(int(height * y0), int(height * y1)):
             for x in range(int(width * x0), int(width * x1)):
+                if limit is not None and painted >= limit:
+                    return
                 offset = (y * width + x) * 4
                 pixels[offset : offset + 4] = bytes((*color, 255))
+                painted += 1
 
     if home:
-        paint((0.035, 0.90, 0.085, 0.97), home_color)
+        paint((0.035, 0.90, 0.085, 0.97), home_color, home_pixels)
     if army:
         paint((0.89, 0.84, 0.99, 0.93), (30, 220, 30))
     if return_home:
@@ -375,16 +384,37 @@ def test_bgra_recognizer_adapts_donor_home_army_and_return_home_regions() -> Non
 @pytest.mark.parametrize(
     ("bgra", "expected"),
     [
-        ((110, 150, 200), True),  # donor OpenCV HSV: H=13, S=115, V=200
-        ((120, 140, 160), False),  # saturation below donor floor
-        ((20, 220, 180), False),  # hue outside donor orange range
-        ((30, 70, 110), False),  # value below donor floor
+        ((0, 32, 200), True),  # donor OpenCV HSV: H=5, S=255, V=200
+        ((0, 200, 199), True),  # donor OpenCV HSV: H=30, S=255, V=200
+        ((123, 160, 202), True),  # donor OpenCV HSV: H=14, S=100, V=202
+        ((0, 20, 120), True),  # donor OpenCV HSV: H=5, S=255, V=120
+        ((0, 16, 120), False),  # donor OpenCV HSV: H=4 (below hue floor)
+        ((0, 200, 190), False),  # donor OpenCV HSV: H=31 (above hue ceiling)
+        ((122, 160, 200), False),  # donor OpenCV HSV: S=99
+        ((0, 20, 119), False),  # donor OpenCV HSV: V=119
     ],
 )
 def test_bgra_home_recognition_preserves_donor_hsv_boundary(
     bgra: tuple[int, int, int], expected: bool
 ) -> None:
     frame = _bgra_frame(home=True, home_color=bgra)
+    recognizer = BgraGameplayRecognizer(
+        BINDING,
+        lambda binding: (binding.width, binding.height, frame),
+        account_verified=False,
+    )
+
+    assert recognizer.recognize(BINDING, ACCOUNT).home is expected
+
+
+@pytest.mark.parametrize(
+    ("home_pixels", "expected"),
+    [(960, False), (961, True)],
+)
+def test_bgra_home_recognition_preserves_donor_roi_fraction_boundary(
+    home_pixels: int, expected: bool
+) -> None:
+    frame = _bgra_frame(home=True, home_pixels=home_pixels)
     recognizer = BgraGameplayRecognizer(
         BINDING,
         lambda binding: (binding.width, binding.height, frame),
