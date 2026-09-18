@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-clash-rush-rebuild = "clash_rush_rebuild.control_plane_cli:main"
+clash-rush-rebuild = "clash_rush_rebuild.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]

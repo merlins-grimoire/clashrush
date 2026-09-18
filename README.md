@@ -44,18 +44,14 @@ Behavioral mechanics are donor-first: inspect the pinned BasePilot, CoC_Bot, and
 
 ## Current status
 
-The installed MVP is control-plane-only. It validates 1-10 ordered opaque account keys, persists a stopped schema-v2 `READY` lifecycle value, reports the protected next slot, and explicitly reports gameplay/readiness as unavailable. Its installed command has no capture, image persistence, Home classification, BlueStacks execution, gameplay input/action, spending, network/Discord, or credential path. Scheduling is read-only and dispatch is always denied with `GAMEPLAY_UNAVAILABLE`.
+The comparison and architecture gate passed, and the inert Slice 1 implementation passed static verification and independent review. Its first bounded live spike launched and stopped the owned player safely but failed closed at exact `WINDOW_BINDING`; durable state remains blocked for explicit reconciliation. It contains no game-input API and cannot upgrade, attack, navigate, spend, or claim anything. The next live diagnostic requires a new narrow reviewed slice and separate owner approval.
 
-The earlier scalar/native readiness-capture candidate is parked after its capped final review failed. Historical design documents are isolated under `research/parked/` and are not production readiness evidence. The reviewed lifecycle and scheduler libraries remain preserved for future separately approved integration, but this MVP cannot activate them or perform a visit.
+## Local setup for Slice 1
 
-## Control-plane-only local mode
+1. Run `uv sync --extra test` from the repository root.
+2. Create `private/slots.json` by copying `config/slots.example.json`, then replace the five generic display names with the exact five local BlueStacks display names in rotation order. `private/` is ignored; never add player tags, account IDs, credentials, or Supercell IDs.
+3. Confirm BlueStacks stores its host configuration at `C:\ProgramData\BlueStacks_nxt\bluestacks.conf`. Slice 1 rejects missing, duplicate, ambiguous, or noncanonical instance records.
+4. With every BlueStacks player already closed, initialize once with `uv run clash-rush-rebuild initialize --project-root . --slots private/slots.json`. Initialization acquires the protected global mutex, validates all five slots, proves no player is running, and creates only `READY(0)`.
+5. Do not run `visit-one` until the staged tree has an independent PASS and the owner gives fresh approval. The command additionally requires `--owner-approved`; it performs one inert launch/bind/capture/forced-stop visit and has no gameplay-input surface.
 
-1. Configure opaque ordered account keys: `uv run clash-rush-rebuild setup --project-root . --generation <32-lowercase-hex> --account-key account-1 --account-key account-2`.
-2. Read sanitized state and capability availability: `uv run clash-rush-rebuild status --project-root .`.
-3. Read the protected next slot without admission or dispatch: `uv run clash-rush-rebuild schedule --project-root .`.
-
-Setup writes only canonical JSON beneath ignored `var/`. Status does not print account keys. There is no Run, visit, capture, readiness, gameplay, Discord, or credential command in this mode.
-
-## Preserved non-MVP libraries
-
-Earlier lifecycle, scheduler, capture, and gameplay experiments remain in the source tree for historical verification and possible future separately reviewed work. They are not installed commands and are not capabilities of this MVP. Do not invoke their internal modules as an operator interface.
+An operator-provided local `CCBackBeat.ttf` copy is available at `private/assets/CCBackBeat.ttf`. It remains ignored and may be used for local recognition/template rendering, but it must never be packaged or committed without independently verified redistribution rights.
