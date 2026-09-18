@@ -18,6 +18,12 @@ The parent creates the helper suspended with handle inheritance disabled,
 immediately records ownership of both returned process/thread handles, assigns
 the process to a new private kill-on-close Job, prepares the fixed request and
 duplicated target proof handles, and resumes only after those steps succeed.
+The parent, not the helper, owns lifecycle/capture authority: it continuously
+holds the protected lifecycle mutex and immutable invocation lease while the
+helper exists, and it monitors one service-owned revocation event throughout
+every blocking IPC wait. The helper proves only mechanical target identity from
+its child-valid handles and copied scalars; it never claims to query parent state
+that is outside its process.
 The parent accepts a helper scalar only after exact record/EOF validation, exact
 zero process exit, helper Job active-process count zero, exact target binding
 postvalidation under the still-held lifecycle lease, and successful closure of
@@ -66,17 +72,26 @@ only fixed-width scalars:
 - protocol version and catalog generation enum;
 - root/render HWND values;
 - root/render PIDs and creation `FILETIME` values;
-- render width/height and capture nonce;
-- lifecycle lease generation;
+- render width/height and the parent's expected capture nonce;
+- the parent's expected lifecycle lease generation;
 - duplicated child-valid handles for the retained root process, retained render
   process, and target private Job;
 - one random invocation nonce used only to bind the request to the one-shot pipe.
 
 The one-shot named-pipe name and nonce are generated internally and passed on
-the exact helper command line. They are never logged or emitted. The request
-has a compile-time size ceiling and exact field offsets; short, long, duplicate,
-trailing, subclassed, non-integer, boolean-as-integer, reserved-nonzero, or
-second requests fail before capture. There is no variable-length field.
+the exact helper command line. They are never logged or emitted. They are
+anti-confusion values, not endpoint identity or lifecycle authority. After the
+connection completes, the parent calls `GetNamedPipeClientProcessId`, requires
+the exact helper PID, and re-proves that PID's creation `FILETIME` through its
+retained process handle before sending any request byte. A wrong/unprovable peer
+enters retirement. The helper calls `GetNamedPipeServerProcessId` and requires
+the expected parent PID from its fixed command line before reading; parent-side
+retained helper identity remains the authoritative endpoint check.
+
+The request has a compile-time size ceiling and exact field offsets; short,
+long, duplicate, trailing, subclassed, non-integer, boolean-as-integer,
+reserved-nonzero, or second requests fail before capture. There is no
+variable-length field.
 
 The helper executable/package owns exactly one reviewed catalog table per
 allowed generation. It does not accept catalog/template bytes or paths over
@@ -165,24 +180,45 @@ States are linear and closed:
 `HELPER_JOB_ASSIGNED -> REQUEST_READY -> RESUMED -> RECORD_OR_ABORT ->`
 `TERMINAL_PROOF -> TARGET_POSTVALIDATED -> ACCEPTED`
 
-Any transition failure goes to `RETIRE`, then `CLOSED` or `UNPROVEN`. Only
-`ACCEPTED` returns a helper record. `RETIRE` never returns to the success path.
+Any transition failure goes to `RETIRE`, then `CLOSED`, `QUARANTINED_OWNED`, or
+`PROOF_LOST`. Only `ACCEPTED` returns a helper record. `RETIRE` never returns to
+the success path.
 
 ### S0 INERT and target prevalidation
 
-Under the existing host-wide lifecycle/input mutex and active lifecycle lease,
-the parent takes an exact immutable scalar snapshot. Fresh retained-handle proof
-must establish root/render process identity, target private-Job membership,
-exact HWND existence/visibility/root ancestry, render client geometry, unchanged
-capture nonce, unlocked desktop, and non-minimized root. All native statuses are
-strictly typed. Failure returns `BOUND_UNAVAILABLE` with no helper creation.
+The parent acquires the existing protected host-wide lifecycle/input mutex and
+an exact service-owned invocation lease before taking an immutable scalar
+snapshot. The canonical lifecycle generation and capture nonce may be created,
+replaced, or revoked only by code holding that mutex; the parent holds the same
+mutex without release from this snapshot through helper terminal proof, target
+postvalidation, IPC teardown, and final result selection. The lease object and
+snapshot are exact final service-owned types and are not passed to callbacks.
+Consequently another conforming writer cannot change generation or nonce during
+the invocation. A separate manual/cancellation revocation request may set one
+service-owned event without the mutex; that event is included in every parent
+blocking wait and, once observed, irreversibly invalidates evidence and enters
+retirement. It cannot authorize or mutate a generation.
+
+Fresh retained-handle proof must establish root/render process identity, target
+private-Job membership, exact HWND existence/visibility/root ancestry, render
+client geometry, canonical capture nonce and lease generation, unlocked desktop,
+and non-minimized root. All native statuses are strictly typed. Failure returns
+`BOUND_UNAVAILABLE` with no helper creation. A nonconforming mutation detected
+despite the held mutex is a consistency fault and also returns
+`BOUND_UNAVAILABLE`; the helper is not trusted to detect it.
 
 ### S1 IPC and private Job preparation
 
-The parent creates one one-shot named pipe with fixed ACL and fixed request/
-response limits, then creates a private Job and sets kill-on-close with neither
-breakaway flag. No pixel storage is created. Any failure closes each acquired
-resource independently and returns `BOUND_UNAVAILABLE`.
+The parent creates exactly one byte-mode named-pipe server instance with
+`PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE`, a
+fixed current-operator-plus-`SYSTEM` ACL, one fixed request buffer, one 25-byte
+response/probe buffer, and no additional instances. It issues exactly one
+overlapped `ConnectNamedPipe` before helper resume. The parent also creates a
+private Job and sets kill-on-close with neither breakaway flag. No pixel storage
+is created. Before a helper is owned, any failure cancels any pending connect,
+proves its completion, closes each acquired local resource independently, and
+returns `BOUND_UNAVAILABLE`; unproved cancellation permanently disables this
+capability in the current process rather than freeing live OVERLAPPED storage.
 
 ### S2 suspended creation and immediate ownership
 
@@ -190,30 +226,41 @@ The exact helper executable is created suspended with `bInheritHandles=False`
 and no shell. As soon as `CreateProcessW` returns, the parent records the exact
 process handle, thread handle, PID, and creation `FILETIME` in its owned session
 before any duplicate, grant, pipe, clock, or cancellation operation. Invalid
-records trigger independent process/Job retirement and handle closure attempts.
+records trigger independent process/Job retirement and only the proof-preserving
+closure steps permitted by the S5 ledger.
 No second helper can start while a session owns or retains unresolved resources.
 
 The parent assigns the helper to the private kill-on-close Job and proves exact
 membership while it is still suspended. It then duplicates only the three
-target proof handles into the child, constructs and freezes the fixed request
-bytes, and seals the named-pipe server against a second connection. It resumes
-only after those preparations. `ResumeThread` must be an exact int with prior
-suspend count one. The thread handle is closed independently. The resumed
-helper connects once; only then does the parent write the already-frozen request
-and reject any second connection. Failure at any point enters `RETIRE`;
-assignment is always before resume and no request field can change afterward.
+target proof handles into the child, records their child-table numeric values,
+constructs and freezes the fixed request bytes, and resumes only after those
+preparations. `ResumeThread` must be an exact int with prior suspend count one.
+The thread handle is closed independently. The resumed helper connects once;
+the parent completes the pending connect, proves the connected client is the
+retained helper identity, and only then writes the already-frozen request.
+`FILE_FLAG_FIRST_PIPE_INSTANCE`, one server instance, and the absence of any
+`DisconnectNamedPipe`/relisten path make a second connection impossible. Failure
+at any point enters `RETIRE`; assignment is always before resume and no request
+field can change afterward.
 
 ### S3 helper prevalidation, capture, and reduction
 
 The helper parses the exact request into immutable built-in scalars. It verifies
-its invocation nonce and independently proves, through the duplicated retained
-handles and target Job handle:
+its invocation nonce as an anti-confusion value and independently proves,
+through the duplicated retained handles and target Job handle:
 
 - root/render PIDs and creation times;
 - both processes' target-Job membership;
 - exact root/render HWND ownership, visibility and ancestry;
-- exact render geometry and capture nonce binding;
-- unlocked/non-minimized desktop and held lease generation.
+- exact render geometry and agreement with the copied expected capture nonce;
+- unlocked/non-minimized desktop.
+
+The helper does **not** claim that copied capture-nonce or lease-generation
+values are currently authoritative: it cannot read the parent's canonical
+authority store or mutex ownership. The parent-held mutex/lease plus revocation
+event and parent S0/S4 checks provide that authority. The helper uses the copied
+nonce/generation only to bind its mechanical proof and response to this frozen
+invocation and rejects any internal mismatch.
 
 The helper then performs exactly one lowest-level `PrintWindow` call with the
 exact render HWND and flag 2 into helper-private GDI memory. It creates no Python
@@ -230,26 +277,50 @@ cleared before continuing. This is reference/lifetime containment, not a claim
 of secure erasure of immutable Python data, swap, or crash dumps.
 
 After pixels are gone, the helper repeats the complete duplicated-handle,
-target-Job, window, geometry, nonce, desktop, and lease proof. It then closes
-all duplicated target handles independently. Only after those mandatory closes
-succeed may it encode and write the 24-byte scalar. It writes once, closes its
-pipe endpoint, and exits exactly zero. A mandatory cleanup failure, changed
-binding, native exception, malformed result, or output failure suppresses
-acceptance and exits nonzero; it cannot leave a success marker that the parent
-may accept.
+target-Job, window, geometry, copied-invocation-value, and desktop proof. It then
+closes all duplicated target handles independently. These are handles in the
+child handle table; the parent never calls `CloseHandle` on their numeric
+values. Only after those mandatory child closes succeed may it encode and write
+the 24-byte scalar. It writes once, closes its pipe endpoint, and exits exactly
+zero. A mandatory cleanup failure, changed binding, native exception, malformed
+result, or output failure suppresses acceptance and exits nonzero; it cannot
+leave a success marker that the parent may accept.
 
 ### S4 parent terminal proof and acceptance
 
-The parent reads at most 25 bytes, requiring exactly the 24-byte record and EOF.
-It does not parse into public enums until all terminal proofs succeed. Under one
-trusted nonrenewable absolute evidence deadline it requires:
+The parent runs connect, request write, response read, and EOF probe as explicit
+overlapped stages with at most one pending operation. Each native return, error
+code, completion byte count, and wait index must first pass its exact built-in
+type/range rule; a boolean never satisfies an integer result. Each stage owns one
+pinned buffer, `OVERLAPPED`, and manual-reset event in the session ledger until
+completion is proved. Each wait set contains that operation event, the retained
+helper process, and the revocation event. A timeout, helper exit before the
+stage's required completion, revocation, invalid wait result, or zero-byte
+progress before the required boundary irreversibly invalidates evidence.
+Partial request writes and response reads advance fixed cursors only after exact
+positive byte counts and can produce at most the request-size and 24 response
+completions respectively; they share the one deadline and cannot loop on zero
+progress. After exactly 24 response bytes, the parent issues one one-byte
+overlapped read and requires the exact named-pipe broken-pipe/zero-byte terminal
+condition. A 25th byte, another successful read, unterminated pipe, or any other
+error is not EOF and is rejected.
+
+The parent does not parse the response into public enums until all terminal
+proofs succeed. Under one trusted nonrenewable absolute evidence deadline it
+requires:
 
 1. helper process wait reports exact `WAIT_OBJECT_0` (exact int, not bool);
 2. `GetExitCodeProcess` reports exact integer zero;
 3. helper private Job active-process count reports exact integer zero;
-4. the pipe has reached EOF and both helper/parent IPC endpoints close;
-5. helper thread/process/Job handles close independently;
-6. the full target binding proof from S0 passes again under the same lease.
+4. the pipe has reached EOF, proving the helper endpoint is gone before its
+   confirmed process exit; no IPC operation remains pending; and the parent
+   pipe/event handles then report successful close;
+5. every pinned IPC buffer and `OVERLAPPED` owner is released only after that
+   no-pending proof;
+6. the full target binding proof from S0 re-reads the canonical capture nonce
+   and lease generation under the continuously held mutex and exact same lease;
+7. the revocation event remains unset;
+8. helper thread/process/Job handles close in the proof-preserving order below.
 
 Only then is the record parsed and cross-field validated. If the process needed
 forced retirement, exited nonzero/unknown, the Job was nonempty/unknown, IPC did
@@ -259,10 +330,13 @@ invalid, the record is discarded and `BOUND_UNAVAILABLE` is returned.
 ### S5 deadline, cancellation, failure, and retirement
 
 The parent samples one internal monotonic clock at entry and around every
-external operation. The evidence deadline remains `t0 + 2_000_000_000 ns`; it
-is never renewed. Equality expires. A separate cleanup deadline is frozen once
-at retirement entry as the earlier of the standing total terminal bound and
-`cleanup_entry + 1_000_000_000 ns`; it is never renewed.
+external operation. Exact constants are
+`EVIDENCE_BOUND_NS = 2_000_000_000`, `CLEANUP_BOUND_NS = 1_000_000_000`, and
+`TOTAL_TERMINAL_BOUND_NS = 3_000_000_000`. The evidence deadline is frozen as
+`t0 + EVIDENCE_BOUND_NS`; the total terminal deadline is frozen at entry as
+`t0 + TOTAL_TERMINAL_BOUND_NS`; neither is renewed and equality expires. With a
+valid clock, retirement freezes its cleanup deadline once as
+`min(total_terminal_deadline, cleanup_entry + CLEANUP_BOUND_NS)`.
 
 Clock regression/exception, cancellation, deadline, wait/query failure, pipe
 failure, or proof failure sets an irreversible `evidence_invalid` bit. After the
@@ -272,18 +346,60 @@ clock/cancellation/proof call:
 - attempt `TerminateJobObject` once if a Job exists;
 - attempt `TerminateProcess` once if a process handle exists, even if Job
   termination failed or raised;
-- attempt nonblocking/bounded process wait, exact exit query, and Job active
-  count independently, even if time is invalid;
-- attempt pipe cancellation/closure and every thread/process/Job/duplicated
-  handle close independently.
+- call `CancelIoEx(pipe, &overlapped)` for the one pending pipe operation, if
+  any, and independently attempt both termination paths even if cancellation
+  fails;
+- attempt process wait, exact exit query, and Job active count independently;
+- close only resources whose pending-I/O and terminal proof obligations have
+  been discharged according to the ledger below.
 
-A fault in one attempt cannot skip another. The implementation may use only
-native operations whose individual boundedness is separately certified; an
-uncertified operation makes the production capability unavailable before
-launch. Invalid time changes acceptance to `BOUND_UNAVAILABLE` but does not set
-all later native timeouts to an invalid sentinel or suppress termination.
-Unresolved resources remain attached to a quarantined owned session and keep
-the lifecycle lease/fleet blocked; they are never represented as released.
+A fault in one attempt cannot skip another. `CancelIoEx` success does not prove
+completion. The operation event must signal and `GetOverlappedResult` must prove
+either the original result or exact `ERROR_OPERATION_ABORTED`; exact
+`ERROR_NOT_FOUND` is accepted only when that same result query proves the
+operation already completed. The pipe handle, event, pinned buffer, and
+`OVERLAPPED` storage remain live until that proof. Their address-bearing storage
+is never freed while completion is uncertain.
+
+If the clock regresses or raises before `cleanup_entry` can be sampled, cleanup
+does not derive any timeout from that failed sample. It performs the independent
+cancel/Job/process termination calls, then exactly one native combined wait over
+the pending-I/O event (if any) and process handle (if any) with literal
+`CLOCK_INVALID_CLEANUP_WAIT_MS = 1000`. After that wait it performs only
+separately certified nonblocking result/exit/Job queries and closes provably safe
+resources. Thus invalid time poisons acceptance but never becomes an infinite
+or invalid timeout and never suppresses termination. With a valid clock, every
+cleanup wait uses only the frozen cleanup/total deadline remainder. The
+implementation may use only native operations whose individual boundedness is
+separately certified; an uncertified operation makes production unavailable
+before launch.
+
+The parent ledger distinguishes four resource classes and never calls
+`CloseHandle` on a child-table numeric value:
+
+1. child-duplicated target handles are retired only by confirmed child close or
+   child process exit; the parent retains its own distinct target handles under
+   the outer lifecycle lease;
+2. pipe/OVERLAPPED/event/buffer state closes/frees only after no-pending-I/O
+   proof;
+3. the retained helper process handle closes only after signaled wait plus exact
+   exit query; the private Job handle closes only after exact active-count zero;
+4. the thread handle may close after exact resume or after confirmed process
+   termination, while parent target handles close only when the outer lease
+   finishes after postvalidation or permanent quarantine disposition.
+
+If exit, Job-empty, or I/O completion remains unproved, the corresponding local
+handles and storage stay in a `QUARANTINED_OWNED` session, the mutex/lease and
+fleet remain blocked, and no second helper can start. If `CloseHandle` itself
+returns an invalid/ambiguous result after a proof-capable handle was submitted
+for closure, the session enters irreversible `PROOF_LOST`: it does not claim
+that handle is retained or released and permanently disables lifecycle authority
+in this process. Normal process teardown is the only remaining OS cleanup; it is
+not a recoverable success path. If duplicate/startup fails partway, each
+successfully created child duplicate is recorded but never parent-closed; the
+still-suspended child is retired through both Job and process attempts, and its
+confirmed exit is what retires those child-table handles.
+
 Even if retirement later proves exit and Job empty, the helper record remains
 inadmissible because retirement recovery is not clean evidence completion.
 
@@ -294,7 +410,7 @@ inadmissible because retirement recovery is not clean evidence completion.
 | 1. Transitive instance shadowing fabricated assignment/wait/close, host binding, and identity proof. | Section 4 production entry rejects injected/subclass objects; every S0-S5 native/identity call is module-level or class-qualified through the immutable internal table. Shadow every formerly reachable helper and require no shadow invocation plus `BOUND_UNAVAILABLE`. Maps R08/R09/R12/R14/R16. |
 | 2. A frame survived forced retirement without exact zero-exit proof. | S4 requires clean (non-retirement) wait, exact zero exit, Job empty, EOF/close, and postvalidation. S5 permanently invalidates evidence before retirement. Test wait false->true and exit `None`/nonzero/zero after termination; all discard the record. Maps R11/R12/R15. |
 | 3. Shared-frame failure left an outstanding parent owner, open IPC, and accessible pixels. | There is no shared frame or parent pixel type. S3's sole native allocation exists only inside the helper and is destroyed before scalar write; killing the Job retires its address space. Parent protocol tests prove no response field/API can carry pixel-sized data and no shared memory/file is created. Maps R08/R10/R12/R13/R15/R16. |
-| 4. Clock failure caused retirement calls to be skipped. | S5 makes Job and process termination unconditional independent attempts after ownership; clock invalidity only poisons acceptance. A receive/cancel path that regresses/raises the clock must still record both termination attempts, wait/query, pipe close, and handle closes. Maps R11/R12/R13/R15. |
+| 4. Clock failure caused retirement calls to be skipped. | S5 makes Job and process termination unconditional independent attempts after ownership; clock invalidity only poisons acceptance. A receive/cancel path that regresses/raises the clock must still record cancellation, both termination attempts, the one bounded cleanup wait, independent result/exit/Job queries, and every proof-safe close or explicit quarantined/proof-lost disposition. Maps R11/R12/R13/R15. |
 | 5. `False == WAIT_OBJECT_0` was accepted. | Section 4 and S4 validate exact int before comparison at every native integer boundary. Test bool and int subclasses for wait/resume/exit/active count; none proves success. Maps R08/R11/R12/R14/R15. |
 
 ## 7. Transition and R01-R17 verification map
@@ -314,10 +430,10 @@ BlueStacks, call real `PrintWindow`, or use private/game pixels.
 | R06 | Sentinel/call-graph tests prove no production caller, HOME/account/army/input change, and no orange predicate authority; helper output remains diagnostic only. |
 | R07 | Parent rejects missing/unadmitted bundle before launch; helper rejects wrong generation, invalid closed catalog cardinality/geometry/provenance/variance without fallback. Catalog is internally owned, never caller/IPC supplied. |
 | R08 | Exact fixed request/record type/length/reserved/cross-field matrix plus hostile scalar/bool/subclass/deleted-field tests. Parent API contains no frame/pixel parameter or return. |
-| R09 | S0 and helper S3 pre/post plus parent S4 postvalidation cover retained identities, PID/HWND reuse, target Job membership, ancestry/geometry/nonce, desktop, lease, and mutation at every external boundary. |
+| R09 | S0/S4 parent authority checks hold the protected mutex and exact lease continuously, monitor revocation in every wait, and re-read canonical generation/nonce; helper S3 proves only mechanical identity plus copied-value consistency. Tests cover retained identities, PID/HWND reuse, target Job membership, ancestry/geometry, a revocation set during capture, a generation/nonce mutation attempt blocked by the mutex, injected illicit mutation detected at postvalidation, and revocation after helper output but before acceptance. |
 | R10 | Instrument the actual helper's lowest capture seam: one flag-2 call, one helper-private native allocation, health plus 45 correlations on it, zero shared mappings/full-frame IPC/files/digests/logs, no parent pixel access, no reuse across invocations. |
-| R11 | Exact monotonic boundary/regression/equality tests at every S0-S5 external stage; no new stage after expiry, no renewal/sleep/retry. After ownership, invalid clock still permits and records every mandatory retirement attempt. |
-| R12 | Full state-machine matrix: Job/create/set-limit, suspended creation, immediate ownership, assignment-before-resume, request/duplicate/resume/thread-close, pipe short/long/trailing/crash/hang, zero/nonzero/unknown exit, nonempty Job, EOF/close, cancellation, each termination/wait/query/close fault, combined faults, retained unresolved ownership, and harmless concrete synthetic helper. No forced-retirement path accepts evidence. |
+| R11 | Exact monotonic boundary/regression/equality tests at every S0-S5 external stage; no new evidence stage after expiry, no renewal/sleep/retry. After ownership, invalid clock still records CancelIoEx plus both mandatory termination attempts and uses exactly one literal 1000-ms combined cleanup wait followed only by certified nonblocking queries. Valid-clock cleanup never crosses the frozen 3-second total terminal bound. |
+| R12 | Full state-machine matrix: Job/create/set-limit, suspended creation, immediate ownership, partial target-handle duplication, assignment-before-resume, request/resume/thread-close, wrong pipe peer, connect/write/read/EOF hangs and partial progress, short/long/trailing/crash output, revocation at every stage, cancellation-before/after-completion races, `ERROR_NOT_FOUND`, unproved cancellation with pinned state retained, clock failure, zero/nonzero/unknown exit, nonempty Job, each termination/wait/query/close fault, combined faults, `QUARANTINED_OWNED` versus irreversible `PROOF_LOST`, and harmless concrete synthetic helper. It explicitly tests termination/query failure followed by attempted safe closes and proves no proof-capable handle is reported retained after an ambiguous close. No forced-retirement path accepts evidence. |
 | R13 | In-helper fault injection retains original exceptions externally and probes GDI/reducer/encoder/combined cleanup failures, BaseException, cause/context/ExceptionGroup; success is suppressed and service-owned aliases are cleared. Parent never obtains the allocation; process retirement proves no surviving pixel owner. |
 | R14 | Shadow every formerly reachable runtime/host/identity helper and every new class method; production dispatch never invokes shadows. Fake model remains type-incompatible with production. Atomic record snapshot cannot be changed by a later property/callback because none is called. |
 | R15 | Enumerate all 24-byte enum/cross-field combinations and canonical JSON output; reject bool/status subclasses, reserved bytes, extra data, malformed terminal marker, nonzero/unknown exit, and forbidden fields. Any S0-S5 ambiguity is locally generated `BOUND_UNAVAILABLE`. |
@@ -325,9 +441,10 @@ BlueStacks, call real `PrintWindow`, or use private/game pixels.
 | R17 | Run focused tests, existing readiness/lifecycle/native tests, canonical `python -m pytest tests/`, exact blob-verified clean-export canonical tests, and tracked-tree privacy/secret/image-blob scans. Record real counts and skips. |
 
 The implementation test matrix must additionally enumerate every state edge and
-show its expected terminal state (`ACCEPTED`, `CLOSED/BOUND_UNAVAILABLE`, or
-`UNPROVEN/BOUND_UNAVAILABLE`). Test names or a coverage-label cardinality check
-are not evidence.
+show its expected terminal state (`ACCEPTED`, `CLOSED/BOUND_UNAVAILABLE`,
+`QUARANTINED_OWNED/BOUND_UNAVAILABLE`, or
+`PROOF_LOST/BOUND_UNAVAILABLE`). Test names or a coverage-label cardinality
+check are not evidence.
 
 ## 8. Rejected alternatives
 
