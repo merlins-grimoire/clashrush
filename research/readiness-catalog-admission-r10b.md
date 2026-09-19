@@ -74,6 +74,9 @@ output.
 pins, trees, paths, MIT attribution, and immutable provenance; exact scalar
 grammar; procedural BGR length and per-channel variance; exact inset mapping;
 duplicate entries; constant templates; forged provenance including hostile
-equality; boolean and undersized dimensions; boolean and out-of-frame
-coordinates; generation mismatch; and absence of runtime output, filename,
-identifier, and frame-hash surfaces.
+equality; admission copy isolation; boolean and undersized dimensions; missing,
+hostile, subclassed, boolean, negative, inverted, oversized, and out-of-frame
+coordinates rejected before coordinate arithmetic or motif generation; invalid
+byte lengths rejected before motif generation; transform-boundary ordering;
+generation mismatch; and absence of runtime output, filename, identifier, and
+frame-hash surfaces.

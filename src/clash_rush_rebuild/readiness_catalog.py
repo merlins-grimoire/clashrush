@@ -166,6 +166,44 @@ def _invalid() -> None:
     raise CatalogAdmissionError("CATALOG_INVALID")
 
 
+def _validated_rectangle(
+    rectangle: object,
+    frame_width: object,
+    frame_height: object,
+) -> tuple[Rectangle, int, int]:
+    """Snapshot a bounded rectangle before performing coordinate arithmetic."""
+    try:
+        if (
+            type(rectangle) is not Rectangle
+            or type(frame_width) is not int
+            or type(frame_height) is not int
+            or (frame_width, frame_height) != (_WIDTH, _HEIGHT)
+        ):
+            _invalid()
+        x0 = rectangle.x0
+        y0 = rectangle.y0
+        x1 = rectangle.x1
+        y1 = rectangle.y1
+        if any(type(value) is not int for value in (x0, y0, x1, y1)):
+            _invalid()
+        rectangle_width = x1 - x0
+        rectangle_height = y1 - y0
+        if (
+            not 8 <= rectangle_width <= 96
+            or not 8 <= rectangle_height <= 96
+            or x0 < 0
+            or y0 < 0
+            or x1 > frame_width
+            or y1 > frame_height
+        ):
+            _invalid()
+        return Rectangle(x0, y0, x1, y1), rectangle_width, rectangle_height
+    except CatalogAdmissionError:
+        raise
+    except BaseException:
+        _invalid()
+
+
 def _mapped(value: int, extent: int, inset: int) -> int:
     return (extent * inset + value * (100 - 2 * inset)) // 100
 
@@ -185,22 +223,26 @@ def transform_rectangle(
         or type(height) is not int
     ):
         _invalid()
+    rectangle, _, _ = _validated_rectangle(rectangle, width, height)
     if layout == "NOMINAL":
         return rectangle
     inset = 5 if layout.endswith("_5") else 10
     if layout.startswith("H_"):
-        return Rectangle(
+        transformed = Rectangle(
             rectangle.x0,
             _mapped(rectangle.y0, height, inset),
             rectangle.x1,
             _mapped(rectangle.y1, height, inset),
         )
-    return Rectangle(
-        _mapped(rectangle.x0, width, inset),
-        rectangle.y0,
-        _mapped(rectangle.x1, width, inset),
-        rectangle.y1,
-    )
+    else:
+        transformed = Rectangle(
+            _mapped(rectangle.x0, width, inset),
+            rectangle.y0,
+            _mapped(rectangle.x1, width, inset),
+            rectangle.y1,
+        )
+    transformed, _, _ = _validated_rectangle(transformed, width, height)
+    return transformed
 
 
 def _motif(screen_index: int, anchor_index: int, width: int, height: int) -> bytes:
@@ -359,6 +401,7 @@ def admit_catalog(candidate: object) -> AdmittedCatalog:
             if pair not in expected_pairs or pair in found:
                 _invalid()
             rectangles: list[Rectangle] = []
+            validated_anchors: list[Anchor] = []
             for anchor_index, anchor in enumerate(entry.anchors):
                 if (
                     type(anchor) is not Anchor
@@ -366,33 +409,27 @@ def admit_catalog(candidate: object) -> AdmittedCatalog:
                     or type(anchor.bgr) is not bytes
                 ):
                     _invalid()
-                rectangle = anchor.rectangle
-                coordinates = (
-                    rectangle.x0,
-                    rectangle.y0,
-                    rectangle.x1,
-                    rectangle.y1,
+                rectangle, rectangle_width, rectangle_height = _validated_rectangle(
+                    anchor.rectangle,
+                    width,
+                    height,
                 )
+                expected_length = rectangle_width * rectangle_height * 3
+                if (
+                    len(anchor.bgr) != expected_length
+                    or not _has_channel_variance(anchor.bgr)
+                ):
+                    _invalid()
                 expected_bytes = _motif(
                     SCREENS.index(entry.screen),
                     anchor_index,
-                    rectangle.width,
-                    rectangle.height,
+                    rectangle_width,
+                    rectangle_height,
                 )
-                if (
-                    not all(type(value) is int for value in coordinates)
-                    or not 8 <= rectangle.width <= 96
-                    or not 8 <= rectangle.height <= 96
-                    or rectangle.x0 < 0
-                    or rectangle.y0 < 0
-                    or rectangle.x1 > width
-                    or rectangle.y1 > height
-                    or len(anchor.bgr) != rectangle.width * rectangle.height * 3
-                    or not _has_channel_variance(anchor.bgr)
-                    or anchor.bgr != expected_bytes
-                ):
+                if anchor.bgr != expected_bytes:
                     _invalid()
                 rectangles.append(rectangle)
+                validated_anchors.append(Anchor(rectangle, bytes(anchor.bgr)))
             rectangle_tuple = tuple(rectangles)
             if (
                 any(
@@ -403,7 +440,11 @@ def admit_catalog(candidate: object) -> AdmittedCatalog:
                 or not _widely_separated(rectangle_tuple, width, height)
             ):
                 _invalid()
-            found[pair] = entry
+            found[pair] = Constellation(
+                entry.screen,
+                entry.layout,
+                tuple(validated_anchors),
+            )
 
         if set(found) != expected_pairs:
             _invalid()
@@ -428,22 +469,7 @@ def admit_catalog(candidate: object) -> AdmittedCatalog:
                     _invalid()
 
         copied_entries = tuple(
-            Constellation(
-                entry.screen,
-                entry.layout,
-                tuple(
-                    Anchor(
-                        Rectangle(
-                            anchor.rectangle.x0,
-                            anchor.rectangle.y0,
-                            anchor.rectangle.x1,
-                            anchor.rectangle.y1,
-                        ),
-                        bytes(anchor.bgr),
-                    )
-                    for anchor in entry.anchors
-                ),
-            )
+            found[(entry.screen, entry.layout)]
             for entry in entries
         )
         return AdmittedCatalog(

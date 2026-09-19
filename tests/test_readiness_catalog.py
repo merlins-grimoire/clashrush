@@ -1,7 +1,7 @@
 """Public-synthetic R10 catalog admission tests; no private/game frames."""
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -36,7 +36,40 @@ def test_admitted_catalog_has_closed_r10_shape_and_provenance() -> None:
         "a5c943afed0ed3b9abedbbc228b0889145ecaf24",
         "c41fe12a6df051e241c695b71b6859286e24c612",
     )
+    assert tuple(record.tree for record in admitted.provenance) == (
+        "0553306bfd30a32e31e427a0b77ff22c41f55901",
+        "d79368fbe550036f1542883f18434e318016b279",
+        "b549901e7ca8b871a17265517d730f0b3c84a618",
+    )
+    assert tuple(record.source_paths for record in admitted.provenance) == (
+        ("app/services/vision.py:185-267",),
+        ("src/utils.py:496-520", "src/utils.py:1572-1665"),
+        (
+            "utils/game_window_controller.py:225-237",
+            "utils/object_detection.py:43-57",
+        ),
+    )
+    assert tuple(record.attribution for record in admitted.provenance) == (
+        "Copyright (c) 2026 Efe Bolukbasi",
+        "Copyright (c) 2026 m24842",
+        "Copyright (c) 2026 Caleb Welsh",
+    )
     assert all(record.license_id == "MIT" for record in admitted.provenance)
+
+
+def test_admission_copies_catalog_geometry_and_provenance_is_immutable() -> None:
+    candidate = catalog.synthetic_candidate()
+    admitted = catalog.admit_catalog(candidate)
+
+    assert admitted.entries is not candidate.entries
+    assert admitted.entries[0] is not candidate.entries[0]
+    assert admitted.entries[0].anchors[0] is not candidate.entries[0].anchors[0]
+    assert (
+        admitted.entries[0].anchors[0].rectangle
+        is not candidate.entries[0].anchors[0].rectangle
+    )
+    with pytest.raises(FrozenInstanceError):
+        admitted.provenance[0].license_id = "UNKNOWN"  # type: ignore[misc]
 
 
 def test_catalog_exposes_only_closed_scalar_grammar() -> None:
@@ -164,6 +197,101 @@ def test_rectangle_coordinates_reject_bool_and_out_of_frame_values() -> None:
         )
         with pytest.raises(catalog.CatalogAdmissionError, match="^CATALOG_INVALID$"):
             catalog.admit_catalog(malformed)
+
+
+def test_invalid_rectangles_are_rejected_before_motif_or_numeric_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IntSubclass(int):
+        pass
+
+    class HostileCoordinate:
+        calls = 0
+
+        def __rsub__(self, other: object) -> int:
+            type(self).calls += 1
+            return 16
+
+    candidate = catalog.synthetic_candidate()
+    first = candidate.entries[0]
+    original = first.anchors[0].rectangle
+    missing = catalog.Rectangle(original.x0, original.y0, original.x1, original.y1)
+    object.__delattr__(missing, "x0")
+    invalid_rectangles = (
+        replace(original, x0=HostileCoordinate()),
+        replace(original, x0=IntSubclass(original.x0)),
+        replace(original, x0=True),
+        missing,
+        replace(original, x1=1_000_000_048),
+        replace(original, x0=-1),
+        replace(original, x1=original.x0),
+        replace(original, x1=641),
+    )
+    motif_calls = 0
+
+    def forbidden_motif(*args: object) -> bytes:
+        nonlocal motif_calls
+        motif_calls += 1
+        return b""
+
+    monkeypatch.setattr(catalog, "_motif", forbidden_motif)
+    for rectangle in invalid_rectangles:
+        malformed = replace(
+            candidate,
+            entries=(
+                replace(
+                    first,
+                    anchors=(replace(first.anchors[0], rectangle=rectangle),)
+                    + first.anchors[1:],
+                ),
+            )
+            + candidate.entries[1:],
+        )
+        with pytest.raises(catalog.CatalogAdmissionError, match="^CATALOG_INVALID$"):
+            catalog.admit_catalog(malformed)
+
+    assert motif_calls == 0
+    assert HostileCoordinate.calls == 0
+
+
+def test_invalid_bgr_length_is_rejected_before_motif_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = catalog.synthetic_candidate()
+    first = candidate.entries[0]
+    malformed = replace(
+        candidate,
+        entries=(
+            replace(
+                first,
+                anchors=(replace(first.anchors[0], bgr=b""),) + first.anchors[1:],
+            ),
+        )
+        + candidate.entries[1:],
+    )
+
+    def forbidden_motif(*args: object) -> bytes:
+        raise AssertionError("motif generation must follow bounded byte validation")
+
+    monkeypatch.setattr(catalog, "_motif", forbidden_motif)
+    with pytest.raises(catalog.CatalogAdmissionError, match="^CATALOG_INVALID$"):
+        catalog.admit_catalog(malformed)
+
+
+def test_transform_rejects_invalid_coordinates_before_numeric_hooks() -> None:
+    class HostileCoordinate:
+        calls = 0
+
+        def __mul__(self, other: object) -> int:
+            type(self).calls += 1
+            return 0
+
+    malformed = catalog.Rectangle(HostileCoordinate(), 40, 64, 56)
+
+    with pytest.raises(catalog.CatalogAdmissionError, match="^CATALOG_INVALID$"):
+        catalog.transform_rectangle(malformed, "V_INSET_5", 640, 360)
+
+    assert HostileCoordinate.calls == 0
 
 
 @pytest.mark.parametrize(
