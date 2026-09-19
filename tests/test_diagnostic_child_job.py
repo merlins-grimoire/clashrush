@@ -457,6 +457,64 @@ def test_popen_cleanup_thread_start_failure_continues_other_stream_and_handle_cl
     assert process._handle is None
 
 
+def test_popen_cleanup_join_failure_still_checks_liveness_and_remaining_resources(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, ...]] = []
+
+    class Stream:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            events.append(("stream-close", self.name))
+
+    class ProcessHandle:
+        def Close(self) -> None:
+            events.append(("popen-handle-close",))
+
+    class Process:
+        stdout = Stream("stdout")
+        stderr = Stream("stderr")
+        _handle = ProcessHandle()
+
+    class RetirementThread:
+        def __init__(self, *, target, args, daemon: bool) -> None:
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            events.append(("thread-start", self.args[0].name))
+            self.target(*self.args)
+
+        def join(self, _timeout: float) -> None:
+            events.append(("thread-join", self.args[0].name))
+            if self.args[0].name == "stdout":
+                raise RuntimeError("private thread join detail")
+
+        def is_alive(self) -> bool:
+            events.append(("thread-is-alive", self.args[0].name))
+            return False
+
+    monkeypatch.setattr(child_job.threading, "Thread", RetirementThread)
+
+    process = Process()
+    assert child_job._close_popen_resources(process) is False
+    assert events == [
+        ("thread-start", "stdout"),
+        ("stream-close", "stdout"),
+        ("thread-start", "stderr"),
+        ("stream-close", "stderr"),
+        ("thread-join", "stdout"),
+        ("thread-is-alive", "stdout"),
+        ("thread-join", "stderr"),
+        ("thread-is-alive", "stderr"),
+        ("popen-handle-close",),
+    ]
+    assert process._handle is None
+
+
 def test_owned_child_thread_start_failure_returns_unsuccessful_cleanup_and_closes_handle(
     monkeypatch,
 ) -> None:

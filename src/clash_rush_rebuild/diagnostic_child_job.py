@@ -279,6 +279,9 @@ def _close_popen_resources(process: object) -> bool:
     for closer in closers:
         try:
             closer.join(max(0.0, deadline - time.monotonic()))
+        except BaseException:
+            clean = False
+        try:
             if closer.is_alive():
                 clean = False
         except BaseException:
