@@ -406,22 +406,13 @@ def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(caps
     }
 
 
-def test_public_diagnostic_rejects_partial_output_and_timeout(capsys) -> None:
+def test_public_diagnostic_rejects_partial_output(capsys) -> None:
     def extra_output(command, **_kwargs):
         return CompletedProcess(command, 0, "HOME\nextra\n", "")
 
     assert main(
         ["diagnose-home", "--project-root", "X", "--slots", "Y"],
         diagnostic_child_runner=extra_output,
-    ) == 1
-    assert capsys.readouterr().out == ""
-
-    def timeout(command, **_kwargs):
-        raise TimeoutExpired(command, 30)
-
-    assert main(
-        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
-        diagnostic_child_runner=timeout,
     ) == 1
     assert capsys.readouterr().out == ""
 
@@ -504,7 +495,7 @@ def test_diagnostic_harness_accepts_only_exact_closed_failure_record() -> None:
         '{"child_status":2,"classification":"CAPTURE","child_wait_completed":true}\n',
         _failure_record("CAPTURE", None, False),
         _failure_record("LAUNCH", 2, False),
-        _failure_record("TIMEOUT", None, False),
+        _failure_record("TIMEOUT", None, True),
         _failure_record("UNEXPECTED_STDERR", 1, False),
     ],
 )
@@ -561,17 +552,16 @@ def test_public_diagnostic_classification_precedence_is_closed(
 
 
 @pytest.mark.parametrize(
-    ("error", "classification", "wait_completed"),
+    "error",
     [
-        (OSError("private spawn detail"), "LAUNCH", False),
-        (TimeoutExpired(["private", "command"], 30), "TIMEOUT", True),
-        (RuntimeError("private wait detail"), "CLEANUP", False),
+        OSError("private spawn detail C:/private/account-one"),
+        TimeoutExpired(["private", "command", "account-one"], 30),
+        RuntimeError("private wait detail account-one"),
+        KeyboardInterrupt("private arbitrary detail account-one"),
     ],
 )
-def test_public_diagnostic_classifies_runner_failures_without_raw_details(
+def test_public_diagnostic_maps_every_injected_runner_exception_to_cleanup(
     error: BaseException,
-    classification: str,
-    wait_completed: bool,
     capsys,
 ) -> None:
     def fail(*_args, **_kwargs):
@@ -584,8 +574,13 @@ def test_public_diagnostic_classifies_runner_failures_without_raw_details(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == _failure_record(classification, None, wait_completed)
+    assert captured.err == _failure_record("CLEANUP", None, False)
+    parsed = json.loads(captured.err)
+    assert type(parsed["classification"]) is str
+    assert parsed["child_status"] is None
+    assert type(parsed["child_wait_completed"]) is bool
     assert "private" not in captured.err
+    assert "account-one" not in captured.err
 
 
 class _InertDiagnosticPopen:
@@ -600,33 +595,54 @@ class _InertDiagnosticPopen:
         self.returncode = 0
         self._failure = failure
         self._communicate_calls = 0
+        self.stdout = _InertDiagnosticStream(self, "stdout")
+        self.stderr = _InertDiagnosticStream(self, "stderr")
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
+        self.stdout.close()
+        self.stderr.close()
         if self._failure == "context-exit":
-            raise OSError("private context-exit detail")
+            raise TimeoutExpired(["private", "context-exit"], 30)
+        self.wait()
         return None
 
     def communicate(self, _input=None, timeout=None):
         self._communicate_calls += 1
-        if self._failure in {"kill", "post-kill-communicate", "timeout"}:
+        if self._failure in {
+            "initial-communicate",
+            "kill",
+            "second-communicate",
+        }:
             if self._communicate_calls == 1:
                 raise TimeoutExpired(self.args, timeout)
-            if self._failure == "post-kill-communicate":
-                raise OSError("private post-kill communicate detail")
+            if self._failure == "second-communicate":
+                raise TimeoutExpired(["private", "second-communicate"], 30)
         return "HOME\n", ""
 
     def kill(self) -> None:
         if self._failure == "kill":
-            raise OSError("private kill detail")
+            raise TimeoutExpired(["private", "kill"], 30)
 
     def wait(self) -> int:
+        if self._failure == "wait":
+            raise TimeoutExpired(["private", "wait"], 30)
         return self.returncode
 
     def poll(self) -> int:
         return self.returncode
+
+
+class _InertDiagnosticStream:
+    def __init__(self, process: _InertDiagnosticPopen, name: str) -> None:
+        self._process = process
+        self._name = name
+
+    def close(self) -> None:
+        if self._process._failure == "stream-close" and self._name == "stdout":
+            raise TimeoutExpired(["private", "stream-close"], 30)
 
 
 def _run_with_inert_popen(monkeypatch, failure: str | None, capsys) -> tuple[int, str, str]:
@@ -641,7 +657,7 @@ def _run_with_inert_popen(monkeypatch, failure: str | None, capsys) -> tuple[int
     return status, captured.out, captured.err
 
 
-def test_standard_runner_proves_constructor_oserror_is_pre_child_launch(
+def test_standard_runner_maps_pre_createprocess_constructor_failure_to_cleanup(
     monkeypatch,
     capsys,
 ) -> None:
@@ -658,18 +674,19 @@ def test_standard_runner_proves_constructor_oserror_is_pre_child_launch(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == _failure_record("LAUNCH", None, False)
+    assert captured.err == _failure_record("CLEANUP", None, False)
     assert "private" not in captured.err
 
 
-def test_standard_runner_does_not_claim_launch_when_constructor_created_child(
+def test_standard_runner_maps_createprocess_then_pipe_cleanup_failure_to_cleanup(
     monkeypatch,
     capsys,
 ) -> None:
     class FailAfterCreate:
         def __init__(self, *_args, **_kwargs) -> None:
-            self._child_created = True
-            raise OSError("private post-create constructor detail")
+            self._child_created = False
+            self.create_process_succeeded = True
+            raise OSError("private post-create pipe cleanup detail")
 
     monkeypatch.setattr(cli_module.subprocess, "Popen", FailAfterCreate)
 
@@ -683,8 +700,18 @@ def test_standard_runner_does_not_claim_launch_when_constructor_created_child(
     assert "private" not in captured.err
 
 
-@pytest.mark.parametrize("failure", ["kill", "post-kill-communicate", "context-exit"])
-def test_standard_runner_maps_post_spawn_oserror_to_cleanup(
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "initial-communicate",
+        "kill",
+        "second-communicate",
+        "stream-close",
+        "context-exit",
+        "wait",
+    ],
+)
+def test_standard_runner_maps_every_timeout_path_exception_to_cleanup(
     failure: str,
     monkeypatch,
     capsys,
@@ -695,17 +722,6 @@ def test_standard_runner_maps_post_spawn_oserror_to_cleanup(
     assert stdout == ""
     assert stderr == _failure_record("CLEANUP", None, False)
     assert "private" not in stderr
-
-
-def test_standard_runner_reports_timeout_only_after_successful_kill_and_wait(
-    monkeypatch,
-    capsys,
-) -> None:
-    status, stdout, stderr = _run_with_inert_popen(monkeypatch, "timeout", capsys)
-
-    assert status == 1
-    assert stdout == ""
-    assert stderr == _failure_record("TIMEOUT", None, True)
 
 
 def test_standard_runner_preserves_ordinary_scalar_with_inert_popen(
