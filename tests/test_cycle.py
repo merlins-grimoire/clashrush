@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from clash_rush_rebuild.cycle import CycleError, InertCycle
+from clash_rush_rebuild.cycle import CycleError, InertCycle, NoInputDiagnosticCycle
+from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.registry import Slot
@@ -251,3 +252,114 @@ def test_exact_five_visits_emit_start_stop_zero_through_four_across_reopen() -> 
         "START4",
         "STOP4",
     ]
+
+
+class FakeDiagnosticStore(FakeStateStore):
+    def load_with_bytes(self) -> tuple[Ready, bytes]:
+        self.events.append("state:load-with-bytes")
+        return Ready(0), b'{"next_slot":0,"schema":1,"state":"READY"}\n'
+
+
+class FakeDiagnosticApprovals:
+    def __init__(self, events: list[str], *, fail: bool = False) -> None:
+        self.events = events
+        self.fail = fail
+
+    def validate_then_consume(self, action, tree, state, state_bytes) -> object:
+        self.events.append(
+            f"approval:{action.value}:{tree}:{state.next_slot}:{len(state_bytes)}"
+        )
+        if self.fail:
+            raise RuntimeError("approval refused")
+        return object()
+
+
+def _diagnostic_cycle(
+    events: list[str],
+    lease: FakeLease,
+    *,
+    approval_fails: bool = False,
+    observation_fails: bool = False,
+) -> NoInputDiagnosticCycle:
+    slots = tuple(
+        Slot(
+            index,
+            "Pie64" if index == 0 else f"Pie64_{index + 1}",
+            f"Generic Slot {index}",
+            1280,
+            720,
+            240,
+        )
+        for index in range(5)
+    )
+
+    def make_supervisor(_store, _mutex_name) -> FakeSupervisor:
+        events.append("supervisor:create")
+        return FakeSupervisor(events)
+
+    def observe(_supervisor, _binding) -> HomeDiagnosticResult:
+        events.append("observe")
+        if observation_fails:
+            raise RuntimeError("recognition failed")
+        return HomeDiagnosticResult.HOME
+
+    return NoInputDiagnosticCycle(
+        FakeRuntime(events, lease),
+        load_registry=lambda: (events.append("registry:load") or slots),
+        make_state_store=lambda: (
+            events.append("state-store:create") or FakeDiagnosticStore(events)
+        ),
+        observe_player_count=lambda: (events.append("players:observe") or 0),
+        approvals=FakeDiagnosticApprovals(events, fail=approval_fails),
+        candidate_tree=lambda: (events.append("tree") or "a" * 40),
+        make_supervisor=make_supervisor,
+        observe=observe,
+    )
+
+
+def test_no_input_diagnostic_consumes_exact_approval_before_launch_and_stops() -> None:
+    events: list[str] = []
+    result = _diagnostic_cycle(events, FakeLease(events)).visit_once()
+
+    assert result is HomeDiagnosticResult.HOME
+    assert events == [
+        "mutex:acquire",
+        "mutex:require-usable",
+        "registry:load",
+        "state-store:create",
+        "state:load-with-bytes",
+        "players:observe",
+        "tree",
+        "approval:LAUNCH_WINDOW_BINDING_DIAGNOSTIC:" + "a" * 40 + ":0:43",
+        "supervisor:create",
+        "start:0",
+        "observe",
+        "stop",
+        "mutex:release",
+    ]
+
+
+def test_no_input_diagnostic_stops_when_recognition_raises() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_fails=True,
+    )
+
+    with pytest.raises(RuntimeError, match="recognition failed"):
+        cycle.visit_once()
+
+    assert events[-3:] == ["observe", "stop", "mutex:release"]
+
+
+def test_no_input_diagnostic_refuses_launch_when_approval_fails() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events), approval_fails=True)
+
+    with pytest.raises(RuntimeError, match="approval refused"):
+        cycle.visit_once()
+
+    assert "supervisor:create" not in events
+    assert not any(event.startswith("start:") for event in events)
+    assert events[-1] == "mutex:release"

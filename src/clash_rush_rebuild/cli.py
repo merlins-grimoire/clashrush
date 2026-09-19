@@ -19,12 +19,17 @@ from .approval_reconciliation import (
     StaleStateReconciler,
 )
 from .config import load_private_registry
-from .cycle import InertCycle
+from .basepilot_window import WindowService
+from .cycle import InertCycle, NoInputDiagnosticCycle
 from .guided_setup import export_synthetic_installation, run_guided_setup
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
 from .lifecycle_state import LifecycleStateStore
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
+from .no_input_home_diagnostic import (
+    HomeDiagnosticResult,
+    NoInputHomeDiagnosticController,
+)
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import NativeWin32Api, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
@@ -105,6 +110,63 @@ def build_inert_cycle(
         make_state_store=make_state_store,
         observe_player_count=observe_player_count,
         make_supervisor=make_supervisor,
+    )
+
+
+def build_no_input_diagnostic_cycle(
+    project_root: str,
+    slots_path: str,
+) -> NoInputDiagnosticCycle:
+    """Compose the donor recognizer inside the reviewed lifecycle boundary."""
+    project = Path(project_root).resolve(strict=True)
+    slots = Path(slots_path)
+    native = NativeLifecycleApi()
+    runtime = Win32Runtime(native)
+    host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
+    approvals = OneShotApprovalService(PrivateApprovalStorage(project))
+
+    def make_state_store() -> LifecycleStateStore:
+        return build_native_state_store(project)
+
+    def observe_player_count() -> int:
+        snapshot = host.complete_player_snapshot()
+        try:
+            return len(snapshot.identities)
+        finally:
+            snapshot.close()
+
+    def make_supervisor(
+        store: LifecycleStateStore,
+        mutex_name: str,
+    ) -> LifecycleSupervisor:
+        return LifecycleSupervisor(
+            host,
+            store,
+            AcquiredMutexLease(mutex_name),
+            nonce_factory=lambda: secrets.token_hex(16),
+            preserve_ready_cursor=True,
+        )
+
+    def observe(
+        supervisor: LifecycleSupervisor,
+        binding,
+    ) -> HomeDiagnosticResult:
+        window = WindowService(binding, supervisor.capture_owned)
+        return NoInputHomeDiagnosticController(window).observe()
+
+    return NoInputDiagnosticCycle(
+        runtime,
+        load_registry=lambda: load_private_registry(
+            project,
+            slots,
+            _BLUESTACKS_CONF,
+        ),
+        make_state_store=make_state_store,
+        observe_player_count=observe_player_count,
+        approvals=approvals,
+        candidate_tree=lambda: _candidate_tree(project),
+        make_supervisor=make_supervisor,
+        observe=observe,
     )
 
 
@@ -278,6 +340,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     reconcile.add_argument("--project-root", required=True)
     reconcile.add_argument("--slots", required=True)
+    diagnose = subcommands.add_parser(
+        "diagnose-home",
+        help="run one bounded installed no-input Home diagnostic",
+    )
+    diagnose.add_argument("--project-root", required=True)
+    diagnose.add_argument("--slots", required=True)
+    diagnose.add_argument("--timeout-seconds", type=int, default=120)
+    diagnose_child = subcommands.add_parser(
+        "diagnose-home-child",
+        help=argparse.SUPPRESS,
+    )
+    diagnose_child.add_argument("--project-root", required=True)
+    diagnose_child.add_argument("--slots", required=True)
     return parser
 
 
@@ -293,6 +368,8 @@ def main(
     reconciler_builder: Callable[
         [str, str], ReconcilerCommand
     ] = build_native_reconciler,
+    diagnostic_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
+    diagnostic_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.command == "visit-one" and args.owner_approved is not True:
@@ -350,6 +427,50 @@ def main(
             reconciler_builder(args.project_root, args.slots).reconcile()
             print("lifecycle reconciliation completed")
             return 0
+        if args.command == "diagnose-home-child":
+            builder = diagnostic_cycle_builder or build_no_input_diagnostic_cycle
+            result = builder(args.project_root, args.slots).visit_once()
+            if type(result) is not HomeDiagnosticResult:
+                raise RuntimeError("diagnostic result is malformed")
+            print(result.value)
+            return 0 if result is HomeDiagnosticResult.HOME else 1
+        if args.command == "diagnose-home":
+            if (
+                type(args.timeout_seconds) is not int
+                or not 1 <= args.timeout_seconds <= 600
+            ):
+                return 2
+            runner = diagnostic_child_runner or subprocess.run
+            command = [
+                sys.executable,
+                "-m",
+                "clash_rush_rebuild",
+                "diagnose-home-child",
+                "--project-root",
+                args.project_root,
+                "--slots",
+                args.slots,
+            ]
+            try:
+                completed = runner(
+                    command,
+                    timeout=args.timeout_seconds,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.TimeoutExpired:
+                return 1
+            valid = {
+                (0, "HOME\n"): HomeDiagnosticResult.HOME,
+                (1, "BUILDER\n"): HomeDiagnosticResult.BUILDER,
+                (1, "UNKNOWN\n"): HomeDiagnosticResult.UNKNOWN,
+            }
+            result = valid.get((completed.returncode, completed.stdout))
+            if result is None or completed.stderr != "":
+                return 1
+            print(result.value)
+            return 0 if result is HomeDiagnosticResult.HOME else 1
         if cycle_builder is None:
             cycle = build_inert_cycle(
                 args.project_root,

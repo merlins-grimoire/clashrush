@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from subprocess import CompletedProcess, TimeoutExpired
 
 import clash_rush_rebuild.cli as cli_module
 from clash_rush_rebuild.cli import build_native_state_store, main
 from clash_rush_rebuild.mvp_local_gameplay import VisitResult
+from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
 
 
 class FakeCycle:
@@ -296,3 +298,89 @@ def test_cli_consumes_reconciliation_without_launch_or_input_callbacks(capsys) -
     assert status == 0
     assert events == ["build-reconciler:X:Y", "reconcile"]
     assert capsys.readouterr().out.strip() == "lifecycle reconciliation completed"
+
+
+class FakeDiagnosticCycle:
+    def __init__(self, events: list[str], result: HomeDiagnosticResult) -> None:
+        self.events = events
+        self.result = result
+
+    def visit_once(self) -> HomeDiagnosticResult:
+        self.events.append("diagnose:visit")
+        return self.result
+
+
+def test_private_diagnostic_child_emits_only_closed_home_scalar(capsys) -> None:
+    events: list[str] = []
+
+    status = main(
+        ["diagnose-home-child", "--project-root", "X", "--slots", "Y"],
+        diagnostic_cycle_builder=lambda root, slots: (
+            events.append(f"diagnose:build:{root}:{slots}")
+            or FakeDiagnosticCycle(events, HomeDiagnosticResult.HOME)
+        ),
+    )
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert events == ["diagnose:build:X:Y", "diagnose:visit"]
+    assert captured.out == "HOME\n"
+    assert captured.err == ""
+
+
+def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(capsys) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return CompletedProcess(command, 0, "HOME\n", "")
+
+    status = main(
+        [
+            "diagnose-home",
+            "--project-root",
+            "X",
+            "--slots",
+            "Y",
+            "--timeout-seconds",
+            "45",
+        ],
+        diagnostic_child_runner=run,
+    )
+
+    assert status == 0
+    assert capsys.readouterr().out == "HOME\n"
+    command, kwargs = calls[0]
+    assert command[-5:] == [
+        "diagnose-home-child",
+        "--project-root",
+        "X",
+        "--slots",
+        "Y",
+    ]
+    assert kwargs == {
+        "timeout": 45,
+        "check": False,
+        "capture_output": True,
+        "text": True,
+    }
+
+
+def test_public_diagnostic_rejects_partial_output_and_timeout(capsys) -> None:
+    def extra_output(command, **_kwargs):
+        return CompletedProcess(command, 0, "HOME\nextra\n", "")
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=extra_output,
+    ) == 1
+    assert capsys.readouterr().out == ""
+
+    def timeout(command, **_kwargs):
+        raise TimeoutExpired(command, 30)
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=timeout,
+    ) == 1
+    assert capsys.readouterr().out == ""

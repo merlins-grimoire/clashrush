@@ -1,0 +1,19 @@
+{
+  "derived_sha256": "380ffe4c00cb00f94ecb7580a8e164ebec550cd972170f4bbf033dea49b92d92",
+  "derived_size": 1665605,
+  "detector_region_preserved": [775, 0, 850, 220],
+  "dimensions": [1728, 1080],
+  "redaction_bgr": [24, 24, 24],
+  "redaction_regions": [
+    [0, 0, 775, 220],
+    [850, 0, 1728, 220],
+    [0, 220, 360, 1080],
+    [1368, 220, 1728, 1080],
+    [360, 850, 1368, 1080]
+  ],
+  "source_commit": "c41fe12a6df051e241c695b71b6859286e24c612",
+  "source_path": "tests/fixtures/home_screen.png",
+  "source_sha256": "279acc36eaf56c298c668ecb110d5001628c2ec5607f0f57604d8460bdb42611",
+  "source_size": 4060294,
+  "transformation": "Replace every peripheral HUD region that can display player, clan, account, resource, notification, or action text with one opaque color; retain only the central scene and the sealed Home-builder template region."
+}

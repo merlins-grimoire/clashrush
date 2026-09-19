@@ -10,7 +10,6 @@ def test_production_source_confines_attack_input_and_exposes_no_prohibited_trans
         "postmessage",
         ".save(",
         "imwrite",
-        "screenshot",
     )
     for path in source_root.glob("*.py"):
         text = path.read_text(encoding="utf-8").casefold()
@@ -18,6 +17,16 @@ def test_production_source_confines_attack_input_and_exposes_no_prohibited_trans
             assert token not in text, (
                 f"prohibited production token {token!r} in {path.name}"
             )
+
+    memory_capture_carriers = []
+    for path in source_root.glob("*.py"):
+        text = path.read_text(encoding="utf-8").casefold()
+        if "screenshot" in text:
+            memory_capture_carriers.append(path.name)
+    assert sorted(memory_capture_carriers) == [
+        "basepilot_window.py",
+        "no_input_home_diagnostic.py",
+    ]
 
     native_input = ("mouse_event", "keybd_event", "setcursorpos")
     carriers = []
