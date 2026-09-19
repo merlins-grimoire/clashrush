@@ -262,13 +262,26 @@ def _close_popen_resources(process: object) -> bool:
     for stream_name in ("stdout", "stderr"):
         stream = getattr(process, stream_name, None)
         if stream is not None:
-            closer = threading.Thread(target=close_stream, args=(stream,), daemon=True)
+            try:
+                closer = threading.Thread(
+                    target=close_stream, args=(stream,), daemon=True
+                )
+            except BaseException:
+                clean = False
+                continue
+            try:
+                closer.start()
+            except BaseException:
+                clean = False
+                continue
             closers.append(closer)
-            closer.start()
     deadline = time.monotonic() + STREAM_CLOSE_TIMEOUT_SECONDS
     for closer in closers:
-        closer.join(max(0.0, deadline - time.monotonic()))
-        if closer.is_alive():
+        try:
+            closer.join(max(0.0, deadline - time.monotonic()))
+            if closer.is_alive():
+                clean = False
+        except BaseException:
             clean = False
     handle = getattr(process, "_handle", None)
     if handle is not None:

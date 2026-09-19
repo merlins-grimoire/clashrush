@@ -398,6 +398,138 @@ def test_failed_cleanup_drain_and_blocking_stream_close_is_bounded_and_unsuccess
         worker.join(timeout=1)
 
 
+def test_popen_cleanup_thread_start_failure_continues_other_stream_and_handle_cleanup(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, ...]] = []
+
+    class Stream:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            events.append(("stream-close", self.name))
+
+    class ProcessHandle:
+        def Close(self) -> None:
+            events.append(("popen-handle-close",))
+
+    class Process:
+        stdout = Stream("stdout")
+        stderr = Stream("stderr")
+        _handle = ProcessHandle()
+
+    class RetirementThread:
+        starts = 0
+
+        def __init__(self, *, target, args, daemon: bool) -> None:
+            assert daemon is True
+            self.target = target
+            self.args = args
+            events.append(("thread-constructed", args[0].name))
+
+        def start(self) -> None:
+            type(self).starts += 1
+            events.append(("thread-start", self.args[0].name))
+            if type(self).starts == 1:
+                raise RuntimeError("private thread start detail")
+            self.target(*self.args)
+
+        def join(self, _timeout: float) -> None:
+            events.append(("thread-join", self.args[0].name))
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(child_job.threading, "Thread", RetirementThread)
+
+    process = Process()
+    assert child_job._close_popen_resources(process) is False
+    assert events == [
+        ("thread-constructed", "stdout"),
+        ("thread-start", "stdout"),
+        ("thread-constructed", "stderr"),
+        ("thread-start", "stderr"),
+        ("stream-close", "stderr"),
+        ("thread-join", "stderr"),
+        ("popen-handle-close",),
+    ]
+    assert process._handle is None
+
+
+def test_owned_child_thread_start_failure_returns_unsuccessful_cleanup_and_closes_handle(
+    monkeypatch,
+) -> None:
+    runtime = FakeRuntime()
+    events: list[tuple[str, ...]] = []
+
+    class Stream:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            events.append(("stream-close", self.name))
+
+    class ProcessHandle:
+        def Close(self) -> None:
+            events.append(("popen-handle-close",))
+
+    class Process:
+        returncode = 0
+        stdout = Stream("stdout")
+        stderr = Stream("stderr")
+        _handle = ProcessHandle()
+
+        def communicate(self, *, timeout: float):
+            return "HOME\n", ""
+
+    class RetirementThread:
+        starts = 0
+
+        def __init__(self, *, target, args, daemon: bool) -> None:
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            type(self).starts += 1
+            if type(self).starts == 1:
+                raise RuntimeError("private thread start detail")
+            self.target(*self.args)
+
+        def join(self, _timeout: float) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    process = Process()
+
+    def popen(_command, **_kwargs):
+        owner = child_job._spawn_owner.owner
+        owner.retained_process = 21
+        owner.assigned = True
+        owner.resumed = True
+        return process
+
+    monkeypatch.setattr(child_job.threading, "Thread", RetirementThread)
+
+    outcome = child_job.run_owned_diagnostic_child(
+        ["python", "-c", "private"],
+        timeout=1,
+        runtime_factory=lambda: runtime,
+        popen_factory=popen,
+        installer=lambda: None,
+        monotonic=iter((10.0, 10.1)).__next__,
+    )
+
+    assert outcome == child_job.DiagnosticChildOutcome(
+        None, None, None, True, False
+    )
+    assert events == [("stream-close", "stderr"), ("popen-handle-close",)]
+    assert process._handle is None
+
+
 def test_constructor_failure_after_create_closes_raw_and_retained_handles(
     monkeypatch,
 ) -> None:
