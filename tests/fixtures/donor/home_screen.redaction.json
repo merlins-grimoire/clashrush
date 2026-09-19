@@ -1,6 +1,6 @@
 {
-  "derived_sha256": "13b52280bee6432b64f1173962529c49d19199faecd3b9ae16aba1b47c1fd22e",
-  "derived_size": 1648822,
+  "derived_sha256": "d5a9cdded32cf353da3473b23bb9015b7d0b3332ee8c28d6644fae3a9dc9aa84",
+  "derived_size": 1623612,
   "detector_region_preserved": [775, 0, 850, 220],
   "dimensions": [1728, 1080],
   "redaction_bgr": [24, 24, 24],
@@ -10,11 +10,11 @@
     [0, 220, 360, 1080],
     [1368, 220, 1728, 1080],
     [360, 850, 1368, 1080],
-    [850, 220, 1000, 285]
+    [610, 340, 760, 405]
   ],
   "source_commit": "c41fe12a6df051e241c695b71b6859286e24c612",
   "source_path": "tests/fixtures/home_screen.png",
   "source_sha256": "279acc36eaf56c298c668ecb110d5001628c2ec5607f0f57604d8460bdb42611",
   "source_size": 4060294,
-  "transformation": "Replace every peripheral HUD region that can display player, clan, account, resource, notification, or action text and the in-scene Clan Castle identity label with one opaque color; retain the non-identifying central scene and the sealed Home-builder template region."
+  "transformation": "Replace every peripheral HUD region that can display player, clan, account, resource, notification, or action text and the in-scene account-associated identity label and badge with one opaque color; retain the non-identifying central scene and the sealed Home-builder template region."
 }

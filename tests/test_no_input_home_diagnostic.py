@@ -33,7 +33,7 @@ _IDENTIFYING_HUD_REGIONS = (
     (360, 850, 1368, 1080),
 )
 _IDENTIFYING_SCENE_REGIONS = (
-    (850, 220, 1000, 285),
+    (610, 340, 760, 405),
 )
 
 
@@ -64,8 +64,8 @@ def test_tracked_home_derivative_records_source_and_redaction_provenance() -> No
     provenance = json.loads(_PROVENANCE.read_text(encoding="utf-8"))
 
     assert provenance == {
-        "derived_sha256": "13b52280bee6432b64f1173962529c49d19199faecd3b9ae16aba1b47c1fd22e",
-        "derived_size": 1648822,
+        "derived_sha256": "d5a9cdded32cf353da3473b23bb9015b7d0b3332ee8c28d6644fae3a9dc9aa84",
+        "derived_size": 1623612,
         "detector_region_preserved": [775, 0, 850, 220],
         "dimensions": [1728, 1080],
         "redaction_bgr": [24, 24, 24],
@@ -79,9 +79,10 @@ def test_tracked_home_derivative_records_source_and_redaction_provenance() -> No
         "source_size": 4060294,
         "transformation": (
             "Replace every peripheral HUD region that can display player, clan, "
-            "account, resource, notification, or action text and the in-scene Clan "
-            "Castle identity label with one opaque color; retain the non-identifying "
-            "central scene and the sealed Home-builder template region."
+            "account, resource, notification, or action text and the in-scene "
+            "account-associated identity label and badge with one opaque color; "
+            "retain the non-identifying central scene and the sealed Home-builder "
+            "template region."
         ),
     }
 
@@ -101,9 +102,9 @@ def test_copied_donor_assets_and_real_fixture_match_frozen_seals() -> None:
         name: hashlib.sha256((assets / name).read_bytes()).hexdigest()
         for name in expected
     } == expected
-    assert _FIXTURE.stat().st_size == 1_648_822
+    assert _FIXTURE.stat().st_size == 1_623_612
     assert hashlib.sha256(_FIXTURE.read_bytes()).hexdigest() == (
-        "13b52280bee6432b64f1173962529c49d19199faecd3b9ae16aba1b47c1fd22e"
+        "d5a9cdded32cf353da3473b23bb9015b7d0b3332ee8c28d6644fae3a9dc9aa84"
     )
 
 
