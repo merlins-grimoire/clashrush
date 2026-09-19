@@ -12,7 +12,7 @@ from enum import StrEnum
 import numpy as np
 
 from .basepilot_vision import BasePilotGeometry, BasePilotRecognitionError, VisionService
-from .basepilot_window import WindowService
+from .basepilot_window import BasePilotCaptureError, WindowService
 
 _HOME_VILLAGE_BUILDER_TEMPLATES = ("builder.png", "gbuilder.png")
 
@@ -25,6 +25,10 @@ class HomeDiagnosticResult(StrEnum):
 
 def _raise_observation_error() -> None:
     raise BasePilotRecognitionError("Home recognition failed") from None
+
+
+def _raise_capture_error() -> None:
+    raise BasePilotCaptureError("Home capture failed") from None
 
 
 class NoInputHomeDiagnosticController:
@@ -99,20 +103,34 @@ class NoInputHomeDiagnosticController:
     def observe(self) -> HomeDiagnosticResult:
         frame: np.ndarray | None = None
         result: HomeDiagnosticResult | None = None
-        failed = False
+        capture_failed = False
+        recognition_failed = False
         try:
-            frame = self.window.screenshot()
-            result = self._detect_village_type(
-                frame,
-                expected_size=(self.window._binding.width, self.window._binding.height),
-            )
+            try:
+                frame = self.window.screenshot()
+            except BaseException:
+                capture_failed = True
+            if not capture_failed:
+                try:
+                    result = self._detect_village_type(
+                        frame,
+                        expected_size=(
+                            self.window._binding.width,
+                            self.window._binding.height,
+                        ),
+                    )
+                except BaseException:
+                    recognition_failed = True
         except BaseException:
-            failed = True
+            recognition_failed = True
         finally:
             if type(frame) is np.ndarray:
                 frame.fill(0)
             frame = None
-        if failed:
+        if capture_failed:
+            result = None
+            _raise_capture_error()
+        if recognition_failed:
             result = None
             _raise_observation_error()
         if type(result) is not HomeDiagnosticResult:

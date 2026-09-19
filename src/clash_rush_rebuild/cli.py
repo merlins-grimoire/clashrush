@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import secrets
 import subprocess
 import sys
@@ -20,7 +21,12 @@ from .approval_reconciliation import (
 )
 from .config import load_private_registry
 from .basepilot_window import WindowService
-from .cycle import InertCycle, NoInputDiagnosticCycle
+from .cycle import (
+    DiagnosticFailureStage,
+    DiagnosticStageError,
+    InertCycle,
+    NoInputDiagnosticCycle,
+)
 from .guided_setup import export_synthetic_installation, run_guided_setup
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
 from .lifecycle_state import LifecycleStateStore
@@ -35,6 +41,87 @@ from .win32_runtime import NativeWin32Api, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
 
 _BLUESTACKS_CONF = Path(r"C:\ProgramData\BlueStacks_nxt\bluestacks.conf")
+_DIAGNOSTIC_STAGE_STDERR = {
+    f"{stage.value}\n": stage.value for stage in DiagnosticFailureStage
+}
+_DIAGNOSTIC_FAILURE_CLASSES = {
+    *(stage.value for stage in DiagnosticFailureStage),
+    "TIMEOUT",
+    "UNEXPECTED_STDERR",
+    "SCALAR_PARSE",
+}
+
+
+def _diagnostic_failure_record(
+    classification: str,
+    child_status: int | None,
+    child_wait_completed: bool,
+) -> str:
+    record = {
+        "classification": classification,
+        "child_status": child_status,
+        "child_wait_completed": child_wait_completed,
+    }
+    return json.dumps(record, separators=(",", ":")) + "\n"
+
+
+def _diagnostic_failure_semantics_are_valid(
+    classification: str,
+    child_status: int | None,
+    child_wait_completed: bool,
+) -> bool:
+    if classification in {"CAPTURE", "RECOGNITION"}:
+        return child_status == 2 and child_wait_completed is True
+    if classification in {"LAUNCH", "CLEANUP"}:
+        return (child_status, child_wait_completed) in {(2, True), (None, False)}
+    if classification == "TIMEOUT":
+        return child_status is None and child_wait_completed is True
+    return child_wait_completed is True
+
+
+def parse_diagnostic_failure_record(record: str) -> tuple[str, int | None, bool]:
+    """Strict invoking-harness boundary for one sanitized failure record."""
+    try:
+        parsed = json.loads(record)
+        if type(parsed) is not dict or set(parsed) != {
+            "classification",
+            "child_status",
+            "child_wait_completed",
+        }:
+            raise ValueError
+        classification = parsed["classification"]
+        child_status = parsed["child_status"]
+        child_wait_completed = parsed["child_wait_completed"]
+        if (
+            type(classification) is not str
+            or classification not in _DIAGNOSTIC_FAILURE_CLASSES
+            or (child_status is not None and type(child_status) is not int)
+            or type(child_wait_completed) is not bool
+            or not _diagnostic_failure_semantics_are_valid(
+                classification, child_status, child_wait_completed
+            )
+            or record
+            != _diagnostic_failure_record(
+                classification, child_status, child_wait_completed
+            )
+        ):
+            raise ValueError
+    except BaseException:
+        raise ValueError("diagnostic evidence is malformed") from None
+    return classification, child_status, child_wait_completed
+
+
+def _emit_diagnostic_failure(
+    classification: str,
+    child_status: int | None,
+    child_wait_completed: bool,
+) -> int:
+    sys.stderr.write(
+        _diagnostic_failure_record(
+            classification, child_status, child_wait_completed
+        )
+    )
+    return 1
 
 
 class CycleCommand(Protocol):
@@ -428,10 +515,17 @@ def main(
             print("lifecycle reconciliation completed")
             return 0
         if args.command == "diagnose-home-child":
-            builder = diagnostic_cycle_builder or build_no_input_diagnostic_cycle
-            result = builder(args.project_root, args.slots).visit_once()
-            if type(result) is not HomeDiagnosticResult:
-                raise RuntimeError("diagnostic result is malformed")
+            try:
+                builder = diagnostic_cycle_builder or build_no_input_diagnostic_cycle
+                result = builder(args.project_root, args.slots).visit_once()
+                if type(result) is not HomeDiagnosticResult:
+                    raise DiagnosticStageError(DiagnosticFailureStage.RECOGNITION)
+            except DiagnosticStageError as exc:
+                sys.stderr.write(f"{exc.stage.value}\n")
+                return 2
+            except BaseException:
+                sys.stderr.write("LAUNCH\n")
+                return 2
             print(result.value)
             return 0 if result is HomeDiagnosticResult.HOME else 1
         if args.command == "diagnose-home":
@@ -460,15 +554,41 @@ def main(
                     text=True,
                 )
             except subprocess.TimeoutExpired:
-                return 1
+                return _emit_diagnostic_failure("TIMEOUT", None, True)
+            except OSError:
+                return _emit_diagnostic_failure("LAUNCH", None, False)
+            except BaseException:
+                return _emit_diagnostic_failure("CLEANUP", None, False)
+            child_status = (
+                completed.returncode
+                if type(completed.returncode) is int
+                else None
+            )
+            stdout = completed.stdout
+            stderr = completed.stderr
             valid = {
                 (0, "HOME\n"): HomeDiagnosticResult.HOME,
                 (1, "BUILDER\n"): HomeDiagnosticResult.BUILDER,
                 (1, "UNKNOWN\n"): HomeDiagnosticResult.UNKNOWN,
             }
-            result = valid.get((completed.returncode, completed.stdout))
-            if result is None or completed.stderr != "":
-                return 1
+            result = (
+                valid.get((child_status, stdout))
+                if child_status is not None and type(stdout) is str
+                else None
+            )
+            stage = (
+                _DIAGNOSTIC_STAGE_STDERR.get(stderr)
+                if child_status == 2 and stdout == "" and type(stderr) is str
+                else None
+            )
+            if stage is not None:
+                return _emit_diagnostic_failure(stage, child_status, True)
+            if type(stderr) is not str or stderr != "":
+                return _emit_diagnostic_failure(
+                    "UNEXPECTED_STDERR", child_status, True
+                )
+            if result is None:
+                return _emit_diagnostic_failure("SCALAR_PARSE", child_status, True)
             print(result.value)
             return 0 if result is HomeDiagnosticResult.HOME else 1
         if cycle_builder is None:
@@ -487,6 +607,8 @@ def main(
         else:
             cycle.visit_once()
     except BaseException:  # noqa: BLE001 - CLI emits no private native/config details
+        if args.command in {"diagnose-home", "diagnose-home-child"}:
+            return 1
         sys.stderr.write("inert lifecycle visit failed\n")
         return 1
     return 0

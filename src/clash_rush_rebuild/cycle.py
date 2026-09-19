@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Protocol
 
 from .approval_reconciliation import ApprovalAction
+from .basepilot_vision import BasePilotRecognitionError
+from .basepilot_window import BasePilotCaptureError
 from .lifecycle import PlayerBinding, StopRecord
 from .lifecycle_state import LifecycleStateStore, Ready
 from .no_input_home_diagnostic import HomeDiagnosticResult
@@ -15,6 +18,25 @@ from .win32_runtime import DEFAULT_MUTEX_NAME
 
 class CycleError(RuntimeError):
     """The inert visit could not complete without weakening lifecycle safety."""
+
+
+class DiagnosticFailureStage(StrEnum):
+    LAUNCH = "LAUNCH"
+    CAPTURE = "CAPTURE"
+    RECOGNITION = "RECOGNITION"
+    CLEANUP = "CLEANUP"
+
+
+class DiagnosticStageError(RuntimeError):
+    """A sanitized, closed diagnostic stage failure."""
+
+    def __init__(self, stage: DiagnosticFailureStage) -> None:
+        super().__init__(stage.value)
+        self.stage = stage
+
+
+def _raise_diagnostic_stage(stage: DiagnosticFailureStage) -> None:
+    raise DiagnosticStageError(stage) from None
 
 
 class MutexLeasePort(Protocol):
@@ -156,50 +178,80 @@ class NoInputDiagnosticCycle:
 
     def visit_once(self) -> HomeDiagnosticResult:
         if self._disabled:
-            raise CycleError("lifecycle process is permanently disabled")
-        lease = self._runtime.acquire_mutex()
-        try:
-            if lease.abandoned:
-                store = self._make_state_store()
-                store.load()
-                count = self._observe_player_count()
-                if type(count) is not int or count < 0:
-                    raise CycleError("read-only player reconciliation failed")
-                raise CycleError("abandoned mutex requires operator reconciliation")
+            _raise_diagnostic_stage(DiagnosticFailureStage.LAUNCH)
 
-            lease.require_usable()
-            slots = self._load_registry()
-            if (
-                type(slots) is not tuple
-                or len(slots) != 5
-                or tuple(slot.index for slot in slots) != (0, 1, 2, 3, 4)
-            ):
-                raise CycleError("exact ordered five-slot registry required")
-            store = self._make_state_store()
-            state, state_bytes = store.load_with_bytes()
-            if type(state) is not Ready:
-                raise CycleError("ACTIVE lifecycle requires operator reconciliation")
-            count = self._observe_player_count()
-            if type(count) is not int or count != 0:
-                raise CycleError("pre-existing player blocks diagnostic launch")
-            self._approvals.validate_then_consume(
-                ApprovalAction.LAUNCH_WINDOW_BINDING_DIAGNOSTIC,
-                self._candidate_tree(),
-                state,
-                state_bytes,
-            )
-            supervisor = self._make_supervisor(store, DEFAULT_MUTEX_NAME)
-            binding = supervisor.start(slots[state.next_slot])
+        lease: MutexLeasePort | None = None
+        supervisor: SupervisorPort | None = None
+        binding: PlayerBinding | None = None
+        result: HomeDiagnosticResult | None = None
+        failure: DiagnosticFailureStage | None = None
+
+        try:
+            lease = self._runtime.acquire_mutex()
+        except BaseException:
+            failure = DiagnosticFailureStage.LAUNCH
+
+        if lease is not None:
             try:
-                result = self._observe(supervisor, binding)
-            finally:
-                supervisor.stop(binding, None)
-            if type(result) is not HomeDiagnosticResult:
-                raise CycleError("diagnostic observation result is malformed")
-            return result
-        finally:
+                if lease.abandoned:
+                    store = self._make_state_store()
+                    store.load()
+                    count = self._observe_player_count()
+                    if type(count) is not int or count < 0:
+                        raise CycleError("read-only player reconciliation failed")
+                    raise CycleError("abandoned mutex requires operator reconciliation")
+
+                lease.require_usable()
+                slots = self._load_registry()
+                if (
+                    type(slots) is not tuple
+                    or len(slots) != 5
+                    or tuple(slot.index for slot in slots) != (0, 1, 2, 3, 4)
+                ):
+                    raise CycleError("exact ordered five-slot registry required")
+                store = self._make_state_store()
+                state, state_bytes = store.load_with_bytes()
+                if type(state) is not Ready:
+                    raise CycleError("ACTIVE lifecycle requires operator reconciliation")
+                count = self._observe_player_count()
+                if type(count) is not int or count != 0:
+                    raise CycleError("pre-existing player blocks diagnostic launch")
+                self._approvals.validate_then_consume(
+                    ApprovalAction.LAUNCH_WINDOW_BINDING_DIAGNOSTIC,
+                    self._candidate_tree(),
+                    state,
+                    state_bytes,
+                )
+                supervisor = self._make_supervisor(store, DEFAULT_MUTEX_NAME)
+                binding = supervisor.start(slots[state.next_slot])
+            except BaseException:
+                failure = DiagnosticFailureStage.LAUNCH
+
+            if binding is not None and supervisor is not None:
+                try:
+                    result = self._observe(supervisor, binding)
+                    if type(result) is not HomeDiagnosticResult:
+                        failure = DiagnosticFailureStage.RECOGNITION
+                except BasePilotCaptureError:
+                    failure = DiagnosticFailureStage.CAPTURE
+                except BasePilotRecognitionError:
+                    failure = DiagnosticFailureStage.RECOGNITION
+                except BaseException:
+                    failure = DiagnosticFailureStage.RECOGNITION
+
+                try:
+                    supervisor.stop(binding, None)
+                except BaseException:
+                    failure = DiagnosticFailureStage.CLEANUP
+
             try:
                 lease.release()
-            except BaseException as exc:
+            except BaseException:
                 self._disabled = True
-                raise CycleError("lifecycle process is permanently disabled") from exc
+                failure = DiagnosticFailureStage.CLEANUP
+
+        if failure is not None:
+            _raise_diagnostic_stage(failure)
+        if type(result) is not HomeDiagnosticResult:
+            _raise_diagnostic_stage(DiagnosticFailureStage.RECOGNITION)
+        return result

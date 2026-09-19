@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 import pytest
 
+import clash_rush_rebuild.cycle as cycle_module
+from clash_rush_rebuild.basepilot_vision import BasePilotRecognitionError
+from clash_rush_rebuild.basepilot_window import BasePilotCaptureError
 from clash_rush_rebuild.cycle import CycleError, InertCycle, NoInputDiagnosticCycle
 from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
@@ -299,6 +302,7 @@ def _diagnostic_cycle(
     *,
     approval_fails: bool = False,
     observation_fails: bool = False,
+    observation_error: BaseException | None = None,
     observation_result: object = HomeDiagnosticResult.HOME,
     player_count: object = 0,
     state: Ready | Active = Ready(0),
@@ -333,6 +337,8 @@ def _diagnostic_cycle(
 
     def observe(_supervisor, _binding) -> HomeDiagnosticResult:
         events.append("observe")
+        if observation_error is not None:
+            raise observation_error
         if observation_fails:
             raise RuntimeError("recognition failed")
         return observation_result
@@ -382,9 +388,10 @@ def test_no_input_diagnostic_stops_when_recognition_raises() -> None:
         observation_fails=True,
     )
 
-    with pytest.raises(RuntimeError, match="recognition failed"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.RECOGNITION
     assert events[-3:] == ["observe", "stop", "mutex:release"]
 
 
@@ -392,9 +399,10 @@ def test_no_input_diagnostic_refuses_launch_when_approval_fails() -> None:
     events: list[str] = []
     cycle = _diagnostic_cycle(events, FakeLease(events), approval_fails=True)
 
-    with pytest.raises(RuntimeError, match="approval refused"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
     assert "supervisor:create" not in events
     assert not any(event.startswith("start:") for event in events)
     assert events[-1] == "mutex:release"
@@ -404,9 +412,10 @@ def test_no_input_diagnostic_abandoned_mutex_is_read_only() -> None:
     events: list[str] = []
     cycle = _diagnostic_cycle(events, FakeLease(events, abandoned=True))
 
-    with pytest.raises(CycleError, match="reconciliation"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
     assert "state:load" in events
     assert "supervisor:create" not in events
     assert "observe" not in events
@@ -435,9 +444,11 @@ def test_no_input_diagnostic_refuses_unsafe_prelaunch_state(
         player_count=player_count,
     )
 
-    with pytest.raises(BaseException, match=message):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert message not in str(raised.value)
     assert "supervisor:create" not in events
     assert "observe" not in events
 
@@ -446,9 +457,10 @@ def test_no_input_diagnostic_start_failure_never_observes() -> None:
     events: list[str] = []
     cycle = _diagnostic_cycle(events, FakeLease(events), start_fails=True)
 
-    with pytest.raises(RuntimeError, match="start failed"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
     assert "observe" not in events
     assert "stop" not in events
 
@@ -457,9 +469,10 @@ def test_no_input_diagnostic_stop_ready_failure_suppresses_scalar() -> None:
     events: list[str] = []
     cycle = _diagnostic_cycle(events, FakeLease(events), stop_fails=True)
 
-    with pytest.raises(RuntimeError, match="READY commit failed"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CLEANUP
     assert "observe" in events
     assert events[-1] == "mutex:release"
 
@@ -468,11 +481,13 @@ def test_no_input_diagnostic_release_failure_suppresses_scalar_and_disables_reus
     events: list[str] = []
     cycle = _diagnostic_cycle(events, FakeLease(events, fail_release=True))
 
-    with pytest.raises(CycleError, match="permanently disabled"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
-    with pytest.raises(CycleError, match="permanently disabled"):
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CLEANUP
+    with pytest.raises(cycle_module.DiagnosticStageError) as reused:
         cycle.visit_once()
 
+    assert reused.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
     assert events.count("mutex:acquire") == 1
 
 
@@ -480,7 +495,72 @@ def test_no_input_diagnostic_rejects_malformed_observation_after_stop() -> None:
     events: list[str] = []
     cycle = _diagnostic_cycle(events, FakeLease(events), observation_result="HOME")
 
-    with pytest.raises(CycleError, match="malformed"):
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
         cycle.visit_once()
 
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.RECOGNITION
     assert events[-2:] == ["stop", "mutex:release"]
+
+
+def test_no_input_diagnostic_preserves_closed_capture_stage() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_error=BasePilotCaptureError("private capture detail"),
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CAPTURE
+    assert str(raised.value) == "CAPTURE"
+    assert "private" not in str(raised.value)
+    assert events[-3:] == ["observe", "stop", "mutex:release"]
+
+
+def test_no_input_diagnostic_preserves_closed_recognition_stage() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_error=BasePilotRecognitionError("private recognition detail"),
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.RECOGNITION
+    assert str(raised.value) == "RECOGNITION"
+    assert "private" not in str(raised.value)
+
+
+def test_no_input_diagnostic_cleanup_overrides_capture_failure() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_error=BasePilotCaptureError("private capture detail"),
+        stop_fails=True,
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CLEANUP
+    assert "observe" in events
+    assert events[-1] == "mutex:release"
+
+
+def test_no_input_diagnostic_mutex_acquisition_failure_is_launch_without_release() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events))
+    cycle._runtime.acquire_mutex = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("private mutex detail")
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert "mutex:release" not in events

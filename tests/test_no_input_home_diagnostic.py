@@ -215,6 +215,28 @@ def test_production_observation_clears_full_frame_after_recognition(monkeypatch)
     assert np.count_nonzero(frame) == 0
 
 
+def test_production_observation_preserves_sanitized_capture_failure_stage(
+    monkeypatch,
+) -> None:
+    binding = _binding(1280, 720)
+    subject = WindowService(
+        binding,
+        lambda _selected: (1280, 720, bytes(1280 * 720 * 4)),
+    )
+    monkeypatch.setattr(
+        subject,
+        "screenshot",
+        lambda: (_ for _ in ()).throw(BasePilotCaptureError("private capture detail")),
+    )
+
+    with pytest.raises(BasePilotCaptureError) as raised:
+        NoInputHomeDiagnosticController(subject).observe()
+
+    assert str(raised.value) == "Home capture failed"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
 def test_production_observation_sanitizes_recognition_failure_traceback(monkeypatch) -> None:
     binding = _binding(1280, 720)
     frame = np.ones((720, 1280, 3), dtype=np.uint8)
@@ -232,6 +254,7 @@ def test_production_observation_sanitizes_recognition_failure_traceback(monkeypa
     with pytest.raises(BasePilotRecognitionError) as raised:
         NoInputHomeDiagnosticController(subject).observe()
 
+    assert str(raised.value) == "Home recognition failed"
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
     assert np.count_nonzero(frame) == 0

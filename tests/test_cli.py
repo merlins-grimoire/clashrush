@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 
@@ -7,6 +8,7 @@ import cv2
 import pytest
 
 import clash_rush_rebuild.cli as cli_module
+import clash_rush_rebuild.cycle as cycle_module
 from clash_rush_rebuild.cli import build_native_state_store, main
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
 from clash_rush_rebuild.lifecycle_state import Ready
@@ -334,6 +336,38 @@ def test_private_diagnostic_child_emits_only_closed_home_scalar(capsys) -> None:
     assert captured.err == ""
 
 
+def test_private_diagnostic_child_emits_only_closed_stage_failure(capsys) -> None:
+    class FailingCycle:
+        def visit_once(self) -> HomeDiagnosticResult:
+            raise cycle_module.DiagnosticStageError(
+                cycle_module.DiagnosticFailureStage.CAPTURE
+            )
+
+    status = main(
+        ["diagnose-home-child", "--project-root", "X", "--slots", "Y"],
+        diagnostic_cycle_builder=lambda _root, _slots: FailingCycle(),
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == "CAPTURE\n"
+
+
+def test_private_diagnostic_child_maps_composition_failure_to_launch(capsys) -> None:
+    status = main(
+        ["diagnose-home-child", "--project-root", "X", "--slots", "Y"],
+        diagnostic_cycle_builder=lambda _root, _slots: (_ for _ in ()).throw(
+            RuntimeError("private composition detail")
+        ),
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == "LAUNCH\n"
+
+
 def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(capsys) -> None:
     calls: list[tuple[object, ...]] = []
 
@@ -432,6 +466,126 @@ def test_public_diagnostic_rejects_invalid_status_output_combinations(
         diagnostic_child_runner=lambda *_args, **_kwargs: completed,
     ) == 1
     assert capsys.readouterr().out == ""
+
+
+def _failure_record(
+    classification: str,
+    child_status: int | None,
+    child_wait_completed: bool,
+) -> str:
+    return json.dumps(
+        {
+            "classification": classification,
+            "child_status": child_status,
+            "child_wait_completed": child_wait_completed,
+        },
+        separators=(",", ":"),
+    ) + "\n"
+
+
+def test_diagnostic_harness_accepts_only_exact_closed_failure_record() -> None:
+    record = _failure_record("CAPTURE", 2, True)
+
+    evidence = cli_module.parse_diagnostic_failure_record(record)
+
+    assert evidence == ("CAPTURE", 2, True)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "",
+        "not-json\n",
+        _failure_record("CAPTURE", 2, True) + "extra\n",
+        '{"classification":"CAPTURE","child_status":2,"child_wait_completed":true,"extra":1}\n',
+        '{"classification":"PRIVATE","child_status":2,"child_wait_completed":true}\n',
+        '{"classification":"CAPTURE","child_status":true,"child_wait_completed":true}\n',
+        '{"classification":"CAPTURE","child_status":2,"child_wait_completed":1}\n',
+        '{"child_status":2,"classification":"CAPTURE","child_wait_completed":true}\n',
+        _failure_record("CAPTURE", None, False),
+        _failure_record("LAUNCH", 2, False),
+        _failure_record("TIMEOUT", None, False),
+        _failure_record("UNEXPECTED_STDERR", 1, False),
+    ],
+)
+def test_diagnostic_harness_rejects_missing_malformed_or_noncanonical_record(
+    record: str,
+) -> None:
+    with pytest.raises(ValueError, match="malformed"):
+        cli_module.parse_diagnostic_failure_record(record)
+
+
+@pytest.mark.parametrize("stage", ["LAUNCH", "CAPTURE", "RECOGNITION", "CLEANUP"])
+def test_public_diagnostic_forwards_exact_child_stage_as_sanitized_json(
+    stage: str,
+    capsys,
+) -> None:
+    completed = CompletedProcess([], 2, "", f"{stage}\n")
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=lambda *_args, **_kwargs: completed,
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _failure_record(stage, 2, True)
+
+
+@pytest.mark.parametrize(
+    ("completed", "classification", "child_status"),
+    [
+        (CompletedProcess([], 0, "HOME\n", "private detail"), "UNEXPECTED_STDERR", 0),
+        (CompletedProcess([], 1, "UNKNOWN\n", "CAPTURE\n"), "UNEXPECTED_STDERR", 1),
+        (CompletedProcess([], 2, "extra", "CAPTURE\n"), "UNEXPECTED_STDERR", 2),
+        (CompletedProcess([], 3, "", ""), "SCALAR_PARSE", 3),
+        (CompletedProcess([], 0, "HOME\nextra\n", ""), "SCALAR_PARSE", 0),
+        (CompletedProcess([], True, "", ""), "SCALAR_PARSE", None),
+    ],
+)
+def test_public_diagnostic_classification_precedence_is_closed(
+    completed: CompletedProcess[str],
+    classification: str,
+    child_status: int | None,
+    capsys,
+) -> None:
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=lambda *_args, **_kwargs: completed,
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _failure_record(classification, child_status, True)
+    assert "private detail" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("error", "classification", "wait_completed"),
+    [
+        (OSError("private spawn detail"), "LAUNCH", False),
+        (TimeoutExpired(["private", "command"], 30), "TIMEOUT", True),
+        (RuntimeError("private wait detail"), "CLEANUP", False),
+    ],
+)
+def test_public_diagnostic_classifies_runner_failures_without_raw_details(
+    error: BaseException,
+    classification: str,
+    wait_completed: bool,
+    capsys,
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise error
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=fail,
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _failure_record(classification, None, wait_completed)
+    assert "private" not in captured.err
 
 
 def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
