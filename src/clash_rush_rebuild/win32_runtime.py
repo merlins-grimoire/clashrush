@@ -26,6 +26,7 @@ TOKEN_QUERY = 0x0008
 TOKEN_USER = 1
 JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+DUPLICATE_SAME_ACCESS = 0x00000002
 
 
 class Win32RuntimeError(RuntimeError):
@@ -63,6 +64,9 @@ class RuntimeApi(Protocol):
     def is_process_in_job(self, process: object, job: object) -> bool: ...
     def resume_thread(self, thread: object) -> int: ...
     def terminate_job_object(self, job: object, exit_code: int) -> bool: ...
+    def terminate_process(self, process: object, exit_code: int) -> bool: ...
+    def duplicate_process_handle(self, process: object) -> object | None: ...
+    def process_creation_time(self, process: object) -> int: ...
     def job_active_process_count(self, job: object) -> int: ...
 
 
@@ -184,6 +188,13 @@ class PROCESS_INFORMATION(ctypes.Structure):
     ]
 
 
+class FILETIME(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", wintypes.DWORD),
+        ("dwHighDateTime", wintypes.DWORD),
+    ]
+
+
 class NativeWin32Api:
     """ctypes adapter for the exact native operations used by :class:`Win32Runtime`."""
 
@@ -258,6 +269,26 @@ class NativeWin32Api:
         k32.ResumeThread.restype = wintypes.DWORD
         k32.TerminateJobObject.argtypes = [handle, wintypes.UINT]
         k32.TerminateJobObject.restype = wintypes.BOOL
+        k32.TerminateProcess.argtypes = [handle, wintypes.UINT]
+        k32.TerminateProcess.restype = wintypes.BOOL
+        k32.DuplicateHandle.argtypes = [
+            handle,
+            handle,
+            handle,
+            ctypes.POINTER(handle),
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        k32.DuplicateHandle.restype = wintypes.BOOL
+        k32.GetProcessTimes.argtypes = [
+            handle,
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+        ]
+        k32.GetProcessTimes.restype = wintypes.BOOL
 
         adv.OpenProcessToken.argtypes = [
             handle,
@@ -461,6 +492,41 @@ class NativeWin32Api:
     def terminate_job_object(self, job: object, exit_code: int) -> bool:
         return bool(self._kernel32.TerminateJobObject(job, exit_code))
 
+    def terminate_process(self, process: object, exit_code: int) -> bool:
+        return bool(self._kernel32.TerminateProcess(process, exit_code))
+
+    def duplicate_process_handle(self, process: object) -> object | None:
+        duplicate = wintypes.HANDLE()
+        current = self._kernel32.GetCurrentProcess()
+        if not self._kernel32.DuplicateHandle(
+            current,
+            process,
+            current,
+            ctypes.byref(duplicate),
+            0,
+            False,
+            DUPLICATE_SAME_ACCESS,
+        ):
+            return None
+        return duplicate
+
+    def process_creation_time(self, process: object) -> int:
+        creation = FILETIME()
+        exit_time = FILETIME()
+        kernel = FILETIME()
+        user = FILETIME()
+        if not self._kernel32.GetProcessTimes(
+            process,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            raise Win32RuntimeError(
+                f"GetProcessTimes failed with error {self.get_last_error()}"
+            )
+        return (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+
     def job_active_process_count(self, job: object) -> int:
         information = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
         if not self._kernel32.QueryInformationJobObject(
@@ -558,6 +624,22 @@ class Win32Runtime:
     def terminate_job(self, job: object) -> None:
         if self._api.terminate_job_object(job, 1) is not True:
             raise Win32RuntimeError("TerminateJobObject failed")
+
+    def terminate_process(self, process: object) -> None:
+        if self._api.terminate_process(process, 1) is not True:
+            raise Win32RuntimeError("TerminateProcess failed")
+
+    def duplicate_process_handle(self, process: object) -> object:
+        duplicate = self._api.duplicate_process_handle(process)
+        if duplicate is None or duplicate == 0:
+            raise Win32RuntimeError("DuplicateHandle failed")
+        return duplicate
+
+    def process_creation_time(self, process: object) -> int:
+        result = self._api.process_creation_time(process)
+        if type(result) is not int or result <= 0:
+            raise Win32RuntimeError("invalid process creation time")
+        return result
 
     def wait_process(self, process: object, milliseconds: int) -> bool:
         if type(milliseconds) is not int or milliseconds < 0:

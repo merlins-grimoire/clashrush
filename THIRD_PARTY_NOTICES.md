@@ -89,3 +89,39 @@ The complete licenses remain available in ignored local checkouts under `referen
 ## First-party source reference
 
 The published Clash Rush Home engine is pinned separately at https://github.com/merlins-grimoire/autoclasher commit `949497bf0a543a43ec6ef39a8c897e366bc10362`. It is first-party project source, not listed as an MIT third-party donor. Its ignored frozen checkout is `references/ClashRush`. Slice 1 adapts its strict registry grammar, exact PID/title/HWND binding, native process discovery, PrintWindow capture, and near-black rejection. Launcher-icon input, Android-debug state, broad process stopping, and frame persistence were not imported.
+
+## Hermes Agent atomic Job ownership transplant
+
+`src/clash_rush_rebuild/diagnostic_child_job.py` and
+`tests/test_diagnostic_child_job.py` copy and narrowly adapt the permanent
+thread-gated `_winapi.CreateProcess` wrapper, install/reload marker pattern,
+`CREATE_SUSPENDED -> AssignProcessToJobObject -> ResumeThread` ordering, and
+behavioral tests from Nous Research's Hermes Agent PR #69076 at commit
+`c10c89f74637cc945e9840705e0209df29aa08c8` (tree
+`e10e7738c99c31e16452be7fd116517d9b04da17`). The source paths are
+`hermes_cli/_subprocess_compat.py` and
+`tests/test_windows_terminal_kill_on_exit_job.py`. Local adaptations replace
+the donor's process-wide fail-open Job with one private fail-closed diagnostic
+Job, retained-handle retirement proof, and bounded pipe draining.
+
+> MIT License
+>
+> Copyright (c) 2025 Nous Research
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.

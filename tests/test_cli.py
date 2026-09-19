@@ -10,6 +10,7 @@ import pytest
 import clash_rush_rebuild.cli as cli_module
 import clash_rush_rebuild.cycle as cycle_module
 from clash_rush_rebuild.cli import build_native_state_store, main
+from clash_rush_rebuild.diagnostic_child_job import DiagnosticChildOutcome
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import VisitResult
@@ -406,6 +407,37 @@ def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(caps
     }
 
 
+def test_public_diagnostic_uses_atomic_owned_runner_and_reports_truthful_wait(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls: list[tuple[list[str], int]] = []
+
+    def run(command, *, timeout):
+        calls.append((command, timeout))
+        return DiagnosticChildOutcome(None, None, None, True, False)
+
+    monkeypatch.setattr(cli_module, "run_owned_diagnostic_child", run)
+
+    assert main(
+        [
+            "diagnose-home",
+            "--project-root",
+            "X",
+            "--slots",
+            "Y",
+            "--timeout-seconds",
+            "45",
+        ]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert len(calls) == 1
+    assert calls[0][1] == 45
+    assert captured.out == ""
+    assert captured.err == _failure_record("CLEANUP", None, True)
+
+
 def test_public_diagnostic_rejects_partial_output(capsys) -> None:
     def extra_output(command, **_kwargs):
         return CompletedProcess(command, 0, "HOME\nextra\n", "")
@@ -646,10 +678,13 @@ class _InertDiagnosticStream:
 
 
 def _run_with_inert_popen(monkeypatch, failure: str | None, capsys) -> tuple[int, str, str]:
-    def popen(command, **kwargs):
-        return _InertDiagnosticPopen(command, failure=failure, **kwargs)
+    def run(_command, *, timeout):
+        del timeout
+        if failure is None:
+            return DiagnosticChildOutcome(0, "HOME\n", "", True, True)
+        return DiagnosticChildOutcome(None, None, None, False, False)
 
-    monkeypatch.setattr(cli_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(cli_module, "run_owned_diagnostic_child", run)
     status = main(
         ["diagnose-home", "--project-root", "X", "--slots", "Y"],
     )
@@ -666,7 +701,13 @@ def test_standard_runner_maps_pre_createprocess_constructor_failure_to_cleanup(
             self._child_created = False
             raise OSError("private constructor detail")
 
-    monkeypatch.setattr(cli_module.subprocess, "Popen", FailConstructor)
+    monkeypatch.setattr(
+        cli_module,
+        "run_owned_diagnostic_child",
+        lambda *_args, **_kwargs: DiagnosticChildOutcome(
+            None, None, None, False, False
+        ),
+    )
 
     assert main(
         ["diagnose-home", "--project-root", "X", "--slots", "Y"],
@@ -688,7 +729,13 @@ def test_standard_runner_maps_createprocess_then_pipe_cleanup_failure_to_cleanup
             self.create_process_succeeded = True
             raise OSError("private post-create pipe cleanup detail")
 
-    monkeypatch.setattr(cli_module.subprocess, "Popen", FailAfterCreate)
+    monkeypatch.setattr(
+        cli_module,
+        "run_owned_diagnostic_child",
+        lambda *_args, **_kwargs: DiagnosticChildOutcome(
+            None, None, None, True, False
+        ),
+    )
 
     assert main(
         ["diagnose-home", "--project-root", "X", "--slots", "Y"],
@@ -696,7 +743,7 @@ def test_standard_runner_maps_createprocess_then_pipe_cleanup_failure_to_cleanup
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == _failure_record("CLEANUP", None, False)
+    assert captured.err == _failure_record("CLEANUP", None, True)
     assert "private" not in captured.err
 
 

@@ -27,6 +27,10 @@ from .cycle import (
     InertCycle,
     NoInputDiagnosticCycle,
 )
+from .diagnostic_child_job import (
+    DiagnosticChildOutcome,
+    run_owned_diagnostic_child,
+)
 from .guided_setup import export_synthetic_installation, run_guided_setup
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
 from .lifecycle_state import LifecycleStateStore
@@ -72,7 +76,11 @@ def _diagnostic_failure_semantics_are_valid(
     if classification in {"CAPTURE", "RECOGNITION"}:
         return child_status == 2 and child_wait_completed is True
     if classification in {"LAUNCH", "CLEANUP"}:
-        return (child_status, child_wait_completed) in {(2, True), (None, False)}
+        return (child_status, child_wait_completed) in {
+            (2, True),
+            (None, False),
+            (None, True),
+        }
     return child_wait_completed is True
 
 
@@ -531,7 +539,6 @@ def main(
                 or not 1 <= args.timeout_seconds <= 600
             ):
                 return 2
-            runner = diagnostic_child_runner or subprocess.run
             command = [
                 sys.executable,
                 "-m",
@@ -543,22 +550,37 @@ def main(
                 args.slots,
             ]
             try:
-                completed = runner(
-                    command,
-                    timeout=args.timeout_seconds,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
+                if diagnostic_child_runner is None:
+                    completed = run_owned_diagnostic_child(
+                        command,
+                        timeout=args.timeout_seconds,
+                    )
+                else:
+                    completed = diagnostic_child_runner(
+                        command,
+                        timeout=args.timeout_seconds,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
             except BaseException:
                 return _emit_diagnostic_failure("CLEANUP", None, False)
-            child_status = (
-                completed.returncode
-                if type(completed.returncode) is int
-                else None
-            )
-            stdout = completed.stdout
-            stderr = completed.stderr
+            if type(completed) is DiagnosticChildOutcome:
+                if completed.cleanup_succeeded is not True:
+                    return _emit_diagnostic_failure(
+                        "CLEANUP", None, completed.child_wait_completed
+                    )
+                child_status = completed.returncode
+                stdout = completed.stdout
+                stderr = completed.stderr
+            else:
+                child_status = (
+                    completed.returncode
+                    if type(completed.returncode) is int
+                    else None
+                )
+                stdout = completed.stdout
+                stderr = completed.stderr
             valid = {
                 (0, "HOME\n"): HomeDiagnosticResult.HOME,
                 (1, "BUILDER\n"): HomeDiagnosticResult.BUILDER,

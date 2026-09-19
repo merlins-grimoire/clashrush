@@ -42,7 +42,10 @@ class FakeRuntimeApi:
         self.in_job_result = True
         self.resume_result = 1
         self.terminate_ok = True
+        self.process_terminate_ok = True
         self.active_count_result = 0
+        self.duplicate_result: object | None = "retained-process"
+        self.creation_time_result = 123456
 
     def current_operator_sid(self) -> str:
         self.calls.append(("sid",))
@@ -120,9 +123,38 @@ class FakeRuntimeApi:
         self.calls.append(("job:terminate", job, exit_code))
         return self.terminate_ok
 
+    def terminate_process(self, process: object, exit_code: int) -> bool:
+        self.calls.append(("process:terminate", process, exit_code))
+        return self.process_terminate_ok
+
+    def duplicate_process_handle(self, process: object) -> object | None:
+        self.calls.append(("process:duplicate", process))
+        return self.duplicate_result
+
+    def process_creation_time(self, process: object) -> int:
+        self.calls.append(("process:creation-time", process))
+        return self.creation_time_result
+
     def job_active_process_count(self, job: object) -> int:
         self.calls.append(("job:active-count", job))
         return self.active_count_result
+
+
+def test_runtime_exposes_retained_process_identity_and_termination() -> None:
+    api = FakeRuntimeApi()
+    runtime = Win32Runtime(api)
+
+    retained = runtime.duplicate_process_handle("raw-process")
+    creation_time = runtime.process_creation_time(retained)
+    runtime.terminate_process(retained)
+
+    assert retained == "retained-process"
+    assert creation_time == 123456
+    assert api.calls == [
+        ("process:duplicate", "raw-process"),
+        ("process:creation-time", "retained-process"),
+        ("process:terminate", "retained-process", 1),
+    ]
 
 
 def test_new_mutex_uses_protected_system_and_operator_dacl_before_waiting() -> None:
@@ -423,6 +455,18 @@ def test_runtime_operations_fail_closed_on_native_false_or_invalid_results() -> 
     with pytest.raises(Win32RuntimeError, match="TerminateJobObject"):
         runtime.terminate_job("job")
 
+    api.process_terminate_ok = False
+    with pytest.raises(Win32RuntimeError, match="TerminateProcess"):
+        runtime.terminate_process("process")
+
+    api.duplicate_result = None
+    with pytest.raises(Win32RuntimeError, match="DuplicateHandle"):
+        runtime.duplicate_process_handle("process")
+
+    api.creation_time_result = True
+    with pytest.raises(Win32RuntimeError, match="creation time"):
+        runtime.process_creation_time("process")
+
     api.close_ok = False
     with pytest.raises(Win32RuntimeError, match="CloseHandle"):
         runtime.close_handle("process")
@@ -456,11 +500,14 @@ def test_native_unique_mutex_and_harmless_suspended_job_process_smoke() -> None:
     job = runtime.create_job()
     process: object | None = None
     thread: object | None = None
+    retained: object | None = None
     try:
         runtime.set_kill_on_close(job)
         created = runtime.create_suspended(executable, command_line)
         process = created.process_handle
         thread = created.thread_handle
+        retained = runtime.duplicate_process_handle(process)
+        assert runtime.process_creation_time(retained) > 0
         runtime.assign_to_job(job, process)
         assert runtime.is_process_in_job(process, job) is True
         assert runtime.resume_thread(thread) == 1
@@ -474,4 +521,6 @@ def test_native_unique_mutex_and_harmless_suspended_job_process_smoke() -> None:
             api.close_handle(thread)
         if process is not None:
             api.close_handle(process)
+        if retained is not None:
+            api.close_handle(retained)
         api.close_handle(job)
