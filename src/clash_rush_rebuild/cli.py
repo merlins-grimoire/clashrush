@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import secrets
 import subprocess
@@ -463,7 +465,18 @@ def main(
     diagnostic_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
     diagnostic_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
-    args = _parser().parse_args(argv)
+    diagnostic_argv = sys.argv[1:] if argv is None else argv
+    if tuple(diagnostic_argv[:1]) == ("diagnose-home",):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                args = _parser().parse_args(diagnostic_argv)
+        except SystemExit as exc:
+            if exc.code != 2:
+                raise
+            print("diagnostic arguments invalid", file=sys.stderr)
+            raise SystemExit(2) from None
+    else:
+        args = _parser().parse_args(argv)
     if args.command == "visit-one" and args.owner_approved is not True:
         return 2
 

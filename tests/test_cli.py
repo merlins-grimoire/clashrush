@@ -380,9 +380,9 @@ def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(caps
         [
             "diagnose-home",
             "--project-root",
-            "X",
+            "C:/VALID_PRIVATE_ROOT_MARKER/account-one",
             "--slots",
-            "Y",
+            "VALID_PRIVATE_SLOT_MARKER.toml",
             "--timeout-seconds",
             "45",
         ],
@@ -395,9 +395,9 @@ def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(caps
     assert command[-5:] == [
         "diagnose-home-child",
         "--project-root",
-        "X",
+        "C:/VALID_PRIVATE_ROOT_MARKER/account-one",
         "--slots",
-        "Y",
+        "VALID_PRIVATE_SLOT_MARKER.toml",
     ]
     assert kwargs == {
         "timeout": 45,
@@ -405,6 +405,49 @@ def test_public_diagnostic_bounds_installed_child_and_forwards_exact_scalar(caps
         "capture_output": True,
         "text": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("rejected_arguments", "private_marker"),
+    [
+        (["--private-option", "C:/PRIVATE_PATH_MARKER/account-one"], "PRIVATE_PATH_MARKER"),
+        (["--timeout-seconds", "PRIVATE_TIMEOUT_MARKER"], "PRIVATE_TIMEOUT_MARKER"),
+    ],
+)
+def test_public_diagnostic_sanitizes_parser_failures_before_child_launch(
+    rejected_arguments: list[str],
+    private_marker: str,
+    capsys,
+    monkeypatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        cli_module.sys,
+        "argv",
+        [
+            "clash-rush-rebuild",
+            "diagnose-home",
+            "--project-root",
+            "C:/PRIVATE_ROOT_MARKER/account-one",
+            "--slots",
+            "PRIVATE_SLOT_MARKER.toml",
+            *rejected_arguments,
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main(
+            diagnostic_child_runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 2
+    assert calls == []
+    assert captured.out == ""
+    assert captured.err == "diagnostic arguments invalid\n"
+    assert private_marker not in captured.err
+    assert "PRIVATE_ROOT_MARKER" not in captured.err
+    assert "PRIVATE_SLOT_MARKER" not in captured.err
 
 
 def test_public_diagnostic_uses_atomic_owned_runner_and_reports_truthful_wait(
