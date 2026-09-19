@@ -588,6 +588,137 @@ def test_public_diagnostic_classifies_runner_failures_without_raw_details(
     assert "private" not in captured.err
 
 
+class _InertDiagnosticPopen:
+    def __init__(
+        self,
+        command,
+        *,
+        failure: str | None = None,
+        **_kwargs,
+    ) -> None:
+        self.args = command
+        self.returncode = 0
+        self._failure = failure
+        self._communicate_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        if self._failure == "context-exit":
+            raise OSError("private context-exit detail")
+        return None
+
+    def communicate(self, _input=None, timeout=None):
+        self._communicate_calls += 1
+        if self._failure in {"kill", "post-kill-communicate", "timeout"}:
+            if self._communicate_calls == 1:
+                raise TimeoutExpired(self.args, timeout)
+            if self._failure == "post-kill-communicate":
+                raise OSError("private post-kill communicate detail")
+        return "HOME\n", ""
+
+    def kill(self) -> None:
+        if self._failure == "kill":
+            raise OSError("private kill detail")
+
+    def wait(self) -> int:
+        return self.returncode
+
+    def poll(self) -> int:
+        return self.returncode
+
+
+def _run_with_inert_popen(monkeypatch, failure: str | None, capsys) -> tuple[int, str, str]:
+    def popen(command, **kwargs):
+        return _InertDiagnosticPopen(command, failure=failure, **kwargs)
+
+    monkeypatch.setattr(cli_module.subprocess, "Popen", popen)
+    status = main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+    )
+    captured = capsys.readouterr()
+    return status, captured.out, captured.err
+
+
+def test_standard_runner_proves_constructor_oserror_is_pre_child_launch(
+    monkeypatch,
+    capsys,
+) -> None:
+    class FailConstructor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._child_created = False
+            raise OSError("private constructor detail")
+
+    monkeypatch.setattr(cli_module.subprocess, "Popen", FailConstructor)
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _failure_record("LAUNCH", None, False)
+    assert "private" not in captured.err
+
+
+def test_standard_runner_does_not_claim_launch_when_constructor_created_child(
+    monkeypatch,
+    capsys,
+) -> None:
+    class FailAfterCreate:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._child_created = True
+            raise OSError("private post-create constructor detail")
+
+    monkeypatch.setattr(cli_module.subprocess, "Popen", FailAfterCreate)
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _failure_record("CLEANUP", None, False)
+    assert "private" not in captured.err
+
+
+@pytest.mark.parametrize("failure", ["kill", "post-kill-communicate", "context-exit"])
+def test_standard_runner_maps_post_spawn_oserror_to_cleanup(
+    failure: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    status, stdout, stderr = _run_with_inert_popen(monkeypatch, failure, capsys)
+
+    assert status == 1
+    assert stdout == ""
+    assert stderr == _failure_record("CLEANUP", None, False)
+    assert "private" not in stderr
+
+
+def test_standard_runner_reports_timeout_only_after_successful_kill_and_wait(
+    monkeypatch,
+    capsys,
+) -> None:
+    status, stdout, stderr = _run_with_inert_popen(monkeypatch, "timeout", capsys)
+
+    assert status == 1
+    assert stdout == ""
+    assert stderr == _failure_record("TIMEOUT", None, True)
+
+
+def test_standard_runner_preserves_ordinary_scalar_with_inert_popen(
+    monkeypatch,
+    capsys,
+) -> None:
+    status, stdout, stderr = _run_with_inert_popen(monkeypatch, None, capsys)
+
+    assert status == 0
+    assert stdout == "HOME\n"
+    assert stderr == ""
+
+
 def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
     monkeypatch,
     tmp_path: Path,

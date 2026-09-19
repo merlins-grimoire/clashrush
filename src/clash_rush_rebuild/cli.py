@@ -65,6 +65,25 @@ def _diagnostic_failure_record(
     return json.dumps(record, separators=(",", ":")) + "\n"
 
 
+def _standard_run_reached_process_context(error: OSError) -> bool | None:
+    """Report whether stdlib ``run`` established or entered its Popen."""
+    run_code = getattr(subprocess.run, "__code__", None)
+    traceback = error.__traceback__
+    inside_run = False
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if run_code is not None and frame.f_code is run_code:
+            inside_run = True
+            if "process" in frame.f_locals:
+                return True
+        elif inside_run and "self" in frame.f_locals:
+            child_created = getattr(frame.f_locals["self"], "_child_created", None)
+            if type(child_created) is bool:
+                return child_created
+        traceback = traceback.tb_next
+    return None
+
+
 def _diagnostic_failure_semantics_are_valid(
     classification: str,
     child_status: int | None,
@@ -555,8 +574,14 @@ def main(
                 )
             except subprocess.TimeoutExpired:
                 return _emit_diagnostic_failure("TIMEOUT", None, True)
-            except OSError:
-                return _emit_diagnostic_failure("LAUNCH", None, False)
+            except OSError as exc:
+                reached_process = (
+                    _standard_run_reached_process_context(exc)
+                    if runner is subprocess.run
+                    else False
+                )
+                classification = "LAUNCH" if reached_process is False else "CLEANUP"
+                return _emit_diagnostic_failure(classification, None, False)
             except BaseException:
                 return _emit_diagnostic_failure("CLEANUP", None, False)
             child_status = (
