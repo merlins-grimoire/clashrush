@@ -3,10 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 
+import cv2
+import pytest
+
 import clash_rush_rebuild.cli as cli_module
 from clash_rush_rebuild.cli import build_native_state_store, main
+from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
+from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import VisitResult
 from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
+from clash_rush_rebuild.registry import Slot
 
 
 class FakeCycle:
@@ -384,3 +390,139 @@ def test_public_diagnostic_rejects_partial_output_and_timeout(capsys) -> None:
         diagnostic_child_runner=timeout,
     ) == 1
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [(1, "BUILDER\n"), (1, "UNKNOWN\n")],
+)
+def test_public_diagnostic_forwards_each_closed_nonhome_scalar(
+    returncode: int,
+    stdout: str,
+    capsys,
+) -> None:
+    completed = CompletedProcess([], returncode, stdout, "")
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=lambda *_args, **_kwargs: completed,
+    ) == 1
+    assert capsys.readouterr().out == stdout
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (0, "BUILDER\n", ""),
+        (1, "HOME\n", ""),
+        (1, "UNKNOWN\n", "private detail"),
+        (2, "", ""),
+    ],
+)
+def test_public_diagnostic_rejects_invalid_status_output_combinations(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    capsys,
+) -> None:
+    completed = CompletedProcess([], returncode, stdout, stderr)
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"],
+        diagnostic_child_runner=lambda *_args, **_kwargs: completed,
+    ) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    fixture = cv2.imread(
+        str(Path(__file__).parent / "fixtures" / "donor" / "home_screen.png"),
+        cv2.IMREAD_COLOR,
+    )
+    assert fixture is not None
+    bgra = cv2.cvtColor(fixture, cv2.COLOR_BGR2BGRA).tobytes()
+    slots = tuple(
+        Slot(index, f"Instance {index}", f"Slot {index}", 1728, 1080, 240)
+        for index in range(5)
+    )
+    identity = ProcessIdentity(100, 9001)
+    binding = PlayerBinding(identity, identity, 101, 102, 1728, 1080, "a" * 32)
+
+    class Lease:
+        abandoned = False
+
+        def require_usable(self) -> None:
+            events.append("mutex:usable")
+
+        def release(self) -> None:
+            events.append("mutex:release")
+
+    class Runtime:
+        def acquire_mutex(self) -> Lease:
+            return Lease()
+
+    class Snapshot:
+        identities = ()
+
+        def close(self) -> None:
+            events.append("snapshot:close")
+
+    class Host:
+        def complete_player_snapshot(self) -> Snapshot:
+            return Snapshot()
+
+    class Store:
+        def load_with_bytes(self):
+            return Ready(0), b'{"next_slot":0,"schema":1,"state":"READY"}\n'
+
+    class Approvals:
+        def validate_then_consume(self, *_args):
+            events.append("approval")
+            return object()
+
+    class Supervisor:
+        def __init__(self, host, *_args, **_kwargs):
+            self.host = host
+
+        def start(self, slot):
+            events.append(f"start:{slot.index}")
+            return binding
+
+        def capture_owned(self, selected):
+            assert selected is binding
+            events.append("capture")
+            return 1728, 1080, bgra
+
+        def stop(self, selected, proof):
+            assert selected is binding
+            assert proof is None
+            events.append("stop")
+            return StopRecord(0, "0" * 32, 1, 2, True)
+
+    monkeypatch.setattr(cli_module, "NativeLifecycleApi", lambda: object())
+    monkeypatch.setattr(cli_module, "Win32Runtime", lambda _native: Runtime())
+    monkeypatch.setattr(cli_module, "Win32LifecycleHost", lambda *_args, **_kwargs: Host())
+    monkeypatch.setattr(cli_module, "PrivateApprovalStorage", lambda _root: object())
+    monkeypatch.setattr(cli_module, "OneShotApprovalService", lambda _storage: Approvals())
+    monkeypatch.setattr(cli_module, "build_native_state_store", lambda _root: Store())
+    monkeypatch.setattr(cli_module, "load_private_registry", lambda *_args: slots)
+    monkeypatch.setattr(cli_module, "LifecycleSupervisor", Supervisor)
+    monkeypatch.setattr(cli_module, "AcquiredMutexLease", lambda _name: object())
+    monkeypatch.setattr(cli_module, "_candidate_tree", lambda _root: "b" * 40)
+
+    cycle = cli_module.build_no_input_diagnostic_cycle(str(tmp_path), "slots.toml")
+
+    assert cycle.visit_once() is HomeDiagnosticResult.HOME
+    assert events == [
+        "mutex:usable",
+        "snapshot:close",
+        "approval",
+        "start:0",
+        "capture",
+        "stop",
+        "mutex:release",
+    ]

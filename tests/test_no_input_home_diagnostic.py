@@ -32,6 +32,9 @@ _IDENTIFYING_HUD_REGIONS = (
     (1368, 220, 1728, 1080),
     (360, 850, 1368, 1080),
 )
+_IDENTIFYING_SCENE_REGIONS = (
+    (850, 220, 1000, 285),
+)
 
 
 def test_copied_basepilot_recognizer_classifies_tracked_real_home_fixture() -> None:
@@ -48,7 +51,10 @@ def test_tracked_home_derivative_has_no_readable_identifying_hud_fields() -> Non
     assert frame is not None
     assert frame.shape == (1080, 1728, 3)
 
-    for x0, y0, x1, y1 in _IDENTIFYING_HUD_REGIONS:
+    for x0, y0, x1, y1 in (
+        *_IDENTIFYING_HUD_REGIONS,
+        *_IDENTIFYING_SCENE_REGIONS,
+    ):
         region = frame[y0:y1, x0:x1]
         assert region.size > 0
         assert np.all(region == _REDACTION_COLOR)
@@ -58,20 +64,24 @@ def test_tracked_home_derivative_records_source_and_redaction_provenance() -> No
     provenance = json.loads(_PROVENANCE.read_text(encoding="utf-8"))
 
     assert provenance == {
-        "derived_sha256": "380ffe4c00cb00f94ecb7580a8e164ebec550cd972170f4bbf033dea49b92d92",
-        "derived_size": 1665605,
+        "derived_sha256": "13b52280bee6432b64f1173962529c49d19199faecd3b9ae16aba1b47c1fd22e",
+        "derived_size": 1648822,
         "detector_region_preserved": [775, 0, 850, 220],
         "dimensions": [1728, 1080],
         "redaction_bgr": [24, 24, 24],
-        "redaction_regions": [list(region) for region in _IDENTIFYING_HUD_REGIONS],
+        "redaction_regions": [
+            list(region)
+            for region in (*_IDENTIFYING_HUD_REGIONS, *_IDENTIFYING_SCENE_REGIONS)
+        ],
         "source_commit": "c41fe12a6df051e241c695b71b6859286e24c612",
         "source_path": "tests/fixtures/home_screen.png",
         "source_sha256": "279acc36eaf56c298c668ecb110d5001628c2ec5607f0f57604d8460bdb42611",
         "source_size": 4060294,
         "transformation": (
             "Replace every peripheral HUD region that can display player, clan, "
-            "account, resource, notification, or action text with one opaque color; "
-            "retain only the central scene and the sealed Home-builder template region."
+            "account, resource, notification, or action text and the in-scene Clan "
+            "Castle identity label with one opaque color; retain the non-identifying "
+            "central scene and the sealed Home-builder template region."
         ),
     }
 
@@ -91,9 +101,9 @@ def test_copied_donor_assets_and_real_fixture_match_frozen_seals() -> None:
         name: hashlib.sha256((assets / name).read_bytes()).hexdigest()
         for name in expected
     } == expected
-    assert _FIXTURE.stat().st_size == 1_665_605
+    assert _FIXTURE.stat().st_size == 1_648_822
     assert hashlib.sha256(_FIXTURE.read_bytes()).hexdigest() == (
-        "380ffe4c00cb00f94ecb7580a8e164ebec550cd972170f4bbf033dea49b92d92"
+        "13b52280bee6432b64f1173962529c49d19199faecd3b9ae16aba1b47c1fd22e"
     )
 
 
