@@ -566,7 +566,10 @@ def main(
             except BaseException:
                 return _emit_diagnostic_failure("CLEANUP", None, False)
             if type(completed) is DiagnosticChildOutcome:
-                if completed.cleanup_succeeded is not True:
+                if (
+                    completed.operational_failure is True
+                    or completed.cleanup_succeeded is not True
+                ):
                     return _emit_diagnostic_failure(
                         "CLEANUP", None, completed.child_wait_completed
                     )

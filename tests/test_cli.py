@@ -438,6 +438,34 @@ def test_public_diagnostic_uses_atomic_owned_runner_and_reports_truthful_wait(
     assert captured.err == _failure_record("CLEANUP", None, True)
 
 
+@pytest.mark.parametrize("child_wait_completed", [False, True])
+def test_public_diagnostic_reports_retired_operational_failure_as_cleanup(
+    child_wait_completed: bool,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "run_owned_diagnostic_child",
+        lambda *_args, **_kwargs: DiagnosticChildOutcome(
+            None,
+            None,
+            None,
+            child_wait_completed,
+            True,
+            operational_failure=True,
+        ),
+    )
+
+    assert main(
+        ["diagnose-home", "--project-root", "X", "--slots", "Y"]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _failure_record("CLEANUP", None, child_wait_completed)
+
+
 def test_public_diagnostic_rejects_partial_output(capsys) -> None:
     def extra_output(command, **_kwargs):
         return CompletedProcess(command, 0, "HOME\nextra\n", "")

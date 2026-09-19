@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import subprocess
+import sys
 import threading
 import time
 import types
@@ -19,6 +20,8 @@ from typing import Callable, Sequence
 
 CREATE_SUSPENDED = 0x00000004
 CLEANUP_WAIT_MILLISECONDS = 5_000
+STREAM_CLOSE_TIMEOUT_SECONDS = 1.0
+SUPPORTED_PYTHON_MINORS = frozenset({(3, 11), (3, 13)})
 _CREATION_FLAGS_INDEX = 5
 _CREATE_PROCESS_ARGC = 9
 _original_create_process = None
@@ -37,6 +40,7 @@ class DiagnosticChildOutcome:
     stderr: str | None
     child_wait_completed: bool
     cleanup_succeeded: bool
+    operational_failure: bool = False
 
 
 @dataclass(slots=True)
@@ -71,8 +75,16 @@ class DiagnosticJobOwner:
                 clean = False
                 return None
 
-        attempt(lambda: self.runtime.terminate_job(self.job))
-        attempt(lambda: self.runtime.terminate_process(process))
+        job_terminated = True
+        try:
+            self.runtime.terminate_job(self.job)
+        except BaseException:
+            clean = False
+            job_terminated = False
+        if not self.assigned:
+            attempt(lambda: self.runtime.terminate_process(process))
+        elif not job_terminated and self.retained_process is not None:
+            attempt(lambda: self.runtime.terminate_process(self.retained_process))
         waited = (
             attempt(
                 lambda: self.runtime.wait_process(
@@ -193,6 +205,8 @@ def _install_job_owned_create_process_once() -> None:
     """Install the donor-derived permanent thread-gated wrapper exactly once."""
     global _original_create_process
     with _create_process_install_lock:
+        if _python_minor() not in SUPPORTED_PYTHON_MINORS:
+            raise DiagnosticChildJobError("unsupported Python minor")
         winapi = getattr(subprocess, "_winapi", None)
         current = getattr(winapi, "CreateProcess", None)
         if _original_create_process is not None:
@@ -204,6 +218,9 @@ def _install_job_owned_create_process_once() -> None:
             if original is None:
                 raise DiagnosticChildJobError("unknown CreateProcess wrapper")
             _original_create_process = original
+            _job_owned_create_process._clash_rush_true_original = original  # type: ignore[attr-defined]
+            _job_owned_create_process._clash_rush_diagnostic_job_owned = True  # type: ignore[attr-defined]
+            winapi.CreateProcess = _job_owned_create_process
             return
         if (
             not isinstance(current, types.BuiltinFunctionType)
@@ -226,15 +243,33 @@ def _install_job_owned_create_process_once() -> None:
         winapi.CreateProcess = _job_owned_create_process
 
 
+def _python_minor() -> tuple[int, int]:
+    return sys.version_info.major, sys.version_info.minor
+
+
 def _close_popen_resources(process: object) -> bool:
+    """Close Popen resources without allowing a pipe lock to block cleanup."""
     clean = True
+    closers: list[threading.Thread] = []
+
+    def close_stream(stream: object) -> None:
+        nonlocal clean
+        try:
+            stream.close()
+        except BaseException:
+            clean = False
+
     for stream_name in ("stdout", "stderr"):
         stream = getattr(process, stream_name, None)
         if stream is not None:
-            try:
-                stream.close()
-            except BaseException:
-                clean = False
+            closer = threading.Thread(target=close_stream, args=(stream,), daemon=True)
+            closers.append(closer)
+            closer.start()
+    deadline = time.monotonic() + STREAM_CLOSE_TIMEOUT_SECONDS
+    for closer in closers:
+        closer.join(max(0.0, deadline - time.monotonic()))
+        if closer.is_alive():
+            clean = False
     handle = getattr(process, "_handle", None)
     if handle is not None:
         try:
@@ -301,9 +336,7 @@ def run_owned_diagnostic_child(
         owner.cleanup_published()
         resources_closed = _close_popen_resources(process)
         if not owner.cleanup_succeeded or not resources_closed:
-            return DiagnosticChildOutcome(
-                None, None, None, owner.child_wait_completed, False
-            )
+            return DiagnosticChildOutcome(None, None, None, owner.child_wait_completed, False)
         return DiagnosticChildOutcome(returncode, stdout, stderr, True, True)
     except BaseException:
         if owner is not None and not owner.cleaned:
@@ -312,12 +345,14 @@ def run_owned_diagnostic_child(
             else:
                 owner.cleanup_published()
         if process is not None:
+            drain_succeeded = True
             try:
                 process.communicate(timeout=1.0)
             except BaseException:
-                pass
+                drain_succeeded = False
             resources_closed = _close_popen_resources(process)
         else:
+            drain_succeeded = True
             resources_closed = True
         if owner is not None:
             return DiagnosticChildOutcome(
@@ -325,8 +360,11 @@ def run_owned_diagnostic_child(
                 None,
                 None,
                 owner.child_wait_completed,
-                owner.cleanup_succeeded and resources_closed,
+                owner.cleanup_succeeded and drain_succeeded and resources_closed,
+                operational_failure=True,
             )
-        return DiagnosticChildOutcome(None, None, None, False, False)
+        return DiagnosticChildOutcome(
+            None, None, None, False, False, operational_failure=True
+        )
     finally:
         _spawn_owner.owner = None
