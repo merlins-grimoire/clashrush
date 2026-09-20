@@ -13,6 +13,7 @@ import numpy as np
 
 from .basepilot_vision import BasePilotGeometry, BasePilotRecognitionError, VisionService
 from .basepilot_window import BasePilotCaptureError, WindowService
+from .input_authorization import InputAuthorization
 
 _HOME_VILLAGE_BUILDER_TEMPLATES = ("builder.png", "gbuilder.png")
 
@@ -38,6 +39,7 @@ class NoInputHomeDiagnosticController:
         if type(window) is not WindowService:
             raise BasePilotRecognitionError("exact donor-derived window service required")
         self.window = window
+        self._input_authorization = InputAuthorization.no_input_diagnostic()
         self._geometry: BasePilotGeometry | None = None
         self.vision: VisionService | None = None
 

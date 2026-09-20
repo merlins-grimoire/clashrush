@@ -18,6 +18,11 @@ from ctypes import wintypes
 from pathlib import Path
 
 from .config import load_private_registry
+from .input_authorization import (
+    InputAction,
+    InputAuthorization,
+    InputAuthorizationError,
+)
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, PlayerBinding
 from .lifecycle_state import LifecycleStateStore, Ready, encode_state
 from .mvp_local_approval import LiveApprovalStore
@@ -105,16 +110,21 @@ def _configure_input_signatures(user32: object) -> None:
 class Win32BoundInput:
     """Foreground native input restricted to one immutable render binding."""
 
-    def __init__(self, binding: PlayerBinding, safety_check, authorization_check) -> None:
+    def __init__(
+        self,
+        binding: PlayerBinding,
+        safety_check,
+        authorization: InputAuthorization,
+    ) -> None:
         if (
             type(binding) is not PlayerBinding
             or not callable(safety_check)
-            or not callable(authorization_check)
+            or type(authorization) is not InputAuthorization
         ):
-            raise RuntimeSafetyError("exact native input binding required")
+            raise RuntimeSafetyError("exact native input binding and authorization required")
         self._binding = binding
         self._safety_check = safety_check
-        self._authorization_check = authorization_check
+        self._authorization = authorization
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         _configure_input_signatures(self._user32)
 
@@ -133,13 +143,21 @@ class Win32BoundInput:
             and int(self._user32.GetAncestor(active, 2)) == self._binding.root_hwnd
         )
 
-    def _authorized(self) -> bool:
+    def _authorized(self, action: InputAction) -> bool:
         try:
-            return self._authorization_check() is True
-        except BaseException:
+            self._authorization.require(action)
+            return True
+        except InputAuthorizationError:
             return False
 
-    def click(self, binding: PlayerBinding, x: float, y: float) -> bool:
+    def click(
+        self,
+        binding: PlayerBinding,
+        x: float,
+        y: float,
+        *,
+        action: InputAction,
+    ) -> bool:
         self._require_binding(binding)
         if (
             type(x) not in (int, float)
@@ -156,9 +174,9 @@ class Win32BoundInput:
             wintypes.HWND(binding.render_hwnd), ctypes.byref(point)
         ):
             return False
-        if not self._authorized() or not self._user32.SetCursorPos(point.x, point.y):
+        if not self._authorized(action) or not self._user32.SetCursorPos(point.x, point.y):
             return False
-        if not self._authorized():
+        if not self._authorized(action):
             return False
         self._user32.mouse_event(0x0002, 0, 0, 0, None)
         time.sleep(0.02)
@@ -172,6 +190,8 @@ class Win32BoundInput:
         y0: float,
         x1: float,
         y1: float,
+        *,
+        action: InputAction,
     ) -> bool:
         self._require_binding(binding)
         coordinates = (x0, y0, x1, y1)
@@ -191,17 +211,19 @@ class Win32BoundInput:
                 wintypes.HWND(binding.render_hwnd), ctypes.byref(point)
             ):
                 return False
-        if not self._authorized() or not self._user32.SetCursorPos(start.x, start.y):
+        if not self._authorized(action) or not self._user32.SetCursorPos(start.x, start.y):
             return False
-        if not self._authorized():
+        if not self._authorized(action):
             return False
         self._user32.mouse_event(0x0002, 0, 0, 0, None)
         time.sleep(0.05)
-        moved = self._authorized() and self._user32.SetCursorPos(end.x, end.y)
+        moved = self._authorized(action) and self._user32.SetCursorPos(end.x, end.y)
         self._user32.mouse_event(0x0004, 0, 0, 0, None)
         return bool(moved)
 
-    def key_down(self, binding: PlayerBinding, *keys: int) -> bool:
+    def key_down(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool:
         self._require_binding(binding)
         if (
             not self._foreground()
@@ -209,14 +231,16 @@ class Win32BoundInput:
         ):
             return False
         for key in keys:
-            if not self._authorized():
+            if not self._authorized(action):
                 return False
             self._user32.keybd_event(key, 0, 0, None)
         return True
 
-    def key_up(self, binding: PlayerBinding, *keys: int) -> bool:
+    def key_up(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool:
         # Releasing held controls is cleanup and must survive lost authorization.
-        if binding != self._binding:
+        if binding != self._binding or action is not InputAction.CLEANUP_RELEASE:
             return False
         for key in keys:
             if type(key) is int and 1 <= key <= 255:
@@ -477,7 +501,10 @@ def run_native_mvp_visit(
             source_recognizer, binding, configured.configuration.account_ref,
             require_home=True,
         )
-        input_port = Win32BoundInput(binding, supervisor.capture_owned, enabled)
+        input_authorization = InputAuthorization.monitored_attack(enabled)
+        input_port = Win32BoundInput(
+            binding, supervisor.capture_owned, input_authorization
+        )
         summary = capture_world_export(
             binding,
             input_port=input_port,
@@ -496,7 +523,11 @@ def run_native_mvp_visit(
         for _ in range(3):
             if (
                 enabled() is not True
-                or input_port.click(binding, *_SETTINGS_CLOSE_X) is not True
+                or input_port.click(
+                    binding,
+                    *_SETTINGS_CLOSE_X,
+                    action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+                ) is not True
             ):
                 raise RuntimeSafetyError("KILL_SWITCH")
             time.sleep(1.0)
@@ -524,7 +555,13 @@ def run_native_mvp_visit(
             executor=executor,
             kill_switch_enabled=enabled,
             audit=LocalAuditLog(project / "var" / "mvp-local-audit.jsonl"),
-            cleanup=lambda: input_port.key_up(binding, 0x52, 0x4A, 0x56),
+            cleanup=lambda: input_port.key_up(
+                binding,
+                0x52,
+                0x4A,
+                0x56,
+                action=InputAction.CLEANUP_RELEASE,
+            ),
         )
         result = LocalMvpComposition(control, ports).visit_once(transaction_ref)
     finally:

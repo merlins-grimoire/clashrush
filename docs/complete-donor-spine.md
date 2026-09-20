@@ -46,3 +46,11 @@ This card freezes the complete source before boundary edits. Follow-on work may 
 - `ProtectedLifecycleLog` writes only `schema`, sanitized slot index, and the closed `NO_INPUT_STOPPED` event beneath ignored `var/private-logs/`; the directory and file are restricted to SYSTEM and the current operator and verified before use.
 
 The adapter deliberately does not import donor capture, input, network, GUI, upgrade, reward, account-switching, or attack modules. `tests/test_donor_spine_lifecycle_adapter.py` proves missing/reused authorization, non-running control, selected-slot mismatch, verified-stop mismatch, and protected sanitized logging without launching BlueStacks or sending input. The existing lifecycle suites continue to prove mutex ownership, atomic suspended Job assignment, exact binding, rollback, and stop cleanup.
+
+## Default-deny action boundary
+
+`src/clash_rush_rebuild/input_authorization.py` is the single physical-input authorization vocabulary. `NO_INPUT_DIAGNOSTIC` owns an explicit empty capability. `MONITORED_ATTACK` can authorize only account-export navigation, attack navigation, troop deployment, return Home, and held-key cleanup, and it rechecks the live local control gate immediately before every input. `Win32BoundInput` accepts only that exact authorization object and every click, drag, or key action carries one exact closed action label.
+
+`PLACEMENT_ENABLED` is a literal `False`. Spending, purchases, gems, magic items, seasonal crafting, rewards, upgrades, research, donation, account switching, credential entry, unknown-screen input, random fallback input, placement, and all other donor executors have no action label and therefore cannot pass the native boundary. The sealed donor source remains outside the package and unimported. The diagnostic controller creates only `NO_INPUT_DIAGNOSTIC`; it has no physical-input port and every action request against its capability fails closed.
+
+The monitored-attack vocabulary does not itself grant a run. The native composition creates it only after the existing one-use tree/lifecycle/control-bound live approval is consumed, and its dynamic gate remains the persisted `RUNNING` state. Cleanup may release the three known deployment keys after revocation but cannot click, drag, press a new key, or select another action.

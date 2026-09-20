@@ -8,6 +8,7 @@ import pytest
 
 import clash_rush_rebuild.cli as cli_module
 from clash_rush_rebuild.cli import main as cli_main
+from clash_rush_rebuild.input_authorization import InputAction
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
 from clash_rush_rebuild.mvp_local_runtime import (
@@ -59,19 +60,30 @@ class FakeCapture:
 class FakeInput:
     events: list[object] = field(default_factory=list)
 
-    def click(self, binding: PlayerBinding, x: float, y: float) -> bool:
+    def click(
+        self,
+        binding: PlayerBinding,
+        x: float,
+        y: float,
+        *,
+        action: InputAction,
+    ) -> bool:
         assert binding == BINDING
-        self.events.append(("click", x, y))
+        self.events.append(("click", x, y, action))
         return True
 
-    def key_down(self, binding: PlayerBinding, *keys: int) -> bool:
+    def key_down(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool:
         assert binding == BINDING
-        self.events.append(("down", keys))
+        self.events.append(("down", keys, action))
         return True
 
-    def key_up(self, binding: PlayerBinding, *keys: int) -> bool:
+    def key_up(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool:
         assert binding == BINDING
-        self.events.append(("up", keys))
+        self.events.append(("up", keys, action))
         return True
 
 
@@ -251,8 +263,8 @@ def test_executor_rechecks_kill_switch_immediately_before_every_input() -> None:
 
     assert executor.run() == (False, "KILL_SWITCH")
     assert input_port.events == [
-        ("click", *ATTACK_BTN),
-        ("click", *FIND_MATCH_BTN),
+        ("click", *ATTACK_BTN, InputAction.ATTACK_NAVIGATION),
+        ("click", *FIND_MATCH_BTN, InputAction.ATTACK_NAVIGATION),
     ]
 
 
@@ -269,15 +281,23 @@ def test_executor_adapts_bounded_attack_deploy_and_return_home_sequence() -> Non
 
     assert executor.run() == (True, "ATTACK_COMPLETED")
     assert input_port.events[:3] == [
-        ("click", *ATTACK_BTN),
-        ("click", *FIND_MATCH_BTN),
-        ("click", *ARMY_ATTACK_BTN),
+        ("click", *ATTACK_BTN, InputAction.ATTACK_NAVIGATION),
+        ("click", *FIND_MATCH_BTN, InputAction.ATTACK_NAVIGATION),
+        ("click", *ARMY_ATTACK_BTN, InputAction.ATTACK_NAVIGATION),
     ]
-    selected = [event[1:] for event in input_port.events if event[0] == "click"]
+    selected = [event[1:3] for event in input_port.events if event[0] == "click"]
     assert tuple(selected[3:-1]) == DEPLOY_SLOTS
-    assert input_port.events[-1] == ("click", *RETURN_HOME_BTN)
-    assert sum(event == ("down", DEPLOY_KEYS) for event in input_port.events) == 5
-    assert sum(event == ("up", DEPLOY_KEYS) for event in input_port.events) == 5
+    assert input_port.events[-1] == (
+        "click", *RETURN_HOME_BTN, InputAction.RETURN_HOME
+    )
+    assert sum(
+        event == ("down", DEPLOY_KEYS, InputAction.TROOP_DEPLOYMENT)
+        for event in input_port.events
+    ) == 5
+    assert sum(
+        event == ("up", DEPLOY_KEYS, InputAction.CLEANUP_RELEASE)
+        for event in input_port.events
+    ) == 5
 
 
 def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postcondition(

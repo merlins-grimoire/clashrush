@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from ctypes import wintypes
 from typing import Callable, Protocol
 
+from .input_authorization import InputAction
+
 SETTINGS_BUTTON = (0.9547, 0.7271)
 MORE_SETTINGS_BUTTON = (0.5110, 0.8340)
 EXPORT_BUTTON = (0.7058, 0.6288)
@@ -35,8 +37,25 @@ class WorldExportSummary:
 
 
 class ExportInputPort(Protocol):
-    def click(self, binding: object, x: float, y: float) -> bool: ...
-    def drag(self, binding: object, x0: float, y0: float, x1: float, y1: float) -> bool: ...
+    def click(
+        self,
+        binding: object,
+        x: float,
+        y: float,
+        *,
+        action: InputAction,
+    ) -> bool: ...
+
+    def drag(
+        self,
+        binding: object,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        *,
+        action: InputAction,
+    ) -> bool: ...
 
 
 def _configure_clipboard_api(user32: object, kernel32: object) -> None:
@@ -174,9 +193,17 @@ def capture_world_export(
                 raise ExportCaptureError("account verification live gate disabled")
             try:
                 delivered = (
-                    input_port.click(binding, *points)
+                    input_port.click(
+                        binding,
+                        *points,
+                        action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+                    )
                     if kind == "click"
-                    else input_port.drag(binding, *points)
+                    else input_port.drag(
+                        binding,
+                        *points,
+                        action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+                    )
                 )
             except BaseException as exc:
                 raise ExportCaptureError("account verification input unavailable") from exc

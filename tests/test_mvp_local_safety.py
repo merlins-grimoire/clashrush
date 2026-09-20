@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from clash_rush_rebuild.input_authorization import InputAction
+
 from clash_rush_rebuild.mvp_local_approval import (
     LIVE_ACTION,
     ApprovalError,
@@ -113,12 +115,24 @@ class FakeInput:
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []
 
-    def click(self, _binding: object, x: float, y: float) -> bool:
-        self.events.append(("click", x, y))
+    def click(
+        self,
+        _binding: object,
+        x: float,
+        y: float,
+        *,
+        action: InputAction,
+    ) -> bool:
+        self.events.append(("click", x, y, action))
         return True
 
-    def drag(self, _binding: object, *points: float) -> bool:
-        self.events.append(("drag", *points))
+    def drag(
+        self,
+        _binding: object,
+        *points: float,
+        action: InputAction,
+    ) -> bool:
+        self.events.append(("drag", *points, action))
         return True
 
 
@@ -140,12 +154,12 @@ def test_world_export_navigation_is_live_gated_and_clipboard_is_always_cleared()
 
     assert summary.account_matches is True
     assert inputs.events == [
-        ("click", *SETTINGS_BUTTON),
-        ("click", *MORE_SETTINGS_BUTTON),
-        ("drag", 0.50, 0.74, 0.50, 0.24),
-        ("drag", 0.50, 0.74, 0.50, 0.24),
-        ("drag", 0.50, 0.74, 0.50, 0.24),
-        ("click", *EXPORT_BUTTON),
+        ("click", *SETTINGS_BUTTON, InputAction.ACCOUNT_EXPORT_NAVIGATION),
+        ("click", *MORE_SETTINGS_BUTTON, InputAction.ACCOUNT_EXPORT_NAVIGATION),
+        ("drag", 0.50, 0.74, 0.50, 0.24, InputAction.ACCOUNT_EXPORT_NAVIGATION),
+        ("drag", 0.50, 0.74, 0.50, 0.24, InputAction.ACCOUNT_EXPORT_NAVIGATION),
+        ("drag", 0.50, 0.74, 0.50, 0.24, InputAction.ACCOUNT_EXPORT_NAVIGATION),
+        ("click", *EXPORT_BUTTON, InputAction.ACCOUNT_EXPORT_NAVIGATION),
     ]
     assert len(clears) == 2
 
@@ -162,7 +176,9 @@ def test_world_export_gate_failure_emits_no_later_input_and_clears_clipboard() -
             clipboard_clear=lambda: clears.append(True), sleep=lambda _seconds: None,
             now=datetime.now(UTC),
         )
-    assert inputs.events == [("click", *SETTINGS_BUTTON)]
+    assert inputs.events == [
+        ("click", *SETTINGS_BUTTON, InputAction.ACCOUNT_EXPORT_NAVIGATION)
+    ]
     assert len(clears) == 2
 
 

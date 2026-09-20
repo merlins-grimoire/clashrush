@@ -6,6 +6,8 @@ import pytest
 
 from clash_rush_rebuild import mvp_local_native
 from clash_rush_rebuild.config import load_private_registry
+from clash_rush_rebuild.input_authorization import InputAuthorization
+from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
 from clash_rush_rebuild.mvp_local_runtime import (
@@ -16,6 +18,33 @@ from clash_rush_rebuild.mvp_local_runtime import (
 
 
 TAG_HASH = "a" * 64
+
+BINDING = PlayerBinding(
+    ProcessIdentity(100, 200),
+    ProcessIdentity(100, 200),
+    10,
+    11,
+    1280,
+    720,
+    "0" * 32,
+)
+
+
+def test_native_input_requires_exact_closed_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _user32: None)
+
+    with pytest.raises(RuntimeSafetyError, match="authorization"):
+        mvp_local_native.Win32BoundInput(BINDING, lambda _binding: None, lambda: True)
+
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.monitored_attack(lambda: True),
+    )
+    assert subject._binding == BINDING
 
 
 def _private_registry(tmp_path):

@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .input_authorization import InputAction
 from .lifecycle import PlayerBinding
 from .mvp_local_gameplay import (
     AttackObservation,
@@ -69,11 +70,22 @@ class RecognitionPort(Protocol):
 
 
 class InputPort(Protocol):
-    def click(self, binding: PlayerBinding, x: float, y: float) -> bool: ...
+    def click(
+        self,
+        binding: PlayerBinding,
+        x: float,
+        y: float,
+        *,
+        action: InputAction,
+    ) -> bool: ...
 
-    def key_down(self, binding: PlayerBinding, *keys: int) -> bool: ...
+    def key_down(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool: ...
 
-    def key_up(self, binding: PlayerBinding, *keys: int) -> bool: ...
+    def key_up(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool: ...
 
 
 class AuditPort(Protocol):
@@ -635,21 +647,25 @@ class BoundedAttackExecutor:
         except BaseException:
             return False
 
-    def _click(self, point: tuple[float, float]) -> tuple[bool, str]:
+    def _click(
+        self, point: tuple[float, float], action: InputAction
+    ) -> tuple[bool, str]:
         if not self._authorized():
             return False, "KILL_SWITCH"
         try:
-            sent = self._input.click(self._binding, point[0], point[1])
+            sent = self._input.click(
+                self._binding, point[0], point[1], action=action
+            )
         except BaseException:
             return False, "INPUT_UNAVAILABLE"
         return (True, "INPUT_SENT") if sent is True else (False, "INPUT_FAILED")
 
     def run(self) -> tuple[bool, str]:
-        for point, failure in (
-            (ATTACK_BTN, "ATTACK_CLICK_FAILED"),
-            (FIND_MATCH_BTN, "FIND_MATCH_CLICK_FAILED"),
+        for point, action, failure in (
+            (ATTACK_BTN, InputAction.ATTACK_NAVIGATION, "ATTACK_CLICK_FAILED"),
+            (FIND_MATCH_BTN, InputAction.ATTACK_NAVIGATION, "FIND_MATCH_CLICK_FAILED"),
         ):
-            sent, reason = self._click(point)
+            sent, reason = self._click(point, action)
             if not sent:
                 return False, reason if reason == "KILL_SWITCH" else failure
             self._sleep(0.01)
@@ -667,7 +683,9 @@ class BoundedAttackExecutor:
             return False, "SCOUT_SOURCE_UNAVAILABLE"
         if source_result is not None:
             return False, "SCOUT_SOURCE_UNAVAILABLE"
-        sent, reason = self._click(ARMY_ATTACK_BTN)
+        sent, reason = self._click(
+            ARMY_ATTACK_BTN, InputAction.ATTACK_NAVIGATION
+        )
         if not sent:
             return False, reason if reason == "KILL_SWITCH" else "ARMY_ATTACK_CLICK_FAILED"
         scout_ready = False
@@ -683,14 +701,18 @@ class BoundedAttackExecutor:
             return False, "BASE_LOAD_TIMEOUT"
 
         for slot in DEPLOY_SLOTS:
-            sent, reason = self._click(slot)
+            sent, reason = self._click(slot, InputAction.TROOP_DEPLOYMENT)
             if not sent:
                 return False, reason if reason == "KILL_SWITCH" else "DEPLOY_SELECT_FAILED"
             if not self._authorized():
                 return False, "KILL_SWITCH"
             down = False
             try:
-                down = self._input.key_down(self._binding, *DEPLOY_KEYS) is True
+                down = self._input.key_down(
+                    self._binding,
+                    *DEPLOY_KEYS,
+                    action=InputAction.TROOP_DEPLOYMENT,
+                ) is True
                 if not down:
                     return False, "DEPLOY_KEY_DOWN_FAILED"
                 self._sleep(0.5)
@@ -698,7 +720,11 @@ class BoundedAttackExecutor:
                 return False, "DEPLOY_KEY_DOWN_FAILED"
             finally:
                 try:
-                    released = self._input.key_up(self._binding, *DEPLOY_KEYS) is True
+                    released = self._input.key_up(
+                        self._binding,
+                        *DEPLOY_KEYS,
+                        action=InputAction.CLEANUP_RELEASE,
+                    ) is True
                 except BaseException:
                     released = False
             if not released:
@@ -714,7 +740,7 @@ class BoundedAttackExecutor:
             self._sleep(0.5)
         if home_control is not True:
             return False, "RETURN_HOME_NOT_FOUND"
-        sent, reason = self._click(RETURN_HOME_BTN)
+        sent, reason = self._click(RETURN_HOME_BTN, InputAction.RETURN_HOME)
         if not sent:
             return False, reason if reason == "KILL_SWITCH" else "RETURN_HOME_CLICK_FAILED"
         self._sleep(2.5)

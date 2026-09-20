@@ -15,6 +15,11 @@ from clash_rush_rebuild.basepilot_vision import (
     VisionService,
 )
 from clash_rush_rebuild.basepilot_window import BasePilotCaptureError, WindowService
+from clash_rush_rebuild.input_authorization import (
+    InputAction,
+    InputAuthorizationError,
+    InputPurpose,
+)
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.no_input_home_diagnostic import (
     HomeDiagnosticResult,
@@ -213,6 +218,21 @@ def test_production_observation_clears_full_frame_after_recognition(monkeypatch)
 
     assert NoInputHomeDiagnosticController(subject).observe() is HomeDiagnosticResult.UNKNOWN
     assert np.count_nonzero(frame) == 0
+
+
+def test_production_diagnostic_owns_an_explicit_empty_input_capability() -> None:
+    binding = _binding(1280, 720)
+    window = WindowService(
+        binding,
+        lambda _selected: (1280, 720, bytes(1280 * 720 * 4)),
+    )
+
+    subject = NoInputHomeDiagnosticController(window)
+
+    assert subject._input_authorization.purpose is InputPurpose.NO_INPUT_DIAGNOSTIC
+    for action in InputAction:
+        with pytest.raises(InputAuthorizationError, match="not authorized"):
+            subject._input_authorization.require(action)
 
 
 def test_production_observation_preserves_sanitized_capture_failure_stage(
