@@ -84,6 +84,27 @@ def test_cli_composes_exactly_one_visit_after_explicit_owner_approval() -> None:
     assert events == ["build:X:Y", "visit"]
 
 
+def test_native_cli_routes_approved_visit_through_donor_boundary_adapter() -> None:
+    events: list[str] = []
+
+    status = main(
+        [
+            "donor-visit-one",
+            "--project-root",
+            "X",
+            "--slots",
+            "Y",
+            "--owner-approved",
+        ],
+        authorized_visit_runner=lambda root, slots: events.append(
+            f"authorized:{root}:{slots}"
+        ),
+    )
+
+    assert status == 0
+    assert events == ["authorized:X:Y"]
+
+
 def test_cli_initializes_state_without_live_approval_or_visit() -> None:
     events: list[str] = []
 

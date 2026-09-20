@@ -35,3 +35,14 @@ The following donor boundaries are incompatible and must be replaced by thin ada
 | Recovery/stop | Broad exception handling and app stop | Bounded fail-closed recovery, positive safe-state evidence, authoritative owned-process cleanup |
 
 This card freezes the complete source before boundary edits. Follow-on work may adapt only the tabled boundaries and must retain a mapping back to these sealed files.
+
+## Local lifecycle wiring
+
+`src/clash_rush_rebuild/donor_spine_lifecycle_adapter.py` is the thin adapter for the donor's `src/launch.py` lifecycle caller. The donor source remains byte-sealed and inert. The `donor-visit-one` CLI path replaces generated Python configuration and donor process helpers with these existing reviewed local seams:
+
+- `LocalControlStore` supplies the ignored `var/mvp-local-control.json` selection and requires explicit `RUNNING` mode.
+- `ExplicitRunAuthorization` is created only after the CLI receives `--owner-approved`, is bound to one canonical `slot-N`, and is consumed before configuration or lifecycle work.
+- `InertCycle` and `LifecycleSupervisor` retain the host-wide protected mutex, exact private slot registry, one selected BlueStacks process family, private Job ownership, and authoritative no-input stop proof.
+- `ProtectedLifecycleLog` writes only `schema`, sanitized slot index, and the closed `NO_INPUT_STOPPED` event beneath ignored `var/private-logs/`; the directory and file are restricted to SYSTEM and the current operator and verified before use.
+
+The adapter deliberately does not import donor capture, input, network, GUI, upgrade, reward, account-switching, or attack modules. `tests/test_donor_spine_lifecycle_adapter.py` proves missing/reused authorization, non-running control, selected-slot mismatch, verified-stop mismatch, and protected sanitized logging without launching BlueStacks or sending input. The existing lifecycle suites continue to prove mutex ownership, atomic suspended Job assignment, exact binding, rollback, and stop cleanup.

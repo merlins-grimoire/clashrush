@@ -33,8 +33,14 @@ from .diagnostic_child_job import (
     DiagnosticChildOutcome,
     run_owned_diagnostic_child,
 )
+from .donor_spine_lifecycle_adapter import (
+    DonorSpineLifecycleAdapter,
+    ExplicitRunAuthorization,
+    ProtectedLifecycleLog,
+    SpineBoundaryError,
+)
 from .guided_setup import export_synthetic_installation, run_guided_setup
-from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
+from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, StopRecord
 from .lifecycle_state import LifecycleStateStore
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
@@ -359,6 +365,30 @@ def _local_control_store(project_root: str | Path) -> LocalControlStore:
     return LocalControlStore(Path(project_root) / "var" / "mvp-local-control.json")
 
 
+def run_authorized_donor_visit(project_root: str, slots_path: str) -> StopRecord:
+    """Run the donor's inert launch/stop seam through all local boundaries."""
+    project = Path(project_root).resolve(strict=True)
+    control = _local_control_store(project)
+    state = control.load()
+    instance_ref = state.configuration.instance_ref
+    if (
+        type(instance_ref) is not str
+        or not instance_ref.startswith("slot-")
+        or not instance_ref[5:].isdigit()
+    ):
+        raise SpineBoundaryError("selected local instance is malformed")
+    selected_slot = int(instance_ref[5:])
+    authorization = ExplicitRunAuthorization(
+        secrets.token_hex(16), selected_slot=selected_slot
+    )
+    adapter = DonorSpineLifecycleAdapter(
+        control,
+        build_inert_cycle(project_root, slots_path),
+        ProtectedLifecycleLog(project / "var" / "private-logs" / "lifecycle.jsonl"),
+    )
+    return adapter.run_once(authorization)
+
+
 def run_native_mvp_visit(
     project_root: str, slots_path: str, transaction_ref: str
 ) -> VisitResult:
@@ -386,6 +416,17 @@ def _parser() -> argparse.ArgumentParser:
         "--diagnostic-preserve-cursor",
         action="store_true",
         help="preserve the admitted READY cursor for an explicit diagnostic visit",
+    )
+    donor_visit = subcommands.add_parser(
+        "donor-visit-one",
+        help="run one authorized donor-spine no-input launch/stop visit",
+    )
+    donor_visit.add_argument("--project-root", required=True)
+    donor_visit.add_argument("--slots", required=True)
+    donor_visit.add_argument(
+        "--owner-approved",
+        action="store_true",
+        help="confirm fresh owner approval for this single no-input visit",
     )
     initialize = subcommands.add_parser(
         "initialize",
@@ -464,6 +505,7 @@ def main(
     ] = build_native_reconciler,
     diagnostic_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
     diagnostic_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    authorized_visit_runner: Callable[[str, str], object] | None = None,
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
     if tuple(diagnostic_argv[:1]) == ("diagnose-home",):
@@ -477,7 +519,10 @@ def main(
             raise SystemExit(2) from None
     else:
         args = _parser().parse_args(argv)
-    if args.command == "visit-one" and args.owner_approved is not True:
+    if (
+        args.command in {"visit-one", "donor-visit-one"}
+        and args.owner_approved is not True
+    ):
         return 2
 
     try:
@@ -622,6 +667,10 @@ def main(
                 return _emit_diagnostic_failure("SCALAR_PARSE", child_status, True)
             print(result.value)
             return 0 if result is HomeDiagnosticResult.HOME else 1
+        if args.command == "donor-visit-one":
+            runner = authorized_visit_runner or run_authorized_donor_visit
+            runner(args.project_root, args.slots)
+            return 0
         if cycle_builder is None:
             cycle = build_inert_cycle(
                 args.project_root,
