@@ -1,5 +1,9 @@
 # Complete donor bot spine
 
+The separately opted-in full startup diagnostic (launcher icon, red-X, login
+Okay and Continue) is documented in [startup-debug-transplant.md](startup-debug-transplant.md).
+It does not change the no-input or Continue-only command contracts below.
+
 ## Selection
 
 The transplanted spine is CoC_Bot, https://github.com/m24842/CoC_Bot, pinned at commit `a5c943afed0ed3b9abedbbc228b0889145ecaf24` and tree `d79368fbe550036f1542883f18434e318016b279`. The source is MIT licensed; its license is copied at `donors/coc_bot/LICENSE` and already reproduced in `THIRD_PARTY_NOTICES.md`.

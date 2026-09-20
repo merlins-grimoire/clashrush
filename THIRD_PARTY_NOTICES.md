@@ -97,6 +97,14 @@ Exact file digests and the local adapter boundary are documented in
 
 ## First-party source reference
 
+The diagnostic-only `startup_debug.py` and `startup_debug_native.py` additionally
+adapt this same first-party revision's `bluestacks_launcher.py` generic icon
+guard/stability, `instance_switch.py` ordered startup popup loop, and `observe.py`
+paired crosshair evidence seam. Synthetic guard tests are adapted from
+`tests/test_bluestacks_launcher.py`. Exact callers, boundary replacements and
+non-reused behavior are recorded in `docs/startup-debug-transplant.md`; no new
+third-party artwork or font bytes are included.
+
 The published Clash Rush Home engine is pinned separately at https://github.com/merlins-grimoire/autoclasher commit `949497bf0a543a43ec6ef39a8c897e366bc10362`. It is first-party project source, not listed as an MIT third-party donor. Its ignored frozen checkout is `references/ClashRush`. Slice 1 adapts its strict registry grammar, exact PID/title/HWND binding, native process discovery, PrintWindow capture, and near-black rejection. Launcher-icon input, Android-debug state, broad process stopping, and frame persistence were not imported.
 
 ## Hermes Agent atomic Job ownership transplant

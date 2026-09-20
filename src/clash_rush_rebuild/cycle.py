@@ -261,6 +261,8 @@ class NoInputDiagnosticCycle:
 class StartupContinueCycle:
     """One approval-bound Continue-only recovery inside lifecycle ownership."""
 
+    _approval_action = ApprovalAction.STARTUP_CONTINUE_ONLY
+
     def __init__(
         self,
         runtime: MutexRuntimePort,
@@ -315,7 +317,7 @@ class StartupContinueCycle:
                 if type(count) is not int or count != 0:
                     raise CycleError("pre-existing player blocks recovery launch")
                 self._approvals.validate_then_consume(
-                    ApprovalAction.STARTUP_CONTINUE_ONLY,
+                    type(self)._approval_action,
                     self._candidate_tree(),
                     state,
                     state_bytes,
@@ -345,3 +347,9 @@ class StartupContinueCycle:
         if type(result) is not StartupContinueResult:
             _raise_diagnostic_stage(DiagnosticFailureStage.RECOGNITION)
         return result
+
+
+class StartupDebugCycle(StartupContinueCycle):
+    """Same Job-owned cleanup with a distinct diagnostic-only approval."""
+
+    _approval_action = ApprovalAction.STARTUP_DEBUG

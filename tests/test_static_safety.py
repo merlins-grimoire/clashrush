@@ -27,6 +27,7 @@ def test_production_source_confines_attack_input_and_exposes_no_prohibited_trans
         "basepilot_window.py",
         "no_input_home_diagnostic.py",
         "startup_continue_recovery.py",
+        "startup_debug_native.py",
     ]
 
     native_input = ("mouse_event", "keybd_event", "setcursorpos")
@@ -35,4 +36,4 @@ def test_production_source_confines_attack_input_and_exposes_no_prohibited_trans
         text = path.read_text(encoding="utf-8").casefold()
         if any(token in text for token in native_input):
             carriers.append(path.name)
-    assert carriers == ["mvp_local_native.py"]
+    assert sorted(carriers) == ["mvp_local_native.py", "startup_debug_native.py"]

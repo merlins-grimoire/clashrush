@@ -576,6 +576,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     continue_once.add_argument("--project-root", required=True)
     continue_once.add_argument("--slots", required=True)
+    debug_issue = subcommands.add_parser('issue-startup-debug-approval')
+    debug_issue.add_argument('--project-root', required=True)
+    debug_issue.add_argument('--lifetime-seconds', type=int, default=300)
+    debug_issue.add_argument('--allow-private-full-frames', action='store_true')
+    debug = subcommands.add_parser('startup-debug-one')
+    debug.add_argument('--project-root', required=True)
+    debug.add_argument('--slots', required=True)
+    debug.add_argument('--allow-private-full-frames', action='store_true')
     export = subcommands.add_parser(
         "export-setup-example",
         help="write a public-safe synthetic installation configuration",
@@ -673,6 +681,19 @@ def main(
         if args.command == "setup":
             setup_runner(Path(args.project_root))
             return 0
+        if args.command in {'issue-startup-debug-approval', 'startup-debug-one'}:
+            if args.allow_private_full_frames is not True:
+                return 2
+            from .startup_debug_native import issue_approval, build_cycle
+            if args.command == 'issue-startup-debug-approval':
+                issue_approval(args.project_root, args.lifetime_seconds)
+                print('startup diagnostic approval issued')
+                return 0
+            result = build_cycle(args.project_root, args.slots).visit_once()
+            if type(result) is not StartupContinueResult:
+                raise RuntimeError('startup diagnostic result invalid')
+            print(result.value)
+            return 0 if result in {StartupContinueResult.HOME, StartupContinueResult.BUILDER} else 1
         if args.command == "setup-startup-font":
             startup_font_installer(Path(args.project_root), Path(args.font))
             return 0
