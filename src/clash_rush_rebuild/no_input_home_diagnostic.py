@@ -7,11 +7,19 @@ Copied and adapted from BasePilot ``app/core/bot.py:18,223-225,242-248,
 
 from __future__ import annotations
 
+import math
+import time
+from collections.abc import Callable
 from enum import StrEnum
 
 import numpy as np
 
-from .basepilot_vision import BasePilotGeometry, BasePilotRecognitionError, VisionService
+from .basepilot_vision import (
+    BasePilotGeometry,
+    BasePilotRecognitionError,
+    RecognitionReason,
+    VisionService,
+)
 from .basepilot_window import BasePilotCaptureError, WindowService
 from .input_authorization import InputAuthorization
 
@@ -25,7 +33,10 @@ class HomeDiagnosticResult(StrEnum):
 
 
 def _raise_observation_error() -> None:
-    raise BasePilotRecognitionError("Home recognition failed") from None
+    raise BasePilotRecognitionError(
+        RecognitionReason.INVALID_EVIDENCE,
+        "Home recognition failed",
+    ) from None
 
 
 def _raise_capture_error() -> None:
@@ -37,11 +48,23 @@ class NoInputHomeDiagnosticController:
 
     def __init__(self, window: WindowService) -> None:
         if type(window) is not WindowService:
-            raise BasePilotRecognitionError("exact donor-derived window service required")
+            raise BasePilotRecognitionError(
+                RecognitionReason.INVALID_EVIDENCE,
+                "exact donor-derived window service required",
+            )
         self.window = window
         self._input_authorization = InputAuthorization.no_input_diagnostic()
         self._geometry: BasePilotGeometry | None = None
         self.vision: VisionService | None = None
+        self._observation_reasons: list[RecognitionReason] = []
+
+    @property
+    def observation_reasons(self) -> tuple[str, ...]:
+        return tuple(reason.value for reason in self._observation_reasons)
+
+    def _record_reason(self, reason: RecognitionReason) -> None:
+        if type(reason) is RecognitionReason:
+            self._observation_reasons.append(reason)
 
     def _update_config_size(
         self,
@@ -53,6 +76,8 @@ class NoInputHomeDiagnosticController:
             frame,
             expected_size=expected_size,
         )
+        if self._geometry.adaptation_reason is not None:
+            self._record_reason(self._geometry.adaptation_reason)
         self.vision = VisionService(self._geometry)
 
     def _find_home_village_builder(
@@ -61,7 +86,10 @@ class NoInputHomeDiagnosticController:
         region: tuple[int, int, int, int],
     ) -> tuple[int | None, int | None]:
         if type(self.vision) is not VisionService:
-            raise BasePilotRecognitionError("frame geometry was not initialized")
+            raise BasePilotRecognitionError(
+                RecognitionReason.INVALID_EVIDENCE,
+                "frame geometry was not initialized",
+            )
         for name in _HOME_VILLAGE_BUILDER_TEMPLATES:
             x, y = self.vision.find_template(frame, name, region=region)
             if not x:
@@ -79,7 +107,10 @@ class NoInputHomeDiagnosticController:
             return HomeDiagnosticResult.UNKNOWN
         self._update_config_size(frame, expected_size=expected_size)
         if type(self.vision) is not VisionService:
-            raise BasePilotRecognitionError("frame geometry was not initialized")
+            raise BasePilotRecognitionError(
+                RecognitionReason.INVALID_EVIDENCE,
+                "frame geometry was not initialized",
+            )
         top_region = VisionService.top_half_region(frame)
         builder_x, _builder_y = self.vision.find_template(
             frame,
@@ -91,6 +122,7 @@ class NoInputHomeDiagnosticController:
         home_x, _home_y = self._find_home_village_builder(frame, top_region)
         if home_x:
             return HomeDiagnosticResult.HOME
+        self._record_reason(RecognitionReason.NO_MATCH)
         return HomeDiagnosticResult.UNKNOWN
 
     @classmethod
@@ -100,6 +132,7 @@ class NoInputHomeDiagnosticController:
         subject.window = None
         subject._geometry = None
         subject.vision = None
+        subject._observation_reasons = []
         return subject._detect_village_type(frame)
 
     def observe(self) -> HomeDiagnosticResult:
@@ -121,6 +154,9 @@ class NoInputHomeDiagnosticController:
                             self.window._binding.height,
                         ),
                     )
+                except BasePilotRecognitionError as exc:
+                    self._record_reason(exc.reason)
+                    result = HomeDiagnosticResult.UNKNOWN
                 except BaseException:
                     recognition_failed = True
         except BaseException:
@@ -138,3 +174,49 @@ class NoInputHomeDiagnosticController:
         if type(result) is not HomeDiagnosticResult:
             _raise_observation_error()
         return result
+
+    def wait_for_readiness(
+        self,
+        *,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
+        wait: Callable[[float], None] = time.sleep,
+    ) -> HomeDiagnosticResult:
+        """Poll memory-only frames within one CoC_Bot-style startup budget."""
+        if (
+            type(timeout_seconds) not in (int, float)
+            or type(timeout_seconds) is bool
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+            or type(poll_interval_seconds) not in (int, float)
+            or type(poll_interval_seconds) is bool
+            or not math.isfinite(float(poll_interval_seconds))
+            or poll_interval_seconds <= 0
+            or not callable(monotonic)
+            or not callable(wait)
+        ):
+            _raise_observation_error()
+        started = monotonic()
+        if type(started) not in (int, float) or not math.isfinite(float(started)):
+            _raise_observation_error()
+        deadline = float(started) + float(timeout_seconds)
+        captured = False
+        while True:
+            try:
+                result = self.observe()
+                captured = True
+            except BasePilotCaptureError:
+                self._record_reason(RecognitionReason.CAPTURE_FAILURE)
+                result = HomeDiagnosticResult.UNKNOWN
+            if result in (HomeDiagnosticResult.HOME, HomeDiagnosticResult.BUILDER):
+                return result
+            now = monotonic()
+            if type(now) not in (int, float) or not math.isfinite(float(now)):
+                _raise_observation_error()
+            if float(now) >= deadline:
+                self._record_reason(RecognitionReason.TIMEOUT)
+                if not captured:
+                    _raise_capture_error()
+                return HomeDiagnosticResult.UNKNOWN
+            wait(min(float(poll_interval_seconds), deadline - float(now)))

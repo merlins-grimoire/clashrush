@@ -5,7 +5,10 @@ from dataclasses import dataclass
 import pytest
 
 import clash_rush_rebuild.cycle as cycle_module
-from clash_rush_rebuild.basepilot_vision import BasePilotRecognitionError
+from clash_rush_rebuild.basepilot_vision import (
+    BasePilotRecognitionError,
+    RecognitionReason,
+)
 from clash_rush_rebuild.basepilot_window import BasePilotCaptureError
 from clash_rush_rebuild.cycle import CycleError, InertCycle, NoInputDiagnosticCycle
 from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
@@ -524,7 +527,10 @@ def test_no_input_diagnostic_preserves_closed_recognition_stage() -> None:
     cycle = _diagnostic_cycle(
         events,
         FakeLease(events),
-        observation_error=BasePilotRecognitionError("private recognition detail"),
+        observation_error=BasePilotRecognitionError(
+            RecognitionReason.OPENCV_FAILURE,
+            "private recognition detail",
+        ),
     )
 
     with pytest.raises(cycle_module.DiagnosticStageError) as raised:

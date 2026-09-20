@@ -113,11 +113,29 @@ def test_copied_donor_assets_and_real_fixture_match_frozen_seals() -> None:
     )
 
 
-def test_geometry_rejects_wrong_aspect_and_binding_disagreement() -> None:
-    wrong_aspect = np.zeros((600, 600, 3), dtype=np.uint8)
-    with pytest.raises(BasePilotRecognitionError, match="aspect"):
-        BasePilotGeometry.from_frame(wrong_aspect)
+def test_geometry_adapts_unsupported_live_aspect_without_magic_tolerance() -> None:
+    unsupported_aspect = np.zeros((1000, 1728, 3), dtype=np.uint8)
 
+    geometry = BasePilotGeometry.from_frame(unsupported_aspect)
+
+    assert geometry.aspect_key == "16_10"
+    assert geometry.width == 1728
+    assert geometry.height == 1000
+    assert geometry.adaptation_reason == "UNSUPPORTED_GEOMETRY"
+
+
+def test_unsupported_live_aspect_retains_positive_home_evidence() -> None:
+    frame = cv2.imread(str(_FIXTURE), cv2.IMREAD_COLOR)
+    assert frame is not None
+    unsupported_aspect = cv2.resize(frame, (1728, 1000))
+
+    assert (
+        NoInputHomeDiagnosticController.detect_frame(unsupported_aspect)
+        is HomeDiagnosticResult.HOME
+    )
+
+
+def test_geometry_still_rejects_binding_disagreement() -> None:
     supported = np.zeros((720, 1280, 3), dtype=np.uint8)
     with pytest.raises(BasePilotRecognitionError, match="binding"):
         BasePilotGeometry.from_frame(supported, expected_size=(1281, 720))
@@ -288,3 +306,134 @@ def test_production_observation_sanitizes_recognition_failure_traceback(monkeypa
                 for value in traceback.tb_frame.f_locals.values()
             )
         traceback = traceback.tb_next
+
+
+def _controller_for_frames(
+    monkeypatch,
+    frames: list[np.ndarray],
+) -> NoInputHomeDiagnosticController:
+    binding = _binding(frames[0].shape[1], frames[0].shape[0])
+    window = WindowService(
+        binding,
+        lambda _selected: (
+            binding.width,
+            binding.height,
+            bytes(binding.width * binding.height * 4),
+        ),
+    )
+    queue = iter(frames)
+    monkeypatch.setattr(window, "screenshot", lambda: next(queue))
+    return NoInputHomeDiagnosticController(window)
+
+
+def _advancing_clock(step: float = 1.0):
+    current = -step
+
+    def now() -> float:
+        nonlocal current
+        current += step
+        return current
+
+    return now
+
+
+def test_popup_loading_no_match_polls_then_settles_to_unknown(monkeypatch) -> None:
+    frames = [np.zeros((720, 1280, 3), dtype=np.uint8) for _ in range(3)]
+    subject = _controller_for_frames(monkeypatch, frames)
+
+    result = subject.wait_for_readiness(
+        timeout_seconds=2,
+        poll_interval_seconds=1,
+        monotonic=_advancing_clock(),
+        wait=lambda _seconds: None,
+    )
+
+    assert result is HomeDiagnosticResult.UNKNOWN
+    assert subject.observation_reasons == ("NO_MATCH", "NO_MATCH", "TIMEOUT")
+
+
+def test_delayed_home_readiness_uses_later_settled_frame(monkeypatch) -> None:
+    home = cv2.imread(str(_FIXTURE), cv2.IMREAD_COLOR)
+    assert home is not None
+    loading = np.zeros_like(home)
+    subject = _controller_for_frames(monkeypatch, [loading, home])
+
+    result = subject.wait_for_readiness(
+        timeout_seconds=5,
+        poll_interval_seconds=1,
+        monotonic=_advancing_clock(),
+        wait=lambda _seconds: None,
+    )
+
+    assert result is HomeDiagnosticResult.HOME
+    assert subject.observation_reasons == ("NO_MATCH",)
+    assert np.count_nonzero(loading) == 0
+    assert np.count_nonzero(home) == 0
+
+
+def test_unavailable_template_is_sanitized_unknown_and_preserved(monkeypatch) -> None:
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    class MissingResource:
+        def __truediv__(self, _part):
+            return self
+
+        def is_file(self) -> bool:
+            return False
+
+    monkeypatch.setattr(vision_module, "files", lambda _package: MissingResource())
+    subject = _controller_for_frames(monkeypatch, [frame])
+
+    assert subject.observe() is HomeDiagnosticResult.UNKNOWN
+    assert subject.observation_reasons == ("TEMPLATE_UNAVAILABLE",)
+
+
+def test_malformed_template_is_sanitized_unknown_and_preserved(monkeypatch) -> None:
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    class MalformedResource:
+        def __truediv__(self, _part):
+            return self
+
+        def is_file(self) -> bool:
+            return True
+
+        def read_bytes(self) -> bytes:
+            return b"not-an-image"
+
+    monkeypatch.setattr(vision_module, "files", lambda _package: MalformedResource())
+    subject = _controller_for_frames(monkeypatch, [frame])
+
+    assert subject.observe() is HomeDiagnosticResult.UNKNOWN
+    assert subject.observation_reasons == ("TEMPLATE_MALFORMED",)
+
+
+def test_opencv_failure_is_sanitized_unknown_and_preserved(monkeypatch) -> None:
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    monkeypatch.setattr(
+        vision_module.cv2,
+        "matchTemplate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("private pixels")),
+    )
+    subject = _controller_for_frames(monkeypatch, [frame])
+
+    assert subject.observe() is HomeDiagnosticResult.UNKNOWN
+    assert subject.observation_reasons == ("OPENCV_FAILURE",)
+
+
+def test_timeout_clears_every_captured_frame(monkeypatch) -> None:
+    frames = [np.full((720, 1280, 3), 17, dtype=np.uint8) for _ in range(2)]
+    subject = _controller_for_frames(monkeypatch, frames)
+    monkeypatch.setattr(
+        subject,
+        "_detect_village_type",
+        lambda _frame, **_kwargs: HomeDiagnosticResult.UNKNOWN,
+    )
+
+    assert subject.wait_for_readiness(
+        timeout_seconds=2,
+        poll_interval_seconds=1,
+        monotonic=_advancing_clock(),
+        wait=lambda _seconds: None,
+    ) is HomeDiagnosticResult.UNKNOWN
+    assert all(np.count_nonzero(frame) == 0 for frame in frames)

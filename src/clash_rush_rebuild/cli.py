@@ -252,7 +252,10 @@ def build_no_input_diagnostic_cycle(
         binding,
     ) -> HomeDiagnosticResult:
         window = WindowService(binding, supervisor.capture_owned)
-        return NoInputHomeDiagnosticController(window).observe()
+        return NoInputHomeDiagnosticController(window).wait_for_readiness(
+            timeout_seconds=30,
+            poll_interval_seconds=0.5,
+        )
 
     return NoInputDiagnosticCycle(
         runtime,

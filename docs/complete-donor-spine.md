@@ -19,11 +19,11 @@ CoC_Bot was selected because it is the only reviewed licensed donor whose produc
 
 CoC_Bot has no automated test suite at this revision. Its `src/test.py` file is a commented manual harness and is copied, but it is not represented as passing donor tests.
 
-## Current boundary and adapter inventory
+## Sealed source and active adapter inventory
 
-The copy is intentionally inert: it is outside the installable package, absent from `pyproject.toml` package data and console scripts, has no generated `configs.py`, and its dependency list is not installed. The existing `clash-rush-rebuild` application does not import it. No BlueStacks process, capture, network request, or input was used while creating or testing this snapshot.
+The byte-sealed copy remains outside the installable package, absent from `pyproject.toml` package data and console scripts, and has no generated `configs.py`; this prevents its ADB, network, GUI, upgrade, and broad input dependencies from becoming reachable. The executable `diagnose-home` path now activates the donor production caller order through typed local adapters rather than importing those unsafe boundaries. No BlueStacks process, capture, network request, or input was used while implementing or testing this activation.
 
-The following donor boundaries are incompatible and must be replaced by thin adapters before activation:
+The following incompatible donor boundaries are replaced by thin local adapters in the active diagnostic splice:
 
 | Boundary | Donor behavior retained for study | Required local adapter |
 |---|---|---|
@@ -34,7 +34,22 @@ The following donor boundaries are incompatible and must be replaced by thin ada
 | Actions/spending | Upgrades, research, assistants, rewards, attacks, random/blind fallbacks enabled by defaults | Default-deny executor allowlist; all spending, rewards, account switching, unknown-screen input, network, and unapproved actions disabled |
 | Recovery/stop | Broad exception handling and app stop | Bounded fail-closed recovery, positive safe-state evidence, authoritative owned-process cleanup |
 
-This card freezes the complete source before boundary edits. Follow-on work may adapt only the tabled boundaries and must retain a mapping back to these sealed files.
+The sealed source remains byte-identical. Local adaptations are limited to the tabled boundaries and retain the mapping below.
+
+## Activated startup and recognition caller splice
+
+The executable path is `cli.build_no_input_diagnostic_cycle` -> `NoInputDiagnosticCycle.visit_once` -> `LifecycleSupervisor.start` -> `NoInputHomeDiagnosticController.wait_for_readiness` -> `WindowService.screenshot` -> `_detect_village_type` -> `LifecycleSupervisor.stop`. It activates these donor production callers and their order:
+
+1. CoC_Bot `src/coc_bot.py:27` calls `start_coc(detailed=True)` before any village work. The local diagnostic enters the same startup phase only after explicit one-use authorization and Job-owned launch.
+2. CoC_Bot `src/utils.py:536-570` owns one finite startup deadline, repeatedly captures, checks Home before Builder, tolerates unsettled/no-match frames, and stops on timeout. `wait_for_readiness` preserves that bounded polling and positive-evidence order over private in-memory frames; timeout/no-match returns `UNKNOWN`, and lifecycle cleanup always follows.
+3. CoC_Bot `src/utils.py:546-560` refreshes the cached frame before invoking the Home and Builder recognizers. `WindowService.screenshot` replaces that capture boundary with exact lifecycle-owned BGRA capture and donor-compatible BGR arrays; every captured array is cleared after one observation.
+4. BasePilot `app/core/bot.py:1570-1584` supplies the active Home/Builder portrait caller. Builder evidence remains first (`mbuilder.png`), then Home evidence (`builder.png`, `gbuilder.png`), and absence remains nonfatal.
+5. BasePilot `app/config.py:168-184,218-232` supplies live-size adaptation. Supported 16:9/16:10 profiles are selected normally; an otherwise valid unsupported aspect keeps the donor default 16:10 profile and scales it to the actual capture dimensions. The implementation does not widen `_ASPECT_TOLERANCE`.
+6. CoC_Bot `src/coc_bot.py:61-73` orders return/recovery before stop on normal and exceptional paths. The no-input variant cannot return Home or dismiss a popup because it owns no input capability; its recovery adaptation is authoritative Job stop and verified cleanup in the existing `finally`-equivalent lifecycle path.
+
+Closed internal observation reasons are `UNSUPPORTED_GEOMETRY`, `TEMPLATE_UNAVAILABLE`, `TEMPLATE_MALFORMED`, `OPENCV_FAILURE`, `INVALID_EVIDENCE`, `NO_MATCH`, `CAPTURE_FAILURE`, and `TIMEOUT`. They contain no pixels, paths, exception text, instance labels, or account identifiers. The executable public scalar remains only `HOME`, `BUILDER`, or `UNKNOWN`; lifecycle failures remain the bounded `LAUNCH`, `CAPTURE`, `RECOGNITION`, or `CLEANUP` stages.
+
+The donor Continue/update branch at `src/utils.py:562-567` is deliberately replaced, not activated: the no-input diagnostic has no click/input port, so popup, Continue, loading, and unsupported frames are observed again until positive village evidence or timeout. No popup is dismissed and no update/network path is reachable.
 
 ## Local lifecycle wiring
 

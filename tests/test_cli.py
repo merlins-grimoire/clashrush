@@ -874,7 +874,7 @@ def test_standard_runner_preserves_ordinary_scalar_with_inert_popen(
     assert stderr == ""
 
 
-def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
+def test_real_diagnostic_composition_polls_owned_capture_until_home_ready(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -885,6 +885,7 @@ def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
     )
     assert fixture is not None
     bgra = cv2.cvtColor(fixture, cv2.COLOR_BGR2BGRA).tobytes()
+    loading_bgra = bytes(len(bgra))
     slots = tuple(
         Slot(index, f"Instance {index}", f"Slot {index}", 1728, 1080, 240)
         for index in range(5)
@@ -927,6 +928,7 @@ def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
     class Supervisor:
         def __init__(self, host, *_args, **_kwargs):
             self.host = host
+            self.captures = iter((loading_bgra, bgra))
 
         def start(self, slot):
             events.append(f"start:{slot.index}")
@@ -935,7 +937,7 @@ def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
         def capture_owned(self, selected):
             assert selected is binding
             events.append("capture")
-            return 1728, 1080, bgra
+            return 1728, 1080, next(self.captures)
 
         def stop(self, selected, proof):
             assert selected is binding
@@ -962,6 +964,7 @@ def test_real_diagnostic_composition_wires_owned_capture_to_donor_controller(
         "snapshot:close",
         "approval",
         "start:0",
+        "capture",
         "capture",
         "stop",
         "mutex:release",

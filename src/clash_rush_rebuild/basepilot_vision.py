@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from importlib.resources import files
 
 import cv2
@@ -24,8 +25,29 @@ ASPECT_BASELINE: dict[str, tuple[int, int]] = {
 _ALLOWED_TEMPLATES = frozenset({"builder.png", "gbuilder.png", "mbuilder.png"})
 
 
+class RecognitionReason(StrEnum):
+    """Closed internal reasons without pixels, paths, or exception text."""
+
+    UNSUPPORTED_GEOMETRY = "UNSUPPORTED_GEOMETRY"
+    TEMPLATE_UNAVAILABLE = "TEMPLATE_UNAVAILABLE"
+    TEMPLATE_MALFORMED = "TEMPLATE_MALFORMED"
+    OPENCV_FAILURE = "OPENCV_FAILURE"
+    INVALID_EVIDENCE = "INVALID_EVIDENCE"
+    NO_MATCH = "NO_MATCH"
+    CAPTURE_FAILURE = "CAPTURE_FAILURE"
+    TIMEOUT = "TIMEOUT"
+
+
 class BasePilotRecognitionError(RuntimeError):
     """Copied donor recognition evidence is malformed or unavailable."""
+
+    def __init__(self, reason: RecognitionReason, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def _recognition_error(reason: RecognitionReason, message: str) -> BasePilotRecognitionError:
+    return BasePilotRecognitionError(reason, message)
 
 
 def resolve_aspect_key(width: int, height: int) -> str | None:
@@ -49,6 +71,7 @@ class BasePilotGeometry:
     ref_height: int
     width: int
     height: int
+    adaptation_reason: RecognitionReason | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -61,9 +84,23 @@ class BasePilotGeometry:
             or type(self.height) is not int
             or self.width <= 0
             or self.height <= 0
-            or resolve_aspect_key(self.width, self.height) != self.aspect_key
+            or (
+                resolve_aspect_key(self.width, self.height) != self.aspect_key
+                and self.adaptation_reason is not RecognitionReason.UNSUPPORTED_GEOMETRY
+            )
+            or (
+                resolve_aspect_key(self.width, self.height) is None
+                and self.adaptation_reason is not RecognitionReason.UNSUPPORTED_GEOMETRY
+            )
+            or (
+                resolve_aspect_key(self.width, self.height) is not None
+                and self.adaptation_reason is not None
+            )
         ):
-            raise BasePilotRecognitionError("supported immutable frame geometry required")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "supported immutable frame geometry required",
+            )
 
     @classmethod
     def from_frame(
@@ -79,7 +116,10 @@ class BasePilotGeometry:
             or frame.shape[2] != 3
             or frame.size == 0
         ):
-            raise BasePilotRecognitionError("exact nonempty BGR frame required")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "exact nonempty BGR frame required",
+            )
         height, width = frame.shape[:2]
         if (
             expected_size is not None
@@ -90,19 +130,39 @@ class BasePilotGeometry:
                 or expected_size != (width, height)
             )
         ):
-            raise BasePilotRecognitionError("frame disagrees with lifecycle binding")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "frame disagrees with lifecycle binding",
+            )
         aspect_key = resolve_aspect_key(width, height)
+        adaptation_reason = None
         if aspect_key is None:
-            raise BasePilotRecognitionError("capture aspect is unsupported")
+            # BasePilot leaves its default 16:10 profile selected, then scales
+            # that profile to the actual capture geometry.
+            aspect_key = ASPECT_16_10
+            adaptation_reason = RecognitionReason.UNSUPPORTED_GEOMETRY
         ref_width, ref_height = ASPECT_BASELINE[aspect_key]
-        return cls(aspect_key, ref_width, ref_height, width, height)
+        return cls(
+            aspect_key,
+            ref_width,
+            ref_height,
+            width,
+            height,
+            adaptation_reason,
+        )
 
 
 def _load_template(geometry: BasePilotGeometry, template_name: str) -> np.ndarray:
     if type(geometry) is not BasePilotGeometry:
-        raise BasePilotRecognitionError("immutable frame geometry required")
+        raise _recognition_error(
+            RecognitionReason.INVALID_EVIDENCE,
+            "immutable frame geometry required",
+        )
     if type(template_name) is not str or template_name not in _ALLOWED_TEMPLATES:
-        raise BasePilotRecognitionError("template name is not allowlisted")
+        raise _recognition_error(
+            RecognitionReason.INVALID_EVIDENCE,
+            "template name is not allowlisted",
+        )
     resource = (
         files("clash_rush_rebuild")
         / "assets"
@@ -111,14 +171,20 @@ def _load_template(geometry: BasePilotGeometry, template_name: str) -> np.ndarra
         / template_name
     )
     if not resource.is_file():
-        raise BasePilotRecognitionError("packaged template is unavailable")
+        raise _recognition_error(
+            RecognitionReason.TEMPLATE_UNAVAILABLE,
+            "packaged template is unavailable",
+        )
     payload = resource.read_bytes()
     encoded = np.frombuffer(payload, dtype=np.uint8)
     template = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
     encoded = None
     payload = b""
     if type(template) is not np.ndarray or template.size == 0:
-        raise BasePilotRecognitionError("packaged template is malformed")
+        raise _recognition_error(
+            RecognitionReason.TEMPLATE_MALFORMED,
+            "packaged template is malformed",
+        )
     return template
 
 
@@ -127,13 +193,19 @@ class VisionService:
 
     def __init__(self, geometry: BasePilotGeometry) -> None:
         if type(geometry) is not BasePilotGeometry:
-            raise BasePilotRecognitionError("immutable frame geometry required")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "immutable frame geometry required",
+            )
         self._geometry = geometry
 
     def _template_scale_xy(self, screen_img: np.ndarray) -> tuple[float, float]:
         height, width = screen_img.shape[:2]
         if (width, height) != (self._geometry.width, self._geometry.height):
-            raise BasePilotRecognitionError("frame geometry changed")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "frame geometry changed",
+            )
         return (
             width / self._geometry.ref_width,
             height / self._geometry.ref_height,
@@ -178,7 +250,10 @@ class VisionService:
     ) -> tuple[int | None, int | None]:
         """Preserve BasePilot's match, scaling, ROI, and center contract."""
         if type(screen_img) is not np.ndarray or screen_img.dtype != np.uint8:
-            raise BasePilotRecognitionError("exact BGR screen image required")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "exact BGR screen image required",
+            )
         if (
             type(threshold) not in (int, float)
             or type(threshold) is bool
@@ -186,7 +261,10 @@ class VisionService:
             or not 0 <= float(threshold) <= 1
             or type(scale_template) is not bool
         ):
-            raise BasePilotRecognitionError("template policy is malformed")
+            raise _recognition_error(
+                RecognitionReason.INVALID_EVIDENCE,
+                "template policy is malformed",
+            )
         template = _load_template(self._geometry, template_name)
         search_img: np.ndarray | None = None
         result: np.ndarray | None = None
@@ -199,7 +277,10 @@ class VisionService:
                     or len(region) != 4
                     or any(type(value) is not int for value in region)
                 ):
-                    raise BasePilotRecognitionError("template region is malformed")
+                    raise _recognition_error(
+                        RecognitionReason.INVALID_EVIDENCE,
+                        "template region is malformed",
+                    )
                 x, y, width, height = region
                 screen_height, screen_width = screen_img.shape[:2]
                 if (
@@ -210,7 +291,10 @@ class VisionService:
                     or x + width > screen_width
                     or y + height > screen_height
                 ):
-                    raise BasePilotRecognitionError("template region is out of bounds")
+                    raise _recognition_error(
+                        RecognitionReason.INVALID_EVIDENCE,
+                        "template region is out of bounds",
+                    )
                 search_img = screen_img[y : y + height, x : x + width]
                 offset_x, offset_y = x, y
             else:
@@ -233,7 +317,10 @@ class VisionService:
             template = None
             search_img = None
             result = None
-            raise BasePilotRecognitionError("template recognition failed") from None
+            raise _recognition_error(
+                RecognitionReason.OPENCV_FAILURE,
+                "template recognition failed",
+            ) from None
         finally:
             template = None
             search_img = None
