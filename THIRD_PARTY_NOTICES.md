@@ -10,6 +10,15 @@ Additional ignored research checkouts are recorded in `research/additional-donor
 
 The complete licenses remain available in ignored local checkouts under `references/<repository>/LICENSE`. The applicable CoC_Bot notice is reproduced here:
 
+The complete inert CoC_Bot runtime snapshot under `donors/coc_bot/` is copied
+unchanged from commit `a5c943afed0ed3b9abedbbc228b0889145ecaf24`
+(tree `d79368fbe550036f1542883f18434e318016b279`). It includes the donor's
+production source, runtime images, and its `LICENSE`; the snapshot is not part
+of the installable `clash_rush_rebuild` package. The donor's two font binaries
+are excluded because independent redistribution rights were not established.
+Exact file digests and the local adapter boundary are documented in
+`donors/coc_bot/README.md` and `docs/complete-donor-spine.md`.
+
 > MIT License
 >
 > Copyright (c) 2026 m24842

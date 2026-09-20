@@ -1,0 +1,2 @@
+# Preserve the sealed donor snapshot byte-for-byte, including upstream whitespace.
+donors/coc_bot/** -text whitespace=-trailing-space
