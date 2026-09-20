@@ -20,12 +20,14 @@ class InputAuthorizationError(RuntimeError):
 
 class InputPurpose(StrEnum):
     NO_INPUT_DIAGNOSTIC = "NO_INPUT_DIAGNOSTIC"
+    STARTUP_CONTINUE_ONLY = "STARTUP_CONTINUE_ONLY"
     MONITORED_ATTACK = "MONITORED_ATTACK"
 
 
 class InputAction(StrEnum):
     """Closed action vocabulary needed by the monitored attack path."""
 
+    STARTUP_CONTINUE = "STARTUP_CONTINUE"
     ACCOUNT_EXPORT_NAVIGATION = "ACCOUNT_EXPORT_NAVIGATION"
     ATTACK_NAVIGATION = "ATTACK_NAVIGATION"
     TROOP_DEPLOYMENT = "TROOP_DEPLOYMENT"
@@ -47,7 +49,10 @@ class InputAuthorization:
             purpose is InputPurpose.NO_INPUT_DIAGNOSTIC
             and live_gate is not None
         ) or (
-            purpose is InputPurpose.MONITORED_ATTACK
+            purpose in {
+                InputPurpose.STARTUP_CONTINUE_ONLY,
+                InputPurpose.MONITORED_ATTACK,
+            }
             and not callable(live_gate)
         ):
             raise InputAuthorizationError("input authorization is malformed")
@@ -64,6 +69,12 @@ class InputAuthorization:
     ) -> InputAuthorization:
         return cls(InputPurpose.MONITORED_ATTACK, live_gate)
 
+    @classmethod
+    def startup_continue_only(
+        cls, live_gate: Callable[[], bool]
+    ) -> InputAuthorization:
+        return cls(InputPurpose.STARTUP_CONTINUE_ONLY, live_gate)
+
     @property
     def purpose(self) -> InputPurpose:
         return self._purpose
@@ -71,7 +82,14 @@ class InputAuthorization:
     def require(self, action: InputAction) -> None:
         if type(action) is not InputAction:
             raise InputAuthorizationError("exact action is required")
-        if self._purpose is not InputPurpose.MONITORED_ATTACK:
+        allowed_action = (
+            self._purpose is InputPurpose.STARTUP_CONTINUE_ONLY
+            and action is InputAction.STARTUP_CONTINUE
+        ) or (
+            self._purpose is InputPurpose.MONITORED_ATTACK
+            and action is not InputAction.STARTUP_CONTINUE
+        )
+        if not allowed_action:
             raise InputAuthorizationError("physical input is not authorized")
         try:
             allowed = self._live_gate is not None and self._live_gate() is True

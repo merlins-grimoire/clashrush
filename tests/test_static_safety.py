@@ -26,6 +26,7 @@ def test_production_source_confines_attack_input_and_exposes_no_prohibited_trans
     assert sorted(memory_capture_carriers) == [
         "basepilot_window.py",
         "no_input_home_diagnostic.py",
+        "startup_continue_recovery.py",
     ]
 
     native_input = ("mouse_event", "keybd_event", "setcursorpos")

@@ -608,6 +608,37 @@ def run_guided_setup(
     return destination
 
 
+def install_private_startup_font(project_root: Path, source_path: Path) -> Path:
+    """Copy one operator-provided font into the ignored private asset boundary."""
+    project = Path(project_root).resolve(strict=True)
+    source = Path(source_path)
+    try:
+        if source.is_symlink() or not source.is_file():
+            raise OSError
+        payload = source.read_bytes()
+    except BaseException:
+        raise InstallationValidationError("startup font is unavailable") from None
+    if not payload or len(payload) > 16 * 1024 * 1024:
+        raise InstallationValidationError("startup font is invalid") from None
+    private = project / "private"
+    assets = private / "assets"
+    destination = assets / "CCBackBeat.ttf"
+    if any(_is_reparse_point(path) for path in (private, assets, destination)):
+        raise InstallationValidationError("private font path is unsafe")
+    if destination.exists():
+        raise InstallationValidationError("private startup font already exists")
+    private.mkdir(exist_ok=True)
+    assets.mkdir(exist_ok=True)
+    try:
+        with destination.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        raise InstallationValidationError("private startup font already exists") from None
+    return destination
+
+
 def export_synthetic_installation() -> str:
     """Return a valid, deterministic, public-safe five-account example."""
     synthetic = SetupAnswers(

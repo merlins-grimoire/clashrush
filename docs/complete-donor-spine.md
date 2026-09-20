@@ -51,6 +51,22 @@ Closed internal observation reasons are `UNSUPPORTED_GEOMETRY`, `TEMPLATE_UNAVAI
 
 The donor Continue/update branch at `src/utils.py:562-567` is deliberately replaced, not activated: the no-input diagnostic has no click/input port, so popup, Continue, loading, and unsupported frames are observed again until positive village evidence or timeout. No popup is dismissed and no update/network path is reachable.
 
+## Activated Continue-only startup recovery
+
+The separate action-capable path is `issue-startup-continue-approval` -> `startup-continue-one` -> `StartupContinueCycle.visit_once` -> `LifecycleSupervisor.start` -> `StartupContinueController.run` -> `Win32StartupContinueInput.click_continue` -> re-observation -> `LifecycleSupervisor.stop`. It copies the complete compatible CoC_Bot `start_coc` slice at `src/utils.py:522-580`, including `render_text` at `src/utils.py:335-352` and the center-normalized `locate`/`batch_locate` contract at `src/utils.py:1631-1716`.
+
+The local boundary replacements are deliberately narrow:
+
+1. CoC_Bot launch, capture, and stop are replaced by the existing exact one-instance Job-owned Win32 lifecycle and memory-only capture.
+2. `Input_Handler.click` is replaced by one exact native click at the detected normalized Continue center. The immutable binding, a fresh owned capture, the live gate, the closed `STARTUP_CONTINUE` action, and the wrapper's unused state are rechecked at the input boundary. A run can attempt that click only once.
+3. `update_coc` is unreachable. Locally rendered `Update`/`UPDATE` evidence returns only `UPDATE_REQUIRED`, with no input or network operation.
+4. Home and Builder evidence is checked before Continue on every newly captured frame. A successful click settles and then re-enters that repeated capture/classification order until positive village evidence or timeout.
+5. Every other popup/action remains unrepresentable: Okay, Exit, Claim, Collect, Skip, Yes/No, rewards, chest flow, purchases, account switching, unknown-screen input, and blind/empty-area clicks have no executor.
+
+`STARTUP_CONTINUE_ONLY` is a separate durable approval action bound to the exact candidate tree and canonical READY lifecycle bytes, expiring within ten minutes and durably consumed before launch. Missing, expired, replayed, mismatched, or malformed approval prevents process creation. This action path is not the no-input diagnostic and cannot be entered through `diagnose-home`.
+
+The upstream `SupercellMagic.ttf` and `CCBackBeat.ttf` remain excluded because the embedded Active Images terms do not establish redistribution permission. `setup-startup-font` accepts an operator-provided compatible font and copies it only to ignored `private/assets/CCBackBeat.ttf`; neither the font, generated templates, its source path, nor a digest is packaged or logged. Templates exist only as transient arrays in memory.
+
 ## Local lifecycle wiring
 
 `src/clash_rush_rebuild/donor_spine_lifecycle_adapter.py` is the thin adapter for the donor's `src/launch.py` lifecycle caller. The donor source remains byte-sealed and inert. The `donor-visit-one` CLI path replaces generated Python configuration and donor process helpers with these existing reviewed local seams:

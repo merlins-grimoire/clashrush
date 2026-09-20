@@ -248,6 +248,34 @@ class Win32BoundInput:
         return True
 
 
+class Win32StartupContinueInput:
+    """One-use wrapper exposing only a positively located Continue click."""
+
+    def __init__(
+        self,
+        binding: PlayerBinding,
+        safety_check,
+        authorization: InputAuthorization,
+    ) -> None:
+        if (
+            type(authorization) is not InputAuthorization
+            or authorization.purpose.value != "STARTUP_CONTINUE_ONLY"
+        ):
+            raise RuntimeSafetyError("exact Continue authorization required")
+        self._input = Win32BoundInput(binding, safety_check, authorization)
+        self._used = False
+
+    def click_continue(
+        self, binding: PlayerBinding, x: float, y: float
+    ) -> bool:
+        if self._used:
+            return False
+        self._used = True
+        return self._input.click(
+            binding, x, y, action=InputAction.STARTUP_CONTINUE
+        )
+
+
 def _state_store(project: Path) -> LifecycleStateStore:
     var = project / "var"
     var.mkdir(exist_ok=True)
@@ -586,6 +614,7 @@ __all__ = [
     "LocalAuditLog",
     "StoppedControlPreparer",
     "Win32BoundInput",
+    "Win32StartupContinueInput",
     "prepare_native_mvp_control",
     "run_native_mvp_visit",
 ]

@@ -48,6 +48,7 @@ class ReconciliationError(RuntimeError):
 class ApprovalAction(StrEnum):
     RECONCILE_WINDOW_BINDING = "RECONCILE_WINDOW_BINDING"
     LAUNCH_WINDOW_BINDING_DIAGNOSTIC = "LAUNCH_WINDOW_BINDING_DIAGNOSTIC"
+    STARTUP_CONTINUE_ONLY = "STARTUP_CONTINUE_ONLY"
 
 
 @dataclass(frozen=True, slots=True)

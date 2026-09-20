@@ -25,14 +25,17 @@ def test_monitored_attack_authorizes_only_closed_attack_path_vocabulary() -> Non
 
     assert authorization.purpose is InputPurpose.MONITORED_ATTACK
     assert set(InputAction) == {
+        InputAction.STARTUP_CONTINUE,
         InputAction.ACCOUNT_EXPORT_NAVIGATION,
         InputAction.ATTACK_NAVIGATION,
         InputAction.TROOP_DEPLOYMENT,
         InputAction.RETURN_HOME,
         InputAction.CLEANUP_RELEASE,
     }
-    for action in InputAction:
+    for action in set(InputAction) - {InputAction.STARTUP_CONTINUE}:
         authorization.require(action)
+    with pytest.raises(InputAuthorizationError, match="not authorized"):
+        authorization.require(InputAction.STARTUP_CONTINUE)
     with pytest.raises(InputAuthorizationError, match="exact action"):
         authorization.require("purchase")  # type: ignore[arg-type]
 

@@ -13,6 +13,7 @@ from .lifecycle import PlayerBinding, StopRecord
 from .lifecycle_state import LifecycleStateStore, Ready
 from .no_input_home_diagnostic import HomeDiagnosticResult
 from .registry import Slot
+from .startup_continue_recovery import StartupContinueResult
 from .win32_runtime import DEFAULT_MUTEX_NAME
 
 
@@ -253,5 +254,94 @@ class NoInputDiagnosticCycle:
         if failure is not None:
             _raise_diagnostic_stage(failure)
         if type(result) is not HomeDiagnosticResult:
+            _raise_diagnostic_stage(DiagnosticFailureStage.RECOGNITION)
+        return result
+
+
+class StartupContinueCycle:
+    """One approval-bound Continue-only recovery inside lifecycle ownership."""
+
+    def __init__(
+        self,
+        runtime: MutexRuntimePort,
+        *,
+        load_registry: Callable[[], tuple[Slot, ...]],
+        make_state_store: Callable[[], LifecycleStateStore],
+        observe_player_count: Callable[[], int],
+        approvals: ApprovalPort,
+        candidate_tree: Callable[[], str],
+        make_supervisor: Callable[[LifecycleStateStore, str], SupervisorPort],
+        recover: Callable[[SupervisorPort, PlayerBinding], StartupContinueResult],
+    ) -> None:
+        self._runtime = runtime
+        self._load_registry = load_registry
+        self._make_state_store = make_state_store
+        self._observe_player_count = observe_player_count
+        self._approvals = approvals
+        self._candidate_tree = candidate_tree
+        self._make_supervisor = make_supervisor
+        self._recover = recover
+        self._disabled = False
+
+    def visit_once(self) -> StartupContinueResult:
+        if self._disabled:
+            _raise_diagnostic_stage(DiagnosticFailureStage.LAUNCH)
+        lease: MutexLeasePort | None = None
+        supervisor: SupervisorPort | None = None
+        binding: PlayerBinding | None = None
+        result: StartupContinueResult | None = None
+        failure: DiagnosticFailureStage | None = None
+        try:
+            lease = self._runtime.acquire_mutex()
+        except BaseException:
+            failure = DiagnosticFailureStage.LAUNCH
+        if lease is not None:
+            try:
+                if lease.abandoned:
+                    raise CycleError("abandoned mutex requires operator reconciliation")
+                lease.require_usable()
+                slots = self._load_registry()
+                if (
+                    type(slots) is not tuple
+                    or len(slots) != 5
+                    or tuple(slot.index for slot in slots) != (0, 1, 2, 3, 4)
+                ):
+                    raise CycleError("exact ordered five-slot registry required")
+                store = self._make_state_store()
+                state, state_bytes = store.load_with_bytes()
+                if type(state) is not Ready:
+                    raise CycleError("ACTIVE lifecycle requires operator reconciliation")
+                count = self._observe_player_count()
+                if type(count) is not int or count != 0:
+                    raise CycleError("pre-existing player blocks recovery launch")
+                self._approvals.validate_then_consume(
+                    ApprovalAction.STARTUP_CONTINUE_ONLY,
+                    self._candidate_tree(),
+                    state,
+                    state_bytes,
+                )
+                supervisor = self._make_supervisor(store, DEFAULT_MUTEX_NAME)
+                binding = supervisor.start(slots[state.next_slot])
+            except BaseException:
+                failure = DiagnosticFailureStage.LAUNCH
+            if binding is not None and supervisor is not None:
+                try:
+                    result = self._recover(supervisor, binding)
+                    if type(result) is not StartupContinueResult:
+                        failure = DiagnosticFailureStage.RECOGNITION
+                except BaseException:
+                    failure = DiagnosticFailureStage.RECOGNITION
+                try:
+                    supervisor.stop(binding, None)
+                except BaseException:
+                    failure = DiagnosticFailureStage.CLEANUP
+            try:
+                lease.release()
+            except BaseException:
+                self._disabled = True
+                failure = DiagnosticFailureStage.CLEANUP
+        if failure is not None:
+            _raise_diagnostic_stage(failure)
+        if type(result) is not StartupContinueResult:
             _raise_diagnostic_stage(DiagnosticFailureStage.RECOGNITION)
         return result

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .approval_reconciliation import (
+    ApprovalAction,
     DurableReconciliationAudit,
     OneShotApprovalService,
     PrivateApprovalStorage,
@@ -28,6 +29,7 @@ from .cycle import (
     DiagnosticStageError,
     InertCycle,
     NoInputDiagnosticCycle,
+    StartupContinueCycle,
 )
 from .diagnostic_child_job import (
     DiagnosticChildOutcome,
@@ -39,14 +41,23 @@ from .donor_spine_lifecycle_adapter import (
     ProtectedLifecycleLog,
     SpineBoundaryError,
 )
-from .guided_setup import export_synthetic_installation, run_guided_setup
+from .guided_setup import (
+    export_synthetic_installation,
+    install_private_startup_font,
+    run_guided_setup,
+)
+from .input_authorization import InputAuthorization
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, StopRecord
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import LifecycleStateStore, Ready
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
 from .no_input_home_diagnostic import (
     HomeDiagnosticResult,
     NoInputHomeDiagnosticController,
+)
+from .startup_continue_recovery import (
+    StartupContinueController,
+    StartupContinueResult,
 )
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import NativeWin32Api, Win32Runtime
@@ -273,6 +284,111 @@ def build_no_input_diagnostic_cycle(
     )
 
 
+def build_startup_continue_cycle(
+    project_root: str,
+    slots_path: str,
+) -> StartupContinueCycle:
+    """Compose the approval-bound donor Continue-only recovery slice."""
+    from .mvp_local_native import Win32StartupContinueInput
+
+    project = Path(project_root).resolve(strict=True)
+    slots = Path(slots_path)
+    native = NativeLifecycleApi()
+    runtime = Win32Runtime(native)
+    host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
+    approvals = OneShotApprovalService(PrivateApprovalStorage(project))
+
+    def make_state_store() -> LifecycleStateStore:
+        return build_native_state_store(project)
+
+    def observe_player_count() -> int:
+        snapshot = host.complete_player_snapshot()
+        try:
+            return len(snapshot.identities)
+        finally:
+            snapshot.close()
+
+    def make_supervisor(
+        store: LifecycleStateStore,
+        mutex_name: str,
+    ) -> LifecycleSupervisor:
+        return LifecycleSupervisor(
+            host,
+            store,
+            AcquiredMutexLease(mutex_name),
+            nonce_factory=lambda: secrets.token_hex(16),
+            preserve_ready_cursor=True,
+        )
+
+    def recover(supervisor: LifecycleSupervisor, binding) -> StartupContinueResult:
+        window = WindowService(binding, supervisor.capture_owned)
+        village = NoInputHomeDiagnosticController(window)
+        live = True
+
+        def classify(frame):
+            observed = village._detect_village_type(
+                frame, expected_size=(binding.width, binding.height)
+            )
+            return StartupContinueResult(observed.value)
+
+        authorization = InputAuthorization.startup_continue_only(lambda: live)
+        input_port = Win32StartupContinueInput(
+            binding, supervisor.capture_owned, authorization
+        )
+        try:
+            return StartupContinueController(
+                binding=binding,
+                window=window,
+                input_port=input_port,
+                font_path=project / "private" / "assets" / "CCBackBeat.ttf",
+                classify_village=classify,
+            ).run(
+                timeout_seconds=60,
+                poll_interval_seconds=0.5,
+                settle_seconds=1.0,
+            )
+        finally:
+            live = False
+
+    return StartupContinueCycle(
+        runtime,
+        load_registry=lambda: load_private_registry(
+            project, slots, _BLUESTACKS_CONF
+        ),
+        make_state_store=make_state_store,
+        observe_player_count=observe_player_count,
+        approvals=approvals,
+        candidate_tree=lambda: _candidate_tree(project),
+        make_supervisor=make_supervisor,
+        recover=recover,
+    )
+
+
+def issue_startup_continue_approval(
+    project_root: str, lifetime_seconds: int
+) -> object:
+    """Issue one exact-tree/state approval without launching BlueStacks."""
+    project = Path(project_root).resolve(strict=True)
+    runtime = Win32Runtime(NativeWin32Api())
+    lease = runtime.acquire_mutex()
+    try:
+        if lease.abandoned:
+            raise ReconciliationError("abandoned mutex forbids approval issuance")
+        lease.require_usable()
+        state, state_bytes = build_native_state_store(project).load_with_bytes()
+        if type(state) is not Ready:
+            raise ReconciliationError("READY lifecycle is required")
+        return OneShotApprovalService(PrivateApprovalStorage(project)).grant(
+            ApprovalAction.STARTUP_CONTINUE_ONLY,
+            _candidate_tree(project),
+            state,
+            state_bytes,
+            lifetime_seconds=lifetime_seconds,
+        )
+    finally:
+        lease.release()
+
+
 def _candidate_tree(project: Path) -> str:
     try:
         status = subprocess.run(
@@ -442,6 +558,24 @@ def _parser() -> argparse.ArgumentParser:
         help="interactively create the private installation configuration",
     )
     setup.add_argument("--project-root", required=True)
+    setup_font = subcommands.add_parser(
+        "setup-startup-font",
+        help="copy an operator-provided startup font into private assets",
+    )
+    setup_font.add_argument("--project-root", required=True)
+    setup_font.add_argument("--font", required=True)
+    issue_continue = subcommands.add_parser(
+        "issue-startup-continue-approval",
+        help="issue one short-lived Continue-only startup approval",
+    )
+    issue_continue.add_argument("--project-root", required=True)
+    issue_continue.add_argument("--lifetime-seconds", type=int, default=300)
+    continue_once = subcommands.add_parser(
+        "startup-continue-one",
+        help="consume approval for one bounded Continue-only startup recovery",
+    )
+    continue_once.add_argument("--project-root", required=True)
+    continue_once.add_argument("--slots", required=True)
     export = subcommands.add_parser(
         "export-setup-example",
         help="write a public-safe synthetic installation configuration",
@@ -509,6 +643,9 @@ def main(
     diagnostic_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
     diagnostic_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     authorized_visit_runner: Callable[[str, str], object] | None = None,
+    startup_font_installer: Callable[[Path, Path], object] = install_private_startup_font,
+    startup_approval_issuer: Callable[[str, int], object] = issue_startup_continue_approval,
+    startup_continue_runner: Callable[[str, str], StartupContinueResult] | None = None,
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
     if tuple(diagnostic_argv[:1]) == ("diagnose-home",):
@@ -536,6 +673,27 @@ def main(
         if args.command == "setup":
             setup_runner(Path(args.project_root))
             return 0
+        if args.command == "setup-startup-font":
+            startup_font_installer(Path(args.project_root), Path(args.font))
+            return 0
+        if args.command == "issue-startup-continue-approval":
+            startup_approval_issuer(args.project_root, args.lifetime_seconds)
+            print("startup Continue approval issued")
+            return 0
+        if args.command == "startup-continue-one":
+            runner = startup_continue_runner or (
+                lambda project_root, slots_path: build_startup_continue_cycle(
+                    project_root, slots_path
+                ).visit_once()
+            )
+            result = runner(args.project_root, args.slots)
+            if type(result) is not StartupContinueResult:
+                raise RuntimeError("startup recovery result is malformed")
+            print(result.value)
+            return 0 if result in {
+                StartupContinueResult.HOME,
+                StartupContinueResult.BUILDER,
+            } else 1
         if args.command == "mvp-setup":
             _local_control_store(args.project_root).setup(
                 MvpConfiguration(
