@@ -30,6 +30,51 @@ Copied/adapted production functions and callers:
   into `tests/test_startup_debug.py`. No private screenshot fixture is used.
   New synthetic tests cover the stronger control, authorization, evidence and
   native seams; there is no claim that the donor supplied those extra tests.
+- `src/clash_rush/bluestacks_launcher.py:35-55,189-217,276-326`:
+  `_restore_window`, `_corrected_root_width`, `_normalize_window_geometry` and
+  their pre-detection production ordering, now in `startup_geometry.py`.
+  `tests/test_bluestacks_launcher.py:37-54` supplies the pinned scaled-render
+  policy and host-chrome correction regression. The initial transplant omitted
+  this required production dependency: copying the icon guard without normalizing
+  the render aspect can reject an otherwise valid launcher. This repair restores
+  the donor algorithm, not a new target calibration or relaxed icon threshold.
+
+## Geometry normalization repair
+
+Only the diagnostic composition uses `StartupGeometrySupervisor`. After the
+existing consumed `STARTUP_DEBUG` approval and Job-owned launch, it restores the
+exact root (`SW_RESTORE`), waits 150 ms, and rebinds the exact root/render identities.
+It retains the donor width correction `root_width + round(render_height * 16/9)
+- render_width`, at most four resize attempts, 200 ms settle per attempt, minimum
+root bounds 700x430, minimum render bounds 640x360, and relative aspect tolerance
+0.015. Already-conforming geometry is restored/rebound but never resized.
+Normalization has an additional ten-second admission deadline.
+
+Every rebind uses a fresh retained-handle Job-member snapshot, exact title/root
+selection, the existing render-lineage selection and sibling-tie rejection, and
+current Job/identity/ancestry/size/unlocked/non-iconic checks. Handles close even
+when a rebind fails. Changed root or render HWND/process identity, missing or
+ambiguous render, locked/minimized state, failed bounds/resize/restore postcondition,
+or nonconvergence stops preparation. There is no replacement-window fallback.
+The initial lifecycle capture-health probe remains transient and unchanged;
+stable diagnostic capture, protected evidence, icon detection and possible input
+are constructed only after successful normalization. No pre-resize frame is reused.
+The normalized binding becomes the supervisor's capture/stop binding. On failure,
+the original binding still authorizes only Job-owned stop; no diagnostic/input
+port is constructed. A stop-proof failure preserves blocked ACTIVE as before.
+
+Microsoft Learn references checked for this repair:
+
+- https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow
+  — Parameters (`SW_RESTORE`) and Return value. The BOOL reports prior visibility,
+  not success; a zero return cannot be treated as a failed restore. Rebinding and
+  visible/non-iconic postconditions prove the restoration instead.
+- https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos
+  — Parameters (`SWP_NOZORDER`, `SWP_NOACTIVATE`) and Return value. Preserve the
+  donor flags and reject a zero result. Pointer-width HWND signatures are explicit.
+
+All repair tests use synthetic native ports; no live normalization or new approval
+has been performed. Live compatibility remains separately owner-gated.
 
 Compared complete competing seams:
 

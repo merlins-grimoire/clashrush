@@ -17,7 +17,7 @@ from .basepilot_window import WindowService
 from .config import load_private_registry
 from .cycle import StartupDebugCycle
 from .input_authorization import InputAuthorization
-from .lifecycle import AcquiredMutexLease, LifecycleSupervisor
+from .lifecycle import AcquiredMutexLease
 from .lifecycle_state import Ready
 from .mvp_local_native import Win32BoundInput
 from .no_input_home_diagnostic import NoInputHomeDiagnosticController
@@ -29,6 +29,7 @@ from .startup_debug import (
     StartupDebugError,
     StartupDetector,
 )
+from .startup_geometry import NativeGeometryApi, StartupGeometrySupervisor
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import Win32Runtime
 
@@ -201,12 +202,13 @@ def build_cycle(project_root, slots_path):
         observe_player_count=player_count,
         approvals=OneShotApprovalService(PrivateApprovalStorage(project)),
         candidate_tree=lambda: _candidate_tree(project),
-        make_supervisor=lambda store, name: LifecycleSupervisor(
+        make_supervisor=lambda store, name: StartupGeometrySupervisor(
             host,
             store,
             AcquiredMutexLease(name),
             nonce_factory=lambda: secrets.token_hex(16),
             preserve_ready_cursor=True,
+            geometry_api=NativeGeometryApi(native._user32),
         ),
         recover=recover,
     )

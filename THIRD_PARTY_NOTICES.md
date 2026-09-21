@@ -97,9 +97,11 @@ Exact file digests and the local adapter boundary are documented in
 
 ## First-party source reference
 
-The diagnostic-only `startup_debug.py` and `startup_debug_native.py` additionally
+The diagnostic-only `startup_debug.py`, `startup_debug_native.py`, and
+`startup_geometry.py` additionally
 adapt this same first-party revision's `bluestacks_launcher.py` generic icon
-guard/stability, `instance_switch.py` ordered startup popup loop, and `observe.py`
+guard/stability and bounded root geometry normalization (including its production
+ordering and donor width-correction test), `instance_switch.py` ordered startup popup loop, and `observe.py`
 paired crosshair evidence seam. Synthetic guard tests are adapted from
 `tests/test_bluestacks_launcher.py`. Exact callers, boundary replacements and
 non-reused behavior are recorded in `docs/startup-debug-transplant.md`; no new
