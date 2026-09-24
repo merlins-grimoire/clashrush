@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import ntpath
+import threading
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Protocol
@@ -27,6 +28,9 @@ TOKEN_USER = 1
 JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 DUPLICATE_SAME_ACCESS = 0x00000002
+
+_ABANDONED_MUTEX_NAMES: set[str] = set()
+_ABANDONED_MUTEX_NAMES_LOCK = threading.Lock()
 
 
 class Win32RuntimeError(RuntimeError):
@@ -701,8 +705,14 @@ class Win32Runtime:
                 raise Win32RuntimeError("mutex handle close failed") from None
             raise
         if result == WAIT_OBJECT_0:
-            return ProtectedMutexLease(self._api, handle, name, False)
+            with _ABANDONED_MUTEX_NAMES_LOCK:
+                abandoned = name in _ABANDONED_MUTEX_NAMES
+            return ProtectedMutexLease(
+                self._api, handle, name, abandoned
+            )
         if result == WAIT_ABANDONED:
+            with _ABANDONED_MUTEX_NAMES_LOCK:
+                _ABANDONED_MUTEX_NAMES.add(name)
             return ProtectedMutexLease(self._api, handle, name, True)
         if self._api.close_handle(handle) is not True:
             raise Win32RuntimeError("mutex handle close failed")

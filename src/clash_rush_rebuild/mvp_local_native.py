@@ -125,6 +125,7 @@ class Win32BoundInput:
         self._binding = binding
         self._safety_check = safety_check
         self._authorization = authorization
+        self._held_keys: set[int] = set()
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         _configure_input_signatures(self._user32)
 
@@ -234,6 +235,7 @@ class Win32BoundInput:
             if not self._authorized(action):
                 return False
             self._user32.keybd_event(key, 0, 0, None)
+            self._held_keys.add(key)
         return True
 
     def key_up(
@@ -242,9 +244,17 @@ class Win32BoundInput:
         # Releasing held controls is cleanup and must survive lost authorization.
         if binding != self._binding or action is not InputAction.CLEANUP_RELEASE:
             return False
-        for key in keys:
-            if type(key) is int and 1 <= key <= 255:
-                self._user32.keybd_event(key, 0, 0x0002, None)
+        requested = tuple(
+            dict.fromkeys(
+                key for key in keys if type(key) is int and 1 <= key <= 255
+            )
+        )
+        releasable = tuple(key for key in requested if key in self._held_keys)
+        if not releasable:
+            return False
+        for key in releasable:
+            self._user32.keybd_event(key, 0, 0x0002, None)
+            self._held_keys.discard(key)
         return True
 
 

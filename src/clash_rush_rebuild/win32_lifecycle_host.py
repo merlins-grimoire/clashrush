@@ -235,6 +235,8 @@ class NativeLifecycleApi(NativeWin32Api):
     @staticmethod
     def _enumerate_windows(
         native_call: Callable[[object, int], object],
+        *,
+        allow_empty_zero: bool = False,
     ) -> tuple[int, ...]:
         windows: list[int] = []
         callback_error: BaseException | None = None
@@ -242,6 +244,8 @@ class NativeLifecycleApi(NativeWin32Api):
         def visit(hwnd: int, _unused: int) -> bool:
             nonlocal callback_error
             try:
+                if len(windows) >= _MAX_WINDOWS:
+                    raise Win32LifecycleHostError("window enumeration overflow")
                 windows.append(int(hwnd))
                 return True
             except BaseException as exc:  # noqa: BLE001 - callback must fail closed
@@ -254,7 +258,9 @@ class NativeLifecycleApi(NativeWin32Api):
             raise Win32LifecycleHostError(
                 "window enumeration callback failed"
             ) from callback_error
-        if not result:
+        if not result and not (
+            allow_empty_zero and not windows and ctypes.get_last_error() == 0
+        ):
             raise Win32LifecycleHostError("window enumeration failed")
         return tuple(windows)
 
@@ -265,7 +271,8 @@ class NativeLifecycleApi(NativeWin32Api):
         if type(root) is not int or root <= 0:
             raise Win32LifecycleHostError("positive root HWND required")
         return self._enumerate_windows(
-            lambda callback, value: self._user32.EnumChildWindows(root, callback, value)
+            lambda callback, value: self._user32.EnumChildWindows(root, callback, value),
+            allow_empty_zero=True,
         )
 
     def is_window(self, hwnd: int) -> bool:
@@ -358,6 +365,15 @@ class NativeLifecycleApi(NativeWin32Api):
                     problem = "bitmap selection failed"
             if problem is None and not self._user32.PrintWindow(hwnd, memory_dc, 2):
                 problem = "PrintWindow failed"
+            if problem is None:
+                try:
+                    restored = self._gdi32.SelectObject(memory_dc, old)
+                except BaseException:  # noqa: BLE001 - capture must fail closed
+                    restored = None
+                if not restored or int(restored) in {-1, ctypes.c_void_p(-1).value}:
+                    problem = "bitmap deselection failed"
+                else:
+                    old = None
             if problem is None:
                 size = width * height * 4
                 header = BITMAPINFOHEADER(

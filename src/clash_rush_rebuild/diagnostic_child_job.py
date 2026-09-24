@@ -27,6 +27,8 @@ SUPPORTED_PYTHON_MINORS = frozenset({(3, 11), (3, 13)})
 _CREATION_FLAGS_INDEX = 5
 _CREATE_PROCESS_ARGC = 9
 _original_create_process = None
+_original_handle_factory = None
+_original_close_handle = None
 _create_process_install_lock = threading.Lock()
 _spawn_owner = threading.local()
 
@@ -73,7 +75,7 @@ class DiagnosticJobOwner:
     cleaned: bool = False
     spawn_claimed: bool = False
 
-    def cleanup_created(self, process: object, thread: object) -> None:
+    def cleanup_created(self, process: object | None, thread: object | None) -> None:
         """Retire a raw CreateProcess result through every owned authority."""
         if self.cleaned:
             return
@@ -93,7 +95,7 @@ class DiagnosticJobOwner:
         except BaseException:
             clean = False
             job_terminated = False
-        if not self.assigned:
+        if not self.assigned and process is not None:
             attempt(lambda: self.runtime.terminate_process(process))
         elif not job_terminated and self.retained_process is not None:
             attempt(lambda: self.runtime.terminate_process(self.retained_process))
@@ -213,6 +215,52 @@ def _job_owned_create_process(*args, **kwargs):
         raise DiagnosticChildJobError("diagnostic child ownership failed") from None
 
 
+def _job_owned_handle(value):
+    """Transfer the raw process handle only after Popen's Handle adopts it."""
+    if _original_handle_factory is None:
+        raise DiagnosticChildJobError("Popen Handle wrapper is not installed")
+    adopted = _original_handle_factory(value)
+    owner = getattr(_spawn_owner, "owner", None)
+    if type(owner) is DiagnosticJobOwner and owner.raw_process == value:
+        owner.raw_process = None
+    return adopted
+
+
+def _job_owned_close_handle(value):
+    """Record CPython's successful raw thread-handle close exactly once."""
+    if _original_close_handle is None:
+        raise DiagnosticChildJobError("CloseHandle wrapper is not installed")
+    result = _original_close_handle(value)
+    owner = getattr(_spawn_owner, "owner", None)
+    if type(owner) is DiagnosticJobOwner and owner.raw_thread == value:
+        owner.raw_thread = None
+    return result
+
+
+def _install_popen_handle_tracking(winapi: object) -> None:
+    global _original_handle_factory, _original_close_handle
+    current_handle = getattr(subprocess, "Handle", None)
+    current_close = getattr(winapi, "CloseHandle", None)
+    if current_handle is None or current_close is None:
+        return
+    if _original_handle_factory is None:
+        _original_handle_factory = current_handle
+        _job_owned_handle._clash_rush_diagnostic_handle = True  # type: ignore[attr-defined]
+        subprocess.Handle = _job_owned_handle
+    elif current_handle is not _job_owned_handle:
+        if getattr(current_handle, "_clash_rush_diagnostic_handle", False) is not True:
+            raise DiagnosticChildJobError("unknown Popen Handle wrapper")
+        subprocess.Handle = _job_owned_handle
+    if _original_close_handle is None:
+        _original_close_handle = current_close
+        _job_owned_close_handle._clash_rush_diagnostic_close = True  # type: ignore[attr-defined]
+        winapi.CloseHandle = _job_owned_close_handle
+    elif current_close is not _job_owned_close_handle:
+        if getattr(current_close, "_clash_rush_diagnostic_close", False) is not True:
+            raise DiagnosticChildJobError("unknown CloseHandle wrapper")
+        winapi.CloseHandle = _job_owned_close_handle
+
+
 def _install_job_owned_create_process_once() -> None:
     """Install the donor-derived permanent thread-gated wrapper exactly once."""
     global _original_create_process
@@ -224,6 +272,7 @@ def _install_job_owned_create_process_once() -> None:
         if _original_create_process is not None:
             if current is not _job_owned_create_process:
                 raise DiagnosticChildJobError("unknown CreateProcess wrapper")
+            _install_popen_handle_tracking(winapi)
             return
         if getattr(current, "_clash_rush_diagnostic_job_owned", False) is True:
             original = getattr(current, "_clash_rush_true_original", None)
@@ -233,6 +282,7 @@ def _install_job_owned_create_process_once() -> None:
             _job_owned_create_process._clash_rush_true_original = original  # type: ignore[attr-defined]
             _job_owned_create_process._clash_rush_diagnostic_job_owned = True  # type: ignore[attr-defined]
             winapi.CreateProcess = _job_owned_create_process
+            _install_popen_handle_tracking(winapi)
             return
         if (
             not isinstance(current, types.BuiltinFunctionType)
@@ -253,6 +303,7 @@ def _install_job_owned_create_process_once() -> None:
         _job_owned_create_process._clash_rush_true_original = current  # type: ignore[attr-defined]
         _job_owned_create_process._clash_rush_diagnostic_job_owned = True  # type: ignore[attr-defined]
         winapi.CreateProcess = _job_owned_create_process
+        _install_popen_handle_tracking(winapi)
 
 
 def _python_minor() -> tuple[int, int]:
@@ -383,7 +434,7 @@ def run_owned_diagnostic_child(
         if type(exc) is subprocess.TimeoutExpired:
             reason = DiagnosticParentReason.TIMEOUT
         if owner is not None and not owner.cleaned:
-            if owner.raw_process is not None and owner.raw_thread is not None:
+            if owner.raw_process is not None or owner.raw_thread is not None:
                 owner.cleanup_created(owner.raw_process, owner.raw_thread)
             elif owner.retained_process is None and process is None:
                 # No child exists to wait for; still prove Job empty and close.

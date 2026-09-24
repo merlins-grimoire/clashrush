@@ -450,6 +450,17 @@ class LifecycleSupervisor:
         members: MemberSnapshot | None = None
         membership_proved = False
         member_count = 0
+        problem: str | None = None
+
+        def attempt(message: str, operation):
+            nonlocal problem
+            try:
+                return operation()
+            except BaseException:  # noqa: BLE001 - every authority must be attempted
+                if problem is None:
+                    problem = message
+                return None
+
         try:
             members = self._host.stable_job_members(owned.job)
             member_count = len(members.identities)
@@ -459,28 +470,29 @@ class LifecycleSupervisor:
         except BaseException:  # noqa: BLE001 - the owned Job must still be terminated
             membership_proved = False
 
-        self._host.terminate_job(owned.job)
-        if self._host.wait_process(owned.process, 30_000) is not True:
-            raise LifecycleError("owned process did not signal")
-        if self._host.job_active_count(owned.job) != 0:
-            raise LifecycleError("owned Job did not become empty")
-        if self._host.is_window(binding.root_hwnd) or self._host.is_window(
-            binding.render_hwnd
-        ):
-            raise LifecycleError("bound HWND remained valid after Job termination")
-        players = self._host.complete_player_snapshot()
-        try:
-            if players.identities:
-                raise LifecycleError("a BlueStacks player remained after owned stop")
-        finally:
-            players.close()
+        attempt("owned Job termination failed", lambda: self._host.terminate_job(owned.job))
+        if attempt("owned process wait failed", lambda: self._host.wait_process(owned.process, 30_000)) is not True and problem is None:
+            problem = "owned process did not signal"
+        if attempt("owned Job empty proof failed", lambda: self._host.job_active_count(owned.job)) != 0 and problem is None:
+            problem = "owned Job did not become empty"
+        root_valid = attempt("root HWND invalidation proof failed", lambda: self._host.is_window(binding.root_hwnd))
+        render_valid = attempt("render HWND invalidation proof failed", lambda: self._host.is_window(binding.render_hwnd))
+        if (root_valid is not False or render_valid is not False) and problem is None:
+            problem = "bound HWND remained valid after Job termination"
+        players = attempt("post-stop player snapshot failed", self._host.complete_player_snapshot)
+        if players is not None:
+            if players.identities and problem is None:
+                problem = "a BlueStacks player remained after owned stop"
+            attempt("post-stop player snapshot close failed", players.close)
         if members is not None:
-            members.close()
-        owned.members.close()
-        self._host.close_handle(owned.process)
-        self._host.close_handle(owned.job)
-        if not membership_proved:
-            raise LifecycleError("fresh owned Job membership was not proved")
+            attempt("fresh member snapshot close failed", members.close)
+        attempt("launch member snapshot close failed", owned.members.close)
+        attempt("owned process handle close failed", lambda: self._host.close_handle(owned.process))
+        attempt("owned Job handle close failed", lambda: self._host.close_handle(owned.job))
+        if not membership_proved and problem is None:
+            problem = "fresh owned Job membership was not proved"
+        if problem is not None:
+            raise LifecycleError(problem)
         return member_count
 
     def _rollback_start(
@@ -496,57 +508,133 @@ class LifecycleSupervisor:
         members: MemberSnapshot | None,
         binding: PlayerBinding | None,
     ) -> None:
-        try:
-            if created is not None:
-                if assigned:
-                    if job is None:
-                        raise LifecycleError("assigned rollback lost its Job handle")
-                    self._host.terminate_job(job)
-                elif assignment_uncertain:
-                    if job is not None:
-                        try:
-                            self._host.terminate_job(job)
-                        except BaseException:  # noqa: BLE001, S110 - retained handle must still be tried
-                            pass
-                    try:
-                        self._host.terminate_retained_process(created.process_handle)
-                    except BaseException:  # noqa: BLE001, S110 - proofs below decide rollback success
-                        pass
-                else:
-                    self._host.terminate_retained_process(created.process_handle)
-                if self._host.wait_process(created.process_handle, 30_000) is not True:
-                    raise LifecycleError("rollback process wait failed")
-                if (assigned or assignment_uncertain) and (
-                    job is None or self._host.job_active_count(job) != 0
-                ):
-                    raise LifecycleError("rollback Job did not become empty")
-                if binding is not None and (
-                    self._host.is_window(binding.root_hwnd)
-                    or self._host.is_window(binding.render_hwnd)
-                ):
-                    raise LifecycleError("rollback HWND invalidation failed")
-                players = self._host.complete_player_snapshot()
-                try:
-                    if players.identities:
-                        raise LifecycleError("rollback player absence was not proved")
-                finally:
-                    players.close()
-                if not thread_closed:
-                    self._host.close_thread(created.thread_handle)
-            if members is not None:
-                members.close()
-            if created is not None:
-                self._host.close_handle(created.process_handle)
-            if job is not None:
-                self._host.close_handle(job)
-            self._commit_blocked(active, reason)
-        except BaseException as exc:
+        problem: str | None = None
+
+        def attempt(message: str, operation):
+            nonlocal problem
             try:
-                self._state.commit(
-                    Active(active.slot, active.run_nonce, BlockReason.ROLLBACK_UNPROVED)
+                return True, operation()
+            except BaseException:  # noqa: BLE001 - every retirement authority must run
+                if problem is None:
+                    problem = message
+                return False, None
+
+        if created is not None:
+            if assigned:
+                if job is None:
+                    problem = "assigned rollback lost its Job handle"
+                    job_terminated = False
+                else:
+                    job_terminated, _ = attempt(
+                        "rollback Job termination failed",
+                        lambda: self._host.terminate_job(job),
+                    )
+                if not job_terminated:
+                    attempt(
+                        "rollback retained-process termination failed",
+                        lambda: self._host.terminate_retained_process(
+                            created.process_handle
+                        ),
+                    )
+            elif assignment_uncertain:
+                if job is None:
+                    if problem is None:
+                        problem = "uncertain rollback lost its Job handle"
+                else:
+                    attempt(
+                        "rollback Job termination failed",
+                        lambda: self._host.terminate_job(job),
+                    )
+                attempt(
+                    "rollback retained-process termination failed",
+                    lambda: self._host.terminate_retained_process(
+                        created.process_handle
+                    ),
                 )
-            except BaseException:  # noqa: BLE001, S110 - previous ACTIVE remains fail-closed
-                pass
-            if isinstance(exc, LifecycleError):
-                raise
-            raise LifecycleError("rollback proof failed") from exc
+            else:
+                attempt(
+                    "rollback retained-process termination failed",
+                    lambda: self._host.terminate_retained_process(
+                        created.process_handle
+                    ),
+                )
+
+            wait_ok, waited = attempt(
+                "rollback process wait failed",
+                lambda: self._host.wait_process(created.process_handle, 30_000),
+            )
+            if wait_ok and waited is not True and problem is None:
+                problem = "rollback process wait failed"
+
+            if assigned or assignment_uncertain:
+                if job is None:
+                    if problem is None:
+                        problem = "rollback Job handle unavailable"
+                else:
+                    count_ok, active_count = attempt(
+                        "rollback Job empty proof failed",
+                        lambda: self._host.job_active_count(job),
+                    )
+                    if count_ok and active_count != 0 and problem is None:
+                        problem = "rollback Job did not become empty"
+
+            if binding is not None:
+                root_ok, root_valid = attempt(
+                    "rollback root HWND invalidation proof failed",
+                    lambda: self._host.is_window(binding.root_hwnd),
+                )
+                render_ok, render_valid = attempt(
+                    "rollback render HWND invalidation proof failed",
+                    lambda: self._host.is_window(binding.render_hwnd),
+                )
+                if (
+                    root_ok
+                    and render_ok
+                    and (root_valid is not False or render_valid is not False)
+                    and problem is None
+                ):
+                    problem = "rollback HWND invalidation failed"
+
+            snapshot_ok, players = attempt(
+                "rollback player snapshot failed",
+                self._host.complete_player_snapshot,
+            )
+            if snapshot_ok and players is not None:
+                if players.identities and problem is None:
+                    problem = "rollback player absence was not proved"
+                attempt("rollback player snapshot close failed", players.close)
+
+            if not thread_closed:
+                attempt(
+                    "rollback thread handle close failed",
+                    lambda: self._host.close_thread(created.thread_handle),
+                )
+
+        if members is not None:
+            attempt("rollback member snapshot close failed", members.close)
+        if created is not None:
+            attempt(
+                "rollback process handle close failed",
+                lambda: self._host.close_handle(created.process_handle),
+            )
+        if job is not None:
+            attempt(
+                "rollback Job handle close failed",
+                lambda: self._host.close_handle(job),
+            )
+
+        if problem is None:
+            committed, _ = attempt(
+                "rollback blocked-state commit failed",
+                lambda: self._commit_blocked(active, reason),
+            )
+            if committed:
+                return
+
+        try:
+            self._state.commit(
+                Active(active.slot, active.run_nonce, BlockReason.ROLLBACK_UNPROVED)
+            )
+        except BaseException:  # noqa: BLE001, S110 - previous ACTIVE remains fail-closed
+            pass
+        raise LifecycleError("rollback proof failed")

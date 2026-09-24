@@ -226,11 +226,44 @@ def test_mutex_wait_classifies_abandoned_without_treating_it_as_usable() -> None
     api = FakeRuntimeApi()
     api.wait_result = WAIT_ABANDONED
 
-    lease = Win32Runtime(api).acquire_mutex()
+    lease = Win32Runtime(api).acquire_mutex(
+        name="Global\\ClashRushRebuildLifecycle-abandoned-classification"
+    )
 
     assert lease.abandoned is True
     with pytest.raises(MutexAbandonedError, match="reconciliation"):
         lease.require_usable()
+
+
+def test_abandoned_mutex_fault_stays_sticky_after_release_and_normal_reacquire() -> None:
+    api = FakeRuntimeApi()
+    runtime = Win32Runtime(api)
+    name = "Global\\ClashRushRebuildLifecycle-abandoned-same-runtime"
+    api.wait_result = WAIT_ABANDONED
+    abandoned = runtime.acquire_mutex(name=name)
+    abandoned.release()
+
+    api.wait_result = WAIT_OBJECT_0
+    reacquired = runtime.acquire_mutex(name=name)
+
+    assert reacquired.abandoned is True
+    with pytest.raises(MutexAbandonedError, match="reconciliation"):
+        reacquired.require_usable()
+
+
+def test_abandoned_mutex_fault_stays_sticky_across_runtime_reconstruction() -> None:
+    api = FakeRuntimeApi()
+    name = "Global\\ClashRushRebuildLifecycle-abandoned-new-runtime"
+    api.wait_result = WAIT_ABANDONED
+    abandoned = Win32Runtime(api).acquire_mutex(name=name)
+    abandoned.release()
+
+    api.wait_result = WAIT_OBJECT_0
+    reacquired = Win32Runtime(api).acquire_mutex(name=name)
+
+    assert reacquired.abandoned is True
+    with pytest.raises(MutexAbandonedError, match="reconciliation"):
+        reacquired.require_usable()
 
 
 @pytest.mark.parametrize(

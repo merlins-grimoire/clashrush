@@ -530,6 +530,14 @@ def test_every_diagnostic_pre_ready_proof_or_cleanup_failure_remains_active(
         BlockReason.STOP_PROOF,
     )
     assert "state:commit:READY" not in events
+    assert "job:terminate" in events
+    assert "process:wait" in events
+    assert "job:active-count" in events
+    assert f"window:is:{binding.root_hwnd}" in events
+    assert f"window:is:{binding.render_hwnd}" in events
+    assert "players:snapshot" in events
+    assert "handle:close:process" in events
+    assert "handle:close:job" in events
 
 
 def test_stop_fresh_membership_failure_still_terminates_owned_job() -> None:
@@ -671,4 +679,36 @@ def test_uncertain_assignment_attempts_retained_termination_when_job_termination
 
     assert events.index("job:terminate") < events.index("process:terminate-retained")
     assert "process:wait" in events
+    assert "state:commit:READY" not in events
+
+
+def test_confirmed_assignment_job_termination_failure_uses_retained_fallback_and_cleans_up() -> None:
+    events: list[str] = []
+    state = FakeStateStore(Ready(0), events)
+    host = FakeHost(
+        events,
+        fail_stage="thread:resume",
+        fail_job_termination=True,
+    )
+    supervisor = LifecycleSupervisor(
+        host,
+        state,
+        AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
+        nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+    )
+
+    with pytest.raises(LifecycleError, match="rollback proof failed"):
+        supervisor.start(Slot(0, "Pie64", "Example Slot 0", 1280, 720, 240))
+
+    assert events.index("job:terminate") < events.index("process:terminate-retained")
+    assert "process:wait" in events
+    assert "job:active-count" in events
+    assert "handle:close:process" in events
+    assert "handle:close:job" in events
+    assert host.running is False
+    assert state.state == Active(
+        0,
+        "0123456789abcdef0123456789abcdef",
+        BlockReason.ROLLBACK_UNPROVED,
+    )
     assert "state:commit:READY" not in events

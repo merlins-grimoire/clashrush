@@ -764,6 +764,49 @@ def test_native_window_and_unlocked_desktop_facts_are_exact() -> None:
     assert api.is_iconic(10) is False
 
 
+class EmptyOrFailingChildWindowUser:
+    def __init__(self, error: int) -> None:
+        self.error = error
+
+    def EnumChildWindows(self, root, callback, lparam):
+        assert root == 10
+        ctypes.set_last_error(self.error)
+        return 0
+
+
+def test_enum_child_windows_accepts_zero_return_only_for_complete_empty_enumeration() -> None:
+    api = object.__new__(NativeLifecycleApi)
+    api._user32 = EmptyOrFailingChildWindowUser(0)
+
+    assert api.enum_child_windows(10) == ()
+
+
+def test_enum_child_windows_rejects_zero_return_with_native_access_error() -> None:
+    api = object.__new__(NativeLifecycleApi)
+    api._user32 = EmptyOrFailingChildWindowUser(5)
+
+    with pytest.raises(Win32LifecycleHostError, match="enumeration failed"):
+        api.enum_child_windows(10)
+
+
+@pytest.mark.parametrize("limit", [0, 2])
+def test_window_enumeration_rejects_callback_fault_and_overflow(
+    monkeypatch: pytest.MonkeyPatch, limit: int
+) -> None:
+    monkeypatch.setattr(
+        "clash_rush_rebuild.win32_lifecycle_host._MAX_WINDOWS", limit
+    )
+
+    def enumerate_until_rejected(callback, value):
+        for hwnd in range(1, 5):
+            if not callback(hwnd, value):
+                return 0
+        return 1
+
+    with pytest.raises(Win32LifecycleHostError, match="callback"):
+        NativeLifecycleApi._enumerate_windows(enumerate_until_rejected)
+
+
 class FakeCaptureUser:
     def __init__(self, *, print_ok: bool = True) -> None:
         self.print_ok = print_ok
@@ -787,6 +830,7 @@ class FakeCaptureGdi:
         self.calls: list[tuple[object, ...]] = []
         self.raise_cleanup_select = raise_cleanup_select
         self.select_calls = 0
+        self.selected: object | None = None
 
     def CreateCompatibleDC(self, hdc):
         self.calls.append(("create-dc", hdc))
@@ -801,9 +845,12 @@ class FakeCaptureGdi:
         self.select_calls += 1
         if self.raise_cleanup_select and self.select_calls == 2:
             raise OSError("synthetic cleanup failure")
-        return 400
+        previous = 400 if self.selected is None else self.selected
+        self.selected = value
+        return previous
 
     def GetDIBits(self, hdc, bitmap, first, height, buffer, header, usage):
+        assert self.selected != bitmap
         self.calls.append(("bits", hdc, bitmap, first, height, usage))
         ctypes.memmove(buffer, b"\x01\x02\x03\x00\x04\x05\x06\x00", 8)
         return height
@@ -835,8 +882,9 @@ def test_native_printwindow_capture_returns_bgra_and_releases_every_gdi_resource
         ("print", 11, 200, 2),
         ("release-dc", 11, 100),
     ]
-    assert gdi.calls[-3:] == [
-        ("select", 200, 400),
+    bits_index = next(index for index, call in enumerate(gdi.calls) if call[0] == "bits")
+    assert gdi.calls[bits_index - 1] == ("select", 200, 400)
+    assert gdi.calls[-2:] == [
         ("delete-object", 300),
         ("delete-dc", 200),
     ]

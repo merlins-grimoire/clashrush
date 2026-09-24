@@ -626,6 +626,66 @@ def test_constructor_failure_after_create_closes_raw_and_retained_handles(
     assert ("close", 21) in runtime.events
 
 
+@pytest.mark.parametrize(
+    ("stage", "raw_process_closed", "raw_thread_closed"),
+    [
+        ("before-handle-publication", True, True),
+        ("after-hp-ownership", False, True),
+        ("after-ht-close", False, False),
+    ],
+)
+def test_popen_constructor_fault_closes_each_raw_handle_exactly_once(
+    monkeypatch,
+    stage: str,
+    raw_process_closed: bool,
+    raw_thread_closed: bool,
+) -> None:
+    runtime = FakeRuntime()
+    adopted: list[int] = []
+    closed_by_popen: list[int] = []
+    monkeypatch.setattr(
+        child_job, "_original_create_process", lambda *_args: (11, 12, 13, 14)
+    )
+    monkeypatch.setattr(
+        child_job,
+        "_original_handle_factory",
+        lambda handle: adopted.append(handle) or SimpleNamespace(Close=lambda: None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        child_job,
+        "_original_close_handle",
+        lambda handle: closed_by_popen.append(handle),
+        raising=False,
+    )
+
+    def popen(_command, **_kwargs):
+        child_job._job_owned_create_process(
+            "app", "command", None, None, False, 0, {}, None, "startup"
+        )
+        if stage != "before-handle-publication":
+            child_job._job_owned_handle(11)
+        if stage == "after-ht-close":
+            child_job._job_owned_close_handle(12)
+        raise OSError("synthetic constructor fault")
+
+    outcome = child_job.run_owned_diagnostic_child(
+        ["python", "-c", "private"],
+        timeout=1,
+        runtime_factory=lambda: runtime,
+        popen_factory=popen,
+        installer=lambda: None,
+        monotonic=lambda: 10.0,
+    )
+
+    assert outcome.operational_failure is True
+    assert runtime.events.count(("close", 11)) == int(raw_process_closed)
+    assert runtime.events.count(("close", 12)) == int(raw_thread_closed)
+    assert runtime.events.count(("close", 21)) == 1
+    assert adopted == ([] if stage == "before-handle-publication" else [11])
+    assert closed_by_popen == ([12] if stage == "after-ht-close" else [])
+
+
 @pytest.mark.parametrize("stage", ["create-job", "kill-on-close", "installer"])
 def test_pre_spawn_setup_failure_never_calls_popen_and_returns_closed_failure(
     stage: str,
@@ -919,6 +979,21 @@ def test_real_inherited_pipe_descendant_is_retired_within_finite_bound() -> None
 
     assert time.monotonic() - started < 8
     assert outcome.returncode is None
+    assert outcome.child_wait_completed is True
+    assert outcome.cleanup_succeeded is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job ownership contract")
+def test_blocked_native_worker_is_retired_by_independent_parent_deadline() -> None:
+    # Models a native capture call that never returns inside the owned child.
+    started = time.monotonic()
+    outcome = child_job.run_owned_diagnostic_child(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout=1,
+    )
+
+    assert time.monotonic() - started < 8
+    assert outcome.reason is child_job.DiagnosticParentReason.TIMEOUT
     assert outcome.child_wait_completed is True
     assert outcome.cleanup_succeeded is True
 

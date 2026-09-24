@@ -6,7 +6,7 @@ import pytest
 
 from clash_rush_rebuild import mvp_local_native
 from clash_rush_rebuild.config import load_private_registry
-from clash_rush_rebuild.input_authorization import InputAuthorization
+from clash_rush_rebuild.input_authorization import InputAction, InputAuthorization
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
@@ -45,6 +45,55 @@ def test_native_input_requires_exact_closed_authorization(
         InputAuthorization.monitored_attack(lambda: True),
     )
     assert subject._binding == BINDING
+
+
+def test_cleanup_release_emits_only_for_keys_proven_held_by_this_input_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[int, int]] = []
+
+    class User32:
+        def keybd_event(self, key, _scan, flags, _extra):
+            events.append((key, flags))
+
+    user32 = User32()
+    monkeypatch.setattr(
+        mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: user32
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_configure_input_signatures", lambda _user32: None
+    )
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.monitored_attack(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+    monkeypatch.setattr(subject, "_authorized", lambda _action: True)
+
+    assert subject.key_up(BINDING, 0x52, action=InputAction.CLEANUP_RELEASE) is False
+    assert events == []
+    assert subject.key_down(
+        BINDING, 0x52, action=InputAction.TROOP_DEPLOYMENT
+    ) is True
+    assert subject.key_up(BINDING, 0x4A, action=InputAction.CLEANUP_RELEASE) is False
+    assert subject.key_up(BINDING, 0x52, action=InputAction.CLEANUP_RELEASE) is True
+    assert subject.key_up(BINDING, 0x52, action=InputAction.CLEANUP_RELEASE) is False
+    assert events == [(0x52, 0), (0x52, 0x0002)]
+
+    assert subject.key_down(
+        BINDING, 0x52, action=InputAction.TROOP_DEPLOYMENT
+    ) is True
+    assert subject.key_up(
+        BINDING,
+        0x52,
+        0x4A,
+        0x56,
+        0x52,
+        action=InputAction.CLEANUP_RELEASE,
+    ) is True
+    assert events[-2:] == [(0x52, 0), (0x52, 0x0002)]
+    assert subject._held_keys == set()
 
 
 def _private_registry(tmp_path):
