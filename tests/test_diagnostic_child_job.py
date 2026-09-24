@@ -389,7 +389,9 @@ def test_failed_cleanup_drain_and_blocking_stream_close_is_bounded_and_unsuccess
         assert not worker.is_alive()
         assert result == [
             child_job.DiagnosticChildOutcome(
-                None, None, None, True, False, operational_failure=True
+                None, None, None, True, False, operational_failure=True,
+                reason=child_job.DiagnosticParentReason.CLEANUP,
+                prior_reason=child_job.DiagnosticParentReason.TIMEOUT,
             )
         ]
         assert ("popen-handle-close",) in runtime.events
@@ -582,7 +584,7 @@ def test_owned_child_thread_start_failure_returns_unsuccessful_cleanup_and_close
     )
 
     assert outcome == child_job.DiagnosticChildOutcome(
-        None, None, None, True, False
+        None, None, None, True, False, reason=child_job.DiagnosticParentReason.CLEANUP
     )
     assert events == [("stream-close", "stderr"), ("popen-handle-close",)]
     assert process._handle is None
@@ -614,7 +616,8 @@ def test_constructor_failure_after_create_closes_raw_and_retained_handles(
     )
 
     assert outcome == child_job.DiagnosticChildOutcome(
-        None, None, None, True, True, operational_failure=True
+        None, None, None, True, True, operational_failure=True,
+        reason=child_job.DiagnosticParentReason.SPAWN,
     )
     assert ("terminate-job", "job") in runtime.events
     assert ("terminate-process", 11) not in runtime.events
@@ -652,7 +655,8 @@ def test_pre_spawn_setup_failure_never_calls_popen_and_returns_closed_failure(
 
     assert popen_calls == []
     assert outcome.operational_failure is True
-    assert outcome.cleanup_succeeded is False
+    assert outcome.cleanup_succeeded is (stage != "create-job")
+    assert outcome.reason is child_job.DiagnosticParentReason.OWNERSHIP
 
 
 def test_published_cleanup_uses_retained_process_if_job_termination_fails() -> None:
@@ -797,7 +801,7 @@ def test_nested_run_is_rejected_before_runtime_or_child_creation() -> None:
     finally:
         child_job._spawn_owner.owner = None
 
-    assert outcome == child_job.DiagnosticChildOutcome(None, None, None, False, False)
+    assert outcome == child_job.DiagnosticChildOutcome(None, None, None, False, False, reason=child_job.DiagnosticParentReason.OWNERSHIP)
 
 
 def test_owned_spawn_does_not_capture_concurrent_unrelated_thread(monkeypatch) -> None:
@@ -894,7 +898,8 @@ def test_real_constructor_pipe_cleanup_failure_retires_created_child(
 
     assert time.monotonic() - started < 8
     assert outcome == child_job.DiagnosticChildOutcome(
-        None, None, None, True, True, operational_failure=True
+        None, None, None, True, True, operational_failure=True,
+        reason=child_job.DiagnosticParentReason.SPAWN,
     )
 
 

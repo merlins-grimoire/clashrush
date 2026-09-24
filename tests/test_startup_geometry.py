@@ -36,7 +36,7 @@ class Geometry:
         self.events.append("restore")
         assert root == 101
         if self.fail == "restore":
-            raise GeometryError("RESTORE_FAILED")
+            raise OSError("synthetic restore failed")
 
     def bounds(self, root):
         assert root == 101
@@ -46,7 +46,7 @@ class Geometry:
         self.events.append("resize")
         self.resizes.append((root, left, top, width, height))
         if self.fail == "resize":
-            raise GeometryError("RESIZE_FAILED")
+            raise OSError("synthetic resize failed")
         if self.converge:
             self.current = replace(self.current, width=1431)
 

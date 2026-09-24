@@ -16,7 +16,9 @@ import threading
 import time
 import types
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Callable, Sequence
+from .startup_failure import StartupReason
 
 CREATE_SUSPENDED = 0x00000004
 CLEANUP_WAIT_MILLISECONDS = 5_000
@@ -33,6 +35,14 @@ class DiagnosticChildJobError(RuntimeError):
     """The diagnostic child could not be owned or retired conclusively."""
 
 
+class DiagnosticParentReason(StrEnum):
+    OWNERSHIP = "PARENT_OWNERSHIP"
+    SPAWN = "PARENT_SPAWN"
+    TIMEOUT = "PARENT_TIMEOUT"
+    COMMUNICATION = "PARENT_COMMUNICATION"
+    CLEANUP = "PARENT_CLEANUP"
+
+
 @dataclass(frozen=True, slots=True)
 class DiagnosticChildOutcome:
     returncode: int | None
@@ -41,6 +51,8 @@ class DiagnosticChildOutcome:
     child_wait_completed: bool
     cleanup_succeeded: bool
     operational_failure: bool = False
+    reason: DiagnosticParentReason | None = None
+    prior_reason: DiagnosticParentReason | StartupReason | None = None
 
 
 @dataclass(slots=True)
@@ -314,7 +326,7 @@ def run_owned_diagnostic_child(
         or any(type(part) is not str or not part for part in command)
         or getattr(_spawn_owner, "owner", None) is not None
     ):
-        return DiagnosticChildOutcome(None, None, None, False, False)
+        return DiagnosticChildOutcome(None, None, None, False, False, reason=DiagnosticParentReason.OWNERSHIP)
     if runtime_factory is None:
         from .win32_runtime import NativeWin32Api, Win32Runtime
 
@@ -322,6 +334,7 @@ def run_owned_diagnostic_child(
     runtime = None
     owner = None
     process = None
+    reason = DiagnosticParentReason.OWNERSHIP
     try:
         runtime = runtime_factory()
         job = runtime.create_job()
@@ -331,33 +344,62 @@ def run_owned_diagnostic_child(
         deadline = monotonic() + timeout
         _spawn_owner.owner = owner
         try:
+            reason = DiagnosticParentReason.SPAWN
             process = popen_factory(
                 list(command),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
+                # Decode on this guarded thread, not Windows Popen reader
+                # threads (which otherwise print an uncaught raw traceback).
+                text=False,
             )
             owner.raw_process = None
             owner.raw_thread = None
         finally:
             _spawn_owner.owner = None
         remaining = max(0.0, deadline - monotonic())
+        reason = DiagnosticParentReason.COMMUNICATION
         stdout, stderr = process.communicate(timeout=remaining)
+        if type(stdout) is bytes:
+            stdout = stdout.decode("utf-8", errors="strict").replace("\r\n", "\n")
+        if type(stderr) is bytes:
+            stderr = stderr.decode("utf-8", errors="strict").replace("\r\n", "\n")
         returncode = process.returncode
         if type(returncode) is not int or type(stdout) is not str or type(stderr) is not str:
             raise DiagnosticChildJobError("malformed diagnostic child result")
+        reason = DiagnosticParentReason.CLEANUP
+        child_reason = (
+            {r.value + "\n": r for r in StartupReason}.get(stderr)
+            if returncode == 2 and stdout == "" else None
+        )
         owner.cleanup_published()
         resources_closed = _close_popen_resources(process)
         if not owner.cleanup_succeeded or not resources_closed:
-            return DiagnosticChildOutcome(None, None, None, owner.child_wait_completed, False)
+            return DiagnosticChildOutcome(None, None, None, owner.child_wait_completed, False,
+                                          reason=DiagnosticParentReason.CLEANUP, prior_reason=child_reason)
         return DiagnosticChildOutcome(returncode, stdout, stderr, True, True)
-    except BaseException:
+    except BaseException as exc:
+        if type(exc) is subprocess.TimeoutExpired:
+            reason = DiagnosticParentReason.TIMEOUT
         if owner is not None and not owner.cleaned:
             if owner.raw_process is not None and owner.raw_thread is not None:
                 owner.cleanup_created(owner.raw_process, owner.raw_thread)
+            elif owner.retained_process is None and process is None:
+                # No child exists to wait for; still prove Job empty and close.
+                clean = True
+                try:
+                    runtime.terminate_job(owner.job)
+                    active = runtime.job_active_count(owner.job)
+                    clean = type(active) is int and active == 0
+                except BaseException:
+                    clean = False
+                try:
+                    runtime.close_handle(owner.job)
+                except BaseException:
+                    clean = False
+                owner.cleaned = True
+                owner.cleanup_succeeded = clean
             else:
                 owner.cleanup_published()
         if process is not None:
@@ -371,16 +413,19 @@ def run_owned_diagnostic_child(
             drain_succeeded = True
             resources_closed = True
         if owner is not None:
+            clean = owner.cleanup_succeeded and drain_succeeded and resources_closed
             return DiagnosticChildOutcome(
                 None,
                 None,
                 None,
                 owner.child_wait_completed,
-                owner.cleanup_succeeded and drain_succeeded and resources_closed,
+                clean,
                 operational_failure=True,
+                reason=reason if clean else DiagnosticParentReason.CLEANUP,
+                prior_reason=None if clean or reason is DiagnosticParentReason.CLEANUP else reason,
             )
         return DiagnosticChildOutcome(
-            None, None, None, False, False, operational_failure=True
+            None, None, None, False, False, operational_failure=True, reason=reason
         )
     finally:
         _spawn_owner.owner = None

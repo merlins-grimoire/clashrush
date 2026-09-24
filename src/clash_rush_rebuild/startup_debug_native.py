@@ -30,6 +30,7 @@ from .startup_debug import (
     StartupDetector,
 )
 from .startup_geometry import NativeGeometryApi, StartupGeometrySupervisor
+from .startup_failure import StartupReason, at_stage
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import Win32Runtime
 
@@ -53,7 +54,7 @@ class StartupNativeInput:
     def __call__(self, action, point, prepare, deadline):
         if action not in self._counts or self._counts[action] >= CAPS[action]:
             return False
-        self._authorization.require(action)
+        at_stage(StartupReason.AUTHORIZATION, lambda: self._authorization.require(action))
         x, y = point
         if any(type(v) not in (int, float) or not 0 < v < 1 for v in point):
             return False
@@ -61,7 +62,7 @@ class StartupNativeInput:
         self._native._require_binding(self._binding)
         if not self._native._foreground():
             return False
-        self._evidence.verify()
+        at_stage(StartupReason.EVIDENCE_BEFORE, self._evidence.verify)
         screen = wintypes.POINT(
             round(x * (self._binding.width - 1)), round(y * (self._binding.height - 1))
         )
@@ -70,21 +71,21 @@ class StartupNativeInput:
             wintypes.HWND(self._binding.render_hwnd), ctypes.byref(screen)
         ):
             return False
-        self._authorization.require(action)
+        at_stage(StartupReason.AUTHORIZATION, lambda: self._authorization.require(action))
         if not api.SetCursorPos(screen.x, screen.y):
             return False
         time.sleep(0.04)
         observed_at = time.monotonic()
-        frame = self._capture()
+        frame = at_stage(StartupReason.CAPTURE, self._capture)
         try:
-            accepted = self._detect(frame) == (action, point)
+            accepted = at_stage(StartupReason.ICON_VERIFY, lambda: self._detect(frame)) == (action, point)
             if accepted:
                 prepare(frame)
         finally:
             frame.fill(0)
         if not accepted:
             return False
-        self._authorization.require(action)
+        at_stage(StartupReason.AUTHORIZATION, lambda: self._authorization.require(action))
         # Cursor and window placement are shared mutable desktop state.
         api.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
         api.GetCursorPos.restype = wintypes.BOOL
@@ -171,7 +172,7 @@ def build_cycle(project_root, slots_path):
                 ).value
             )
 
-        evidence = DebugEvidence(project)
+        evidence = at_stage(StartupReason.EVIDENCE_INIT, lambda: DebugEvidence(project))
         detector = StartupDetector(project / "private" / "assets" / "CCBackBeat.ttf")
         port = StartupNativeInput(
             binding,

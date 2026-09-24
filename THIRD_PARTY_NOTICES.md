@@ -43,6 +43,14 @@ Exact file digests and the local adapter boundary are documented in
 
 ## BasePilot transplant
 
+The startup diagnostic failure envelope in `startup_failure.py`, `cycle.py`,
+`startup_debug.py`, `startup_geometry.py` and `cli.py` additionally adapts the
+same pinned BasePilot `app/core/bot.py:74-130` try/re-raise/finally production
+seam and `app/ui/qt/bot_controller.py:32-58` outer worker presentation boundary.
+The complete existing Hermes-derived owned-child runner/parser and their tests
+are reused for startup. Raw logging/tracebacks are replaced by closed enums;
+see `docs/startup-failure-spine.md` for callers, tests and boundary adaptations.
+
 `src/clash_rush_rebuild/basepilot_window.py`, `src/clash_rush_rebuild/basepilot_vision.py`, and `src/clash_rush_rebuild/no_input_home_diagnostic.py` copy and narrowly adapt BasePilot's memory-returning `WindowService.screenshot`, aspect/template geometry, `VisionService.find_template`, and Home-vs-Builder controller seam. The six packaged templates under `src/clash_rush_rebuild/assets/basepilot_templates/` are copied unchanged from BasePilot commit `4ede1efd220ffc79a5b490cfd3788b44d2584da4` (tree `0553306bfd30a32e31e427a0b77ff22c41f55901`).
 
 `src/clash_rush_rebuild/readiness_catalog.py` records the same BasePilot revision and `app/services/vision.py:185-267` as MIT evidence for bounded region validation and the normalized-correlation contract. Its admitted templates are public procedural motifs; no donor or game artwork is included. The exact CoC_Bot and ClashAutomation pins already listed above are recorded as geometry/BGR bounds evidence only, with no implementation or assets copied into this catalog seam.

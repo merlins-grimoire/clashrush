@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .approval_reconciliation import _seal_private_path
 from .input_authorization import InputAction
+from .startup_failure import StartupFailure, StartupFault, StartupReason, fault_from, raise_fault
 from .startup_continue_recovery import (
     StartupContinueResult as Result,
 )
@@ -42,6 +43,10 @@ CAPS = {
 
 class StartupDebugError(RuntimeError):
     """Sanitized diagnostic failure; never include pixels or paths."""
+
+
+class StartupDebugFailure(StartupFailure, StartupDebugError):
+    """Closed envelope at the controller's production return boundary."""
 
 
 def _frame(frame):
@@ -341,6 +346,31 @@ class StartupDebugController:
 
     def run(self, *, timeout=60.0, wait=time.sleep, clock=time.monotonic):
         if self.used or type(timeout) not in (int, float) or not 0 < timeout <= 120:
+            raise_fault(StartupFault(StartupReason.AUTHORIZATION), StartupDebugFailure)
+        self._stage = StartupReason.AUTHORIZATION
+        self.input_completed = False
+        failure = None
+        result = None
+        final = None
+        try:
+            result = self._run(timeout=timeout, wait=wait, clock=clock)
+        except BaseException as exc:
+            failure = fault_from(exc, self._stage, input_completed=self.input_completed)
+        try:
+            final = _frame(self.capture())
+            self.evidence.snapshot("final", final)
+        except BaseException:
+            failure = (failure.superseded(StartupReason.FINAL_EVIDENCE) if failure
+                       else StartupFault(StartupReason.FINAL_EVIDENCE, input_completed=self.input_completed))
+        finally:
+            if type(final) is np.ndarray:
+                final.fill(0)
+        if failure is not None:
+            raise_fault(failure, StartupDebugFailure)
+        return result
+
+    def _run(self, *, timeout, wait, clock):
+        if self.used or type(timeout) not in (int, float) or not 0 < timeout <= 120:
             raise StartupDebugError("RUN_INVALID")
         self.used = True
         counts = {action: 0 for action in CAPS}
@@ -351,8 +381,10 @@ class StartupDebugController:
         initial = False
         try:
             while clock() < deadline:
+                self._stage = StartupReason.AUTHORIZATION
                 if self.gate() is not True:
                     raise StartupDebugError("AUTHORIZATION_LOST")
+                self._stage = StartupReason.CAPTURE if initial else StartupReason.INITIAL_CAPTURE
                 frame = _frame(self.capture())
                 if not initial:
                     if (
@@ -371,11 +403,14 @@ class StartupDebugController:
                         frame.fill(0)
                         wait(0.05)
                         continue
+                    self._stage = StartupReason.INITIAL_EVIDENCE
                     self.evidence.snapshot("initial", frame)
                     initial = True
                 # Blockers precede village acceptance: a dimmed village can retain HUD templates.
+                self._stage = StartupReason.ICON_VERIFY
                 target = self.detect(frame)
                 if target is None:
+                    self._stage = StartupReason.RECOGNITION
                     result = self.classify(frame)
                     if type(result) is not Result:
                         raise StartupDebugError("RESULT_INVALID")
@@ -392,7 +427,9 @@ class StartupDebugController:
                         # after the initial non-launcher observation.
                         for _ in range(2):
                             wait(0.05)
+                            self._stage = StartupReason.CAPTURE
                             fresh = _frame(self.capture())
+                            self._stage = StartupReason.ICON_VERIFY
                             if (
                                 self.detect(fresh) != target
                                 or fresh.shape != frame.shape
@@ -403,37 +440,56 @@ class StartupDebugController:
                             frame.fill(0)
                             frame = fresh
                             fresh = None
+                    self._stage = StartupReason.CAPTURE
                     fresh = _frame(self.capture())
+                    self._stage = StartupReason.ICON_VERIFY
                     if self.detect(fresh) != target:
                         return Result.UNKNOWN
                     nonce = None
 
                     def prepare(authorization_frame, action=action, point=point):
                         nonlocal nonce
+                        self._stage = StartupReason.EVIDENCE_BEFORE
                         if nonce is not None:
                             raise StartupDebugError("EVIDENCE_INVALID")
                         nonce = self.evidence.before(action, authorization_frame, point)
+                        self._stage = StartupReason.INPUT
 
                     counts[action] += 1
+                    self._stage = StartupReason.AUTHORIZATION
                     if clock() >= deadline or self.gate() is not True:
                         raise StartupDebugError("AUTHORIZATION_LOST")
                     delivered = False
+                    input_fault = None
                     try:
+                        self._stage = StartupReason.INPUT
                         delivered = (
                             self.deliver(action, point, prepare, deadline) is True
                         )
-                    finally:
-                        fresh.fill(0)
-                        if nonce is not None:
-                            fresh = None
-                            try:
-                                wait(0.6)
-                                fresh = _frame(self.capture())
-                            finally:
-                                # Persist the delivery fact even when the
-                                # post-action camera fails; never replay it.
-                                self.evidence.after(nonce, fresh, delivered)
+                        self.input_completed = self.input_completed or delivered
+                    except BaseException as exc:
+                        input_fault = fault_from(exc, self._stage, input_completed=self.input_completed)
+                    fresh.fill(0)
+                    if nonce is not None:
+                        fresh = None
+                        try:
+                            self._stage = StartupReason.POST_CAPTURE
+                            wait(0.6)
+                            fresh = _frame(self.capture())
+                        except BaseException as exc:
+                            post_fault = fault_from(exc, self._stage, input_completed=self.input_completed)
+                            input_fault = input_fault.superseded(post_fault.reason) if input_fault else post_fault
+                        try:
+                            self._stage = StartupReason.POST_EVIDENCE
+                            # Persist delivery even when the post camera fails.
+                            self.evidence.after(nonce, fresh, delivered)
+                        except BaseException as exc:
+                            post_fault = fault_from(exc, self._stage, input_completed=self.input_completed)
+                            input_fault = input_fault.superseded(post_fault.reason) if input_fault else post_fault
+                    if input_fault is not None:
+                        raise_fault(input_fault, StartupDebugFailure)
                     if not delivered:
+                        self._stage = StartupReason.INPUT
                         raise StartupDebugError("INPUT_FAILED")
                     wait(
                         min(
@@ -446,18 +502,7 @@ class StartupDebugController:
                     fresh.fill(0)
                 wait(min(0.5, max(0.0, deadline - clock())))
             return Result.UNKNOWN
-        except BaseException:  # noqa: BLE001 - fail closed on interrupted input
-            raise StartupDebugError("STARTUP_FAILED") from None
         finally:
-            try:
-                final = _frame(self.capture())
-                try:
-                    self.evidence.snapshot("final", final)
-                finally:
-                    final.fill(0)
-            except BaseException:  # noqa: BLE001 - sanitized cleanup failure
-                raise StartupDebugError("FINAL_EVIDENCE_FAILED") from None
-            finally:
-                for item in (frame, fresh, previous):
-                    if type(item) is np.ndarray:
-                        item.fill(0)
+            for item in (frame, fresh, previous):
+                if type(item) is np.ndarray:
+                    item.fill(0)

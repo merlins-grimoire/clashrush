@@ -11,10 +11,25 @@ import time
 from ctypes import wintypes
 
 from .lifecycle import LifecycleSupervisor, PlayerBinding
+from .startup_failure import (
+    StartupFailure, StartupReason, StartupFault, at_stage, fault_from, raise_fault,
+)
 
 
-class GeometryError(RuntimeError):
+class GeometryError(StartupFailure):
     """Sanitized startup geometry failure."""
+
+    def __init__(self, reason, **kwargs):
+        # Legacy internal geometry guards have a closed mapping, never raw text.
+        if type(reason) is not StartupReason:
+            reason = {
+                "GEOMETRY_BINDING_LOST": StartupReason.GEOMETRY_BINDING,
+                "GEOMETRY_BINDING_CHANGED": StartupReason.GEOMETRY_BINDING,
+                "GEOMETRY_BOUNDS_FAILED": StartupReason.GEOMETRY_BOUNDS,
+                "GEOMETRY_RESIZE_FAILED": StartupReason.GEOMETRY_RESIZE,
+                "GEOMETRY_AUTHORIZATION_LOST": StartupReason.AUTHORIZATION,
+            }.get(reason, StartupReason.GEOMETRY_VERIFY)
+        super().__init__(reason, **kwargs)
 
 
 def _corrected_root_width(root_width, render_width, render_height, expected_aspect):
@@ -49,7 +64,7 @@ def normalize_window_geometry(player, api, rebind, *, gate, wait=time.sleep):
 
     def checked():
         admitted()
-        current = rebind()
+        current = at_stage(StartupReason.GEOMETRY_BINDING, rebind, error_type=GeometryError)
         if type(player) is not PlayerBinding or type(current) is not PlayerBinding:
             raise GeometryError("GEOMETRY_BINDING_LOST")
         if (
@@ -63,7 +78,7 @@ def normalize_window_geometry(player, api, rebind, *, gate, wait=time.sleep):
 
     current = checked()
     admitted()
-    api.restore(current.root_hwnd)
+    at_stage(StartupReason.GEOMETRY_RESTORE, lambda: api.restore(current.root_hwnd), error_type=GeometryError)
     wait(0.15)
     current = checked()
     for _ in range(4):
@@ -72,7 +87,7 @@ def normalize_window_geometry(player, api, rebind, *, gate, wait=time.sleep):
             return current
         except GeometryError:
             pass
-        left, top, right, bottom = api.bounds(current.root_hwnd)
+        left, top, right, bottom = at_stage(StartupReason.GEOMETRY_BOUNDS, lambda: api.bounds(current.root_hwnd), error_type=GeometryError)
         root_width, root_height = right - left, bottom - top
         target_width = _corrected_root_width(
             root_width, current.width, current.height, 1280 / 720,
@@ -84,7 +99,7 @@ def normalize_window_geometry(player, api, rebind, *, gate, wait=time.sleep):
         if (latest.width, latest.height) != (current.width, current.height):
             raise GeometryError("GEOMETRY_CHANGED")
         admitted()
-        api.resize(current.root_hwnd, left, top, target_width, root_height)
+        at_stage(StartupReason.GEOMETRY_RESIZE, lambda: api.resize(current.root_hwnd, left, top, target_width, root_height), error_type=GeometryError)
         wait(0.2)
         current = checked()
     _verify_render(current)
@@ -136,7 +151,14 @@ class StartupGeometrySupervisor(LifecycleSupervisor):
         self._geometry_wait = geometry_wait
 
     def start(self, slot):
-        binding = super().start(slot)
+        self._startup_fault = None
+        failure = None
+        try:
+            binding = super().start(slot)
+        except BaseException as exc:
+            failure = self._startup_fault or fault_from(exc, StartupReason.STATE)
+        if failure is not None:
+            raise_fault(failure, GeometryError)
         owned = self._owned
         deadline = time.monotonic() + 10.0
 
@@ -159,11 +181,33 @@ class StartupGeometrySupervisor(LifecycleSupervisor):
                 gate=lambda: time.monotonic() < deadline,
                 wait=self._geometry_wait,
             )
-            self._host.capture_ready(normalized, owned.job)
-        except BaseException:  # noqa: BLE001 - every interrupted preparation must stop
+            at_stage(StartupReason.GEOMETRY_CAPTURE, lambda: self._host.capture_ready(normalized, owned.job))
+        except BaseException as exc:  # every interrupted preparation must stop
+            failure = fault_from(exc, StartupReason.GEOMETRY_VERIFY)
+        if failure is not None:
             # Keep original binding authoritative for stop even after resize;
             # stop proves Job empty/HWND invalid, not pre-stop pixel dimensions.
-            self.stop(binding, None)
-            raise GeometryError("STARTUP_GEOMETRY_FAILED") from None
+            try:
+                self.stop(binding, None)
+            except BaseException:
+                failure = failure.superseded(StartupReason.CLEANUP)
+            raise_fault(failure, GeometryError)
         owned.binding = normalized
         return normalized
+
+    def _rollback_start(self, **kwargs):
+        # The owner already records its exact BlockReason before each native
+        # stage. Preserve that value, without parsing messages or persisted PII.
+        self._startup_fault = StartupFault(StartupReason(kwargs["reason"].value))
+        try:
+            super()._rollback_start(**kwargs)
+        except BaseException:
+            self._startup_fault = self._startup_fault.superseded(StartupReason.ROLLBACK_UNPROVED)
+            raise
+
+    def _require_player_absence(self):
+        return at_stage(
+            StartupReason.PLAYER_ENUMERATION,
+            super()._require_player_absence,
+            error_type=GeometryError,
+        )

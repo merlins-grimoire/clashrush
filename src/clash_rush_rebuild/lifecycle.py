@@ -241,12 +241,7 @@ class LifecycleSupervisor:
         if type(current) is not Ready or current.next_slot != slot.index:
             raise LifecycleError("lifecycle state does not authorize selected slot")
 
-        players = self._host.complete_player_snapshot()
-        try:
-            if players.identities:
-                raise LifecycleError("another BlueStacks player is already running")
-        finally:
-            players.close()
+        self._require_player_absence()
 
         run_nonce = self._nonce_factory()
         active = Active(slot.index, run_nonce, None)
@@ -368,6 +363,15 @@ class LifecycleSupervisor:
             binding,
         )
         return binding
+
+    def _require_player_absence(self) -> None:
+        """Prelaunch enumeration seam, including snapshot cleanup."""
+        players = self._host.complete_player_snapshot()
+        try:
+            if players.identities:
+                raise LifecycleError("another BlueStacks player is already running")
+        finally:
+            players.close()
 
     def capture_owned(self, binding: PlayerBinding) -> tuple[int, int, bytes]:
         """Revalidate and capture only the currently owned exact binding."""

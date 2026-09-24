@@ -120,6 +120,11 @@ not permission to loosen thresholds. Existing Continue thresholds are unchanged.
 
 ## Diagnostic operator contract
 
+The public command now uses the complete owned-child diagnostic runner. See
+`startup-failure-spine.md` for the exact HOME/BUILDER/UNKNOWN status tuples,
+closed failure tokens/records, parent timeout and cleanup precedence. Only the
+hidden child builds the startup cycle and consumes the one-shot approval.
+
 After independent static promotion and separate owner live authorization:
 
 1. Issue `issue-startup-debug-approval --project-root <root>

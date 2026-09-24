@@ -14,6 +14,7 @@ from .lifecycle_state import LifecycleStateStore, Ready
 from .no_input_home_diagnostic import HomeDiagnosticResult
 from .registry import Slot
 from .startup_continue_recovery import StartupContinueResult
+from .startup_failure import StartupReason, StartupFault, fault_from, raise_fault
 from .win32_runtime import DEFAULT_MUTEX_NAME
 
 
@@ -353,3 +354,62 @@ class StartupDebugCycle(StartupContinueCycle):
     """Same Job-owned cleanup with a distinct diagnostic-only approval."""
 
     _approval_action = ApprovalAction.STARTUP_DEBUG
+
+    def visit_once(self) -> StartupContinueResult:
+        # BasePilot core -> worker envelope, retaining the complete inherited
+        # approval/start/recover/stop/release order, not the generic collapse.
+        reason = StartupReason.MUTEX
+        failure = None
+        lease = supervisor = binding = result = None
+        try:
+            if self._disabled:
+                raise CycleError("disabled")
+            lease = self._runtime.acquire_mutex()
+            if lease.abandoned:
+                raise CycleError("abandoned")
+            lease.require_usable()
+            reason = StartupReason.REGISTRY
+            slots = self._load_registry()
+            if (type(slots) is not tuple or len(slots) != 5
+                    or any(type(slot) is not Slot for slot in slots)
+                    or tuple(slot.index for slot in slots) != (0, 1, 2, 3, 4)):
+                raise CycleError("registry")
+            reason = StartupReason.STATE
+            store = self._make_state_store()
+            state, state_bytes = store.load_with_bytes()
+            if type(state) is not Ready:
+                raise CycleError("state")
+            reason = StartupReason.PLAYER_ENUMERATION
+            count = self._observe_player_count()
+            if type(count) is not int or count != 0:
+                raise CycleError("overlap")
+            reason = StartupReason.AUTHORIZATION
+            self._approvals.validate_then_consume(
+                ApprovalAction.STARTUP_DEBUG, self._candidate_tree(), state, state_bytes,
+            )
+            reason = StartupReason.JOB_SETUP
+            supervisor = self._make_supervisor(store, DEFAULT_MUTEX_NAME)
+            binding = supervisor.start(slots[state.next_slot])
+            reason = StartupReason.RECOGNITION
+            result = self._recover(supervisor, binding)
+            if type(result) is not StartupContinueResult:
+                raise CycleError("result")
+        except BaseException as exc:
+            failure = fault_from(exc, reason)
+        finally:
+            if binding is not None and supervisor is not None:
+                try:
+                    supervisor.stop(binding, None)
+                except BaseException:
+                    failure = (failure.superseded(StartupReason.CLEANUP) if failure
+                               else StartupFault(StartupReason.CLEANUP))
+            if lease is not None:
+                try:
+                    lease.release()
+                except BaseException:
+                    self._disabled = True
+                    failure = (failure.superseded(StartupReason.CLEANUP) if failure
+                               else StartupFault(StartupReason.CLEANUP))
+        if failure is not None:
+            raise_fault(failure)
+        return result

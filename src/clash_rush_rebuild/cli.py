@@ -32,6 +32,7 @@ from .cycle import (
     StartupContinueCycle,
 )
 from .diagnostic_child_job import (
+    DiagnosticParentReason,
     DiagnosticChildOutcome,
     run_owned_diagnostic_child,
 )
@@ -59,6 +60,7 @@ from .startup_continue_recovery import (
     StartupContinueController,
     StartupContinueResult,
 )
+from .startup_failure import StartupReason, StartupFailure, fault_from
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
 from .win32_runtime import NativeWin32Api, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
@@ -69,6 +71,8 @@ _DIAGNOSTIC_STAGE_STDERR = {
 }
 _DIAGNOSTIC_FAILURE_CLASSES = {
     *(stage.value for stage in DiagnosticFailureStage),
+    *(stage.value for stage in StartupReason),
+    *(stage.value for stage in DiagnosticParentReason),
     "UNEXPECTED_STDERR",
     "SCALAR_PARSE",
 }
@@ -92,6 +96,10 @@ def _diagnostic_failure_semantics_are_valid(
     child_status: int | None,
     child_wait_completed: bool,
 ) -> bool:
+    if classification in {r.value for r in DiagnosticParentReason}:
+        return child_status is None
+    if classification in {r.value for r in StartupReason} - {"CAPTURE", "RECOGNITION", "CLEANUP"}:
+        return child_status == 2 and child_wait_completed is True
     if classification in {"CAPTURE", "RECOGNITION"}:
         return child_status == 2 and child_wait_completed is True
     if classification in {"LAUNCH", "CLEANUP"}:
@@ -105,7 +113,10 @@ def _diagnostic_failure_semantics_are_valid(
 
 def parse_diagnostic_failure_record(record: str) -> tuple[str, int | None, bool]:
     """Strict invoking-harness boundary for one sanitized failure record."""
+    invalid = False
     try:
+        if type(record) is not str:
+            raise ValueError
         parsed = json.loads(record)
         if type(parsed) is not dict or set(parsed) != {
             "classification",
@@ -131,6 +142,8 @@ def parse_diagnostic_failure_record(record: str) -> tuple[str, int | None, bool]
         ):
             raise ValueError
     except BaseException:
+        invalid = True
+    if invalid:
         raise ValueError("diagnostic evidence is malformed") from None
     return classification, child_status, child_wait_completed
 
@@ -584,6 +597,11 @@ def _parser() -> argparse.ArgumentParser:
     debug.add_argument('--project-root', required=True)
     debug.add_argument('--slots', required=True)
     debug.add_argument('--allow-private-full-frames', action='store_true')
+    debug.add_argument('--timeout-seconds', type=int, default=240)
+    debug_child = subcommands.add_parser('startup-debug-child', help=argparse.SUPPRESS)
+    debug_child.add_argument('--project-root', required=True)
+    debug_child.add_argument('--slots', required=True)
+    debug_child.add_argument('--allow-private-full-frames', action='store_true')
     export = subcommands.add_parser(
         "export-setup-example",
         help="write a public-safe synthetic installation configuration",
@@ -654,15 +672,19 @@ def main(
     startup_font_installer: Callable[[Path, Path], object] = install_private_startup_font,
     startup_approval_issuer: Callable[[str, int], object] = issue_startup_continue_approval,
     startup_continue_runner: Callable[[str, str], StartupContinueResult] | None = None,
+    startup_debug_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
-    if tuple(diagnostic_argv[:1]) == ("diagnose-home",):
+    if tuple(diagnostic_argv[:1]) in (("diagnose-home",), ("startup-debug-one",), ("startup-debug-child",)):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 args = _parser().parse_args(diagnostic_argv)
         except SystemExit as exc:
             if exc.code != 2:
                 raise
+            if tuple(diagnostic_argv[:1]) == ("startup-debug-child",):
+                sys.stderr.write("AUTHORIZATION\n")
+                return 2
             print("diagnostic arguments invalid", file=sys.stderr)
             raise SystemExit(2) from None
     else:
@@ -681,19 +703,36 @@ def main(
         if args.command == "setup":
             setup_runner(Path(args.project_root))
             return 0
-        if args.command in {'issue-startup-debug-approval', 'startup-debug-one'}:
+        if args.command == 'issue-startup-debug-approval':
             if args.allow_private_full_frames is not True:
                 return 2
-            from .startup_debug_native import issue_approval, build_cycle
-            if args.command == 'issue-startup-debug-approval':
-                issue_approval(args.project_root, args.lifetime_seconds)
-                print('startup diagnostic approval issued')
-                return 0
-            result = build_cycle(args.project_root, args.slots).visit_once()
-            if type(result) is not StartupContinueResult:
-                raise RuntimeError('startup diagnostic result invalid')
+            from .startup_debug_native import issue_approval
+            issue_approval(args.project_root, args.lifetime_seconds)
+            print('startup diagnostic approval issued')
+            return 0
+        if args.command == 'startup-debug-child':
+            reason = None
+            if args.allow_private_full_frames is not True:
+                reason = StartupReason.AUTHORIZATION
+            else:
+                try:
+                    # Emit only after the production cycle has cleaned up.
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        if startup_debug_cycle_builder is None:
+                            from .startup_debug_native import build_cycle
+                            builder = build_cycle
+                        else:
+                            builder = startup_debug_cycle_builder
+                        result = builder(args.project_root, args.slots).visit_once()
+                        if type(result) is not StartupContinueResult:
+                            raise StartupFailure(StartupReason.RECOGNITION)
+                except BaseException as exc:
+                    reason = fault_from(exc, StartupReason.COMPOSITION).reason
+            if reason is not None:
+                sys.stderr.write(reason.value + '\n')
+                return 2
             print(result.value)
-            return 0 if result in {StartupContinueResult.HOME, StartupContinueResult.BUILDER} else 1
+            return 0 if result is StartupContinueResult.HOME else 1
         if args.command == "setup-startup-font":
             startup_font_installer(Path(args.project_root), Path(args.font))
             return 0
@@ -773,7 +812,10 @@ def main(
                 return 2
             print(result.value)
             return 0 if result is HomeDiagnosticResult.HOME else 1
-        if args.command == "diagnose-home":
+        if args.command in {"diagnose-home", "startup-debug-one"}:
+            startup = args.command == "startup-debug-one"
+            if startup and args.allow_private_full_frames is not True:
+                return 2
             if (
                 type(args.timeout_seconds) is not int
                 or not 1 <= args.timeout_seconds <= 600
@@ -783,12 +825,14 @@ def main(
                 sys.executable,
                 "-m",
                 "clash_rush_rebuild",
-                "diagnose-home-child",
+                "startup-debug-child" if startup else "diagnose-home-child",
                 "--project-root",
                 args.project_root,
                 "--slots",
                 args.slots,
             ]
+            if startup:
+                command.append("--allow-private-full-frames")
             try:
                 if diagnostic_child_runner is None:
                     completed = run_owned_diagnostic_child(
@@ -807,16 +851,27 @@ def main(
                 return _emit_diagnostic_failure("CLEANUP", None, False)
             if type(completed) is DiagnosticChildOutcome:
                 if (
+                    type(completed.operational_failure) is not bool
+                    or type(completed.cleanup_succeeded) is not bool
+                    or type(completed.child_wait_completed) is not bool
+                    or (completed.reason is not None and type(completed.reason) is not DiagnosticParentReason)
+                    or (completed.prior_reason is not None and type(completed.prior_reason) not in (DiagnosticParentReason, StartupReason))
+                ):
+                    return _emit_diagnostic_failure("PARENT_COMMUNICATION", None, False)
+                if startup and type(completed.reason) is DiagnosticParentReason:
+                    return _emit_diagnostic_failure(completed.reason.value, None, completed.child_wait_completed is True)
+                if (
                     completed.operational_failure is True
                     or completed.cleanup_succeeded is not True
+                    or completed.child_wait_completed is not True
                 ):
                     return _emit_diagnostic_failure(
-                        "CLEANUP", None, completed.child_wait_completed
+                        "CLEANUP", None, completed.child_wait_completed is True
                     )
-                child_status = completed.returncode
+                child_status = completed.returncode if type(completed.returncode) is int else None
                 stdout = completed.stdout
                 stderr = completed.stderr
-            else:
+            elif type(completed) is subprocess.CompletedProcess and diagnostic_child_runner is not None:
                 child_status = (
                     completed.returncode
                     if type(completed.returncode) is int
@@ -824,6 +879,8 @@ def main(
                 )
                 stdout = completed.stdout
                 stderr = completed.stderr
+            else:
+                return _emit_diagnostic_failure("PARENT_COMMUNICATION", None, False)
             valid = {
                 (0, "HOME\n"): HomeDiagnosticResult.HOME,
                 (1, "BUILDER\n"): HomeDiagnosticResult.BUILDER,
@@ -835,7 +892,7 @@ def main(
                 else None
             )
             stage = (
-                _DIAGNOSTIC_STAGE_STDERR.get(stderr)
+                ({r.value + "\n": r.value for r in StartupReason} if startup else _DIAGNOSTIC_STAGE_STDERR).get(stderr)
                 if child_status == 2 and stdout == "" and type(stderr) is str
                 else None
             )
@@ -869,7 +926,7 @@ def main(
         else:
             cycle.visit_once()
     except BaseException:  # noqa: BLE001 - CLI emits no private native/config details
-        if args.command in {"diagnose-home", "diagnose-home-child"}:
+        if args.command in {"diagnose-home", "diagnose-home-child", "startup-debug-one", "startup-debug-child"}:
             return 1
         sys.stderr.write("inert lifecycle visit failed\n")
         return 1

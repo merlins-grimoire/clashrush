@@ -130,7 +130,7 @@ def test_debug_cycle_consumes_approval_before_geometry_and_detects_after_rebind(
         make_supervisor=lambda *args: subject, recover=recover,
     )
     if failure:
-        with pytest.raises(RuntimeError, match="LAUNCH"):
+        with pytest.raises(RuntimeError, match="GEOMETRY_" + failure.upper()):
             cycle.visit_once()
         assert "detect" not in events
     else:
