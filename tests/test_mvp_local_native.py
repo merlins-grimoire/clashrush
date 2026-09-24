@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -305,3 +306,41 @@ def test_stopped_preparer_fails_closed_when_postcondition_changes(mutation: str,
         subject.prepare(_configurations())
 
     assert events[-1] == "mutex:release"
+
+
+def test_retirement_does_not_relabel_proved_stop_when_receipt_write_fails() -> None:
+    outcomes: list[bool] = []
+    supervisor = SimpleNamespace(stop=lambda *_args: None)
+    lease = SimpleNamespace(release=lambda: None)
+
+    def record(_nonce: str, *, succeeded: bool) -> None:
+        outcomes.append(succeeded)
+        raise RuntimeError("receipt fault")
+
+    authority = SimpleNamespace(record_retirement=record)
+    with pytest.raises(RuntimeSafetyError, match="receipt"):
+        mvp_local_native._retire_owned(
+            supervisor, BINDING, lease, authority, "1" * 32
+        )
+    assert outcomes == [True]
+
+
+def test_retirement_receipt_waits_for_mutex_release() -> None:
+    events: list[str] = []
+    supervisor = SimpleNamespace(stop=lambda *_args: events.append("stop"))
+
+    def release() -> None:
+        events.append("release")
+        raise RuntimeError("release fault")
+
+    lease = SimpleNamespace(release=release)
+    authority = SimpleNamespace(
+        record_retirement=lambda _nonce, *, succeeded: events.append(
+            f"retirement:{succeeded}"
+        )
+    )
+    with pytest.raises(RuntimeSafetyError, match="cleanup"):
+        mvp_local_native._retire_owned(
+            supervisor, BINDING, lease, authority, "1" * 32
+        )
+    assert events == ["stop", "release", "retirement:False"]

@@ -9,6 +9,7 @@ import json
 import secrets
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -49,9 +50,10 @@ from .guided_setup import (
 )
 from .input_authorization import InputAuthorization
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, StopRecord
-from .lifecycle_state import LifecycleStateStore, Ready
+from .lifecycle_state import LifecycleStateStore, Ready, encode_state
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
+from .mvp_session_authority import ControlMode, DurableSessionAuthority
 from .no_input_home_diagnostic import (
     HomeDiagnosticResult,
     NoInputHomeDiagnosticController,
@@ -497,6 +499,27 @@ def _local_control_store(project_root: str | Path) -> LocalControlStore:
     return LocalControlStore(Path(project_root) / "var" / "mvp-local-control.json")
 
 
+def _mvp_session_store(project_root: str | Path) -> DurableSessionAuthority:
+    return DurableSessionAuthority(Path(project_root) / "var" / "mvp-session.sqlite3")
+
+
+def _start_mvp_session(project_root: str | Path, *, resume: bool):
+    project = Path(project_root).resolve(strict=True)
+    lifecycle = build_native_state_store(project).load()
+    if type(lifecycle) is not Ready:
+        raise RuntimeSafetyError("MVP run requires exact READY lifecycle state")
+    store = _mvp_session_store(project)
+    operation = store.resume if resume else store.run
+    now = int(time.time())
+    return operation(
+        purpose="MVP_SINGLE_ACCOUNT_ATTACK",
+        candidate_tree=_candidate_tree(project),
+        ready_bytes=encode_state(lifecycle),
+        deadline=now + 300,
+        now=now,
+    )
+
+
 def run_authorized_donor_visit(project_root: str, slots_path: str) -> StopRecord:
     """Run the donor's inert launch/stop seam through all local boundaries."""
     project = Path(project_root).resolve(strict=True)
@@ -615,7 +638,12 @@ def _parser() -> argparse.ArgumentParser:
     mvp_setup.add_argument("--account-ref", required=True)
     mvp_setup.add_argument("--instance-ref", required=True)
     mvp_setup.add_argument("--player-tag-sha256", required=True)
-    for name in ("mvp-run", "mvp-pause", "mvp-stop", "mvp-status"):
+    mvp_import = subcommands.add_parser(
+        "mvp-import-stopped",
+        help="explicitly import the preserved legacy STOPPED control file",
+    )
+    mvp_import.add_argument("--project-root", required=True)
+    for name in ("mvp-run", "mvp-pause", "mvp-resume", "mvp-stop", "mvp-status"):
         control = subcommands.add_parser(name)
         control.add_argument("--project-root", required=True)
     mvp_visit = subcommands.add_parser(
@@ -755,7 +783,7 @@ def main(
                 StartupContinueResult.BUILDER,
             } else 1
         if args.command == "mvp-setup":
-            _local_control_store(args.project_root).setup(
+            _mvp_session_store(args.project_root).setup(
                 MvpConfiguration(
                     args.team_ref,
                     args.account_ref,
@@ -765,20 +793,36 @@ def main(
             )
             print("local MVP configured mode=STOPPED")
             return 0
+        if args.command == "mvp-import-stopped":
+            project = Path(args.project_root).resolve(strict=True)
+            _mvp_session_store(project).import_stopped_legacy(
+                project / "var" / "mvp-local-control.json"
+            )
+            print("legacy local MVP imported mode=STOPPED")
+            return 0
+        if args.command in {"mvp-run", "mvp-resume"}:
+            _start_mvp_session(args.project_root, resume=args.command == "mvp-resume")
+            print("local MVP mode=RUNNING")
+            return 0
         transitions = {
-            "mvp-run": LocalBotMode.RUNNING,
-            "mvp-pause": LocalBotMode.PAUSED,
-            "mvp-stop": LocalBotMode.STOPPED,
+            "mvp-pause": ControlMode.PAUSED,
+            "mvp-stop": ControlMode.STOPPED,
         }
         if args.command in transitions:
-            state = _local_control_store(args.project_root).transition(
-                transitions[args.command]
+            state = _mvp_session_store(args.project_root).command(
+                transitions[args.command], command_id=secrets.token_hex(16)
             )
             print(f"local MVP mode={state.mode.value}")
             return 0
         if args.command == "mvp-status":
-            state = _local_control_store(args.project_root).load()
-            print(f"local MVP mode={state.mode.value} configured=yes")
+            state = _mvp_session_store(args.project_root).status()
+            receipt = "complete" if state.final_acknowledged else "pending"
+            game = state.game_outcome or "PENDING"
+            retirement = state.retirement_outcome or "PENDING"
+            print(
+                f"local MVP mode={state.mode.value} configured=yes "
+                f"game={game} retirement={retirement} receipt={receipt}"
+            )
             return 0
         if args.command == "mvp-visit-one":
             result = run_native_mvp_visit(

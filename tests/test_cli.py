@@ -217,8 +217,14 @@ def test_cli_does_not_overwrite_an_existing_setup_example(tmp_path: Path) -> Non
 
 
 def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
-    tmp_path: Path, capsys,
+    tmp_path: Path, capsys, monkeypatch,
 ) -> None:
+    monkeypatch.setattr(cli_module, "_candidate_tree", lambda _project: "b" * 40)
+    monkeypatch.setattr(
+        cli_module,
+        "build_native_state_store",
+        lambda _project: type("State", (), {"load": lambda self: Ready(0)})(),
+    )
     common = ["--project-root", str(tmp_path)]
     assert main([
         "mvp-setup", *common,
@@ -231,11 +237,13 @@ def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
     assert main(["mvp-status", *common]) == 0
     assert main(["mvp-pause", *common]) == 0
     assert main(["mvp-status", *common]) == 0
+    assert main(["mvp-resume", *common]) == 0
     assert main(["mvp-stop", *common]) == 0
 
     output = capsys.readouterr().out
     assert "RUNNING" in output
     assert "PAUSED" in output
+    assert "receipt=pending" in output
     assert "team-secret" not in output
     assert "account-secret" not in output
     assert "slot-0" not in output

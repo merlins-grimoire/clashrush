@@ -25,21 +25,24 @@ from .input_authorization import (
 )
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, PlayerBinding
 from .lifecycle_state import LifecycleStateStore, Ready, encode_state
-from .mvp_local_approval import LiveApprovalStore
-from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
+from .mvp_local_gameplay import LocalBotMode, LocalMvpBot, MvpConfiguration, VisitResult
 from .mvp_local_runtime import (
     BgraGameplayRecognizer,
     BoundedAttackExecutor,
     ConcreteAttackVisitPorts,
     LocalControlStore,
-    LocalMvpComposition,
     RuntimeSafetyError,
-    encode_control_state,
 )
 from .mvp_local_world_export import (
     capture_world_export,
     clear_windows_clipboard,
     read_windows_clipboard,
+)
+from .mvp_session_authority import (
+    ActionPhase,
+    ControlMode,
+    DurableSessionAuthority,
+    SessionAuthorityError,
 )
 from .registry import Slot
 from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
@@ -75,6 +78,107 @@ class LocalAuditLog:
                 "confirmed": confirmed,
             }
         )
+
+
+class DurableSessionAudit:
+    """Map the retained LocalMvpBot intent/outcome seam into durable phases."""
+
+    def __init__(self, authority: DurableSessionAuthority, transaction_ref: str) -> None:
+        self._authority = authority
+        self._transaction_ref = transaction_ref
+
+    def intent(self, transaction_ref: str) -> None:
+        if transaction_ref != self._transaction_ref:
+            raise SessionAuthorityError("transaction binding mismatch")
+        self._authority.transition_action(
+            transaction_ref,
+            expected=ActionPhase.PLANNED,
+            target=ActionPhase.INTENT_RECORDED,
+        )
+
+    def outcome(self, transaction_ref: str, confirmed: bool) -> None:
+        if transaction_ref != self._transaction_ref or type(confirmed) is not bool:
+            raise SessionAuthorityError("transaction outcome binding mismatch")
+        current = self._authority.transaction(transaction_ref)
+        if current.phase is ActionPhase.UNCERTAIN and confirmed is False:
+            return
+        if current.phase not in {
+            ActionPhase.PLANNED,
+            ActionPhase.INTENT_RECORDED,
+            ActionPhase.INPUT_COMPLETED,
+        }:
+            raise SessionAuthorityError("transaction outcome phase mismatch")
+        target = (
+            ActionPhase.CONFIRMED
+            if confirmed
+            else (
+                ActionPhase.UNCERTAIN
+                if current.phase is ActionPhase.INPUT_COMPLETED
+                else ActionPhase.FAILED
+            )
+        )
+        self._authority.transition_action(
+            transaction_ref,
+            expected=current.phase,
+            target=target,
+            reason_code=(
+                None
+                if confirmed
+                else (
+                    "CONFIRMATION_UNAVAILABLE"
+                    if target is ActionPhase.UNCERTAIN
+                    else "TRANSACTION_FAILED"
+                )
+            ),
+        )
+
+
+class DurableInputPhaseExecutor:
+    """Keep the physical-input phase sticky around the existing executor."""
+
+    def __init__(
+        self,
+        authority: DurableSessionAuthority,
+        transaction_ref: str,
+        executor: BoundedAttackExecutor,
+    ) -> None:
+        self._authority = authority
+        self._transaction_ref = transaction_ref
+        self._executor = executor
+
+    def run(self) -> tuple[bool, str]:
+        self._authority.transition_action(
+            self._transaction_ref,
+            expected=ActionPhase.INTENT_RECORDED,
+            target=ActionPhase.INPUT_STARTED,
+        )
+        try:
+            result = self._executor.run()
+        except BaseException:
+            self._authority.transition_action(
+                self._transaction_ref,
+                expected=ActionPhase.INPUT_STARTED,
+                target=ActionPhase.UNCERTAIN,
+                reason_code="EXECUTOR_EXCEPTION",
+            )
+            raise
+        if type(result) is not tuple or len(result) != 2 or type(result[0]) is not bool:
+            self._authority.transition_action(
+                self._transaction_ref,
+                expected=ActionPhase.INPUT_STARTED,
+                target=ActionPhase.UNCERTAIN,
+                reason_code="EXECUTOR_MALFORMED",
+            )
+            return False, "ATTACK_EXECUTION_MALFORMED"
+        self._authority.transition_action(
+            self._transaction_ref,
+            expected=ActionPhase.INPUT_STARTED,
+            target=(
+                ActionPhase.INPUT_COMPLETED if result[0] else ActionPhase.UNCERTAIN
+            ),
+            reason_code=None if result[0] else "INPUT_OUTCOME_UNCERTAIN",
+        )
+        return result
 
 
 def _configure_input_signatures(user32: object) -> None:
@@ -476,12 +580,47 @@ def prepare_native_mvp_control(
     ).prepare(configurations)
 
 
+def _retire_owned(
+    supervisor: object,
+    binding: PlayerBinding,
+    lease: object,
+    authority: object,
+    run_nonce: str,
+) -> None:
+    """Retire, release ownership, then persist exactly one truthful outcome."""
+    stop_error: BaseException | None = None
+    release_error: BaseException | None = None
+    try:
+        supervisor.stop(binding, None)
+    except BaseException as exc:
+        stop_error = exc
+    try:
+        lease.release()
+    except BaseException as exc:
+        release_error = exc
+    succeeded = stop_error is None and release_error is None
+    try:
+        authority.record_retirement(run_nonce, succeeded=succeeded)
+    except BaseException as exc:
+        if succeeded:
+            raise RuntimeSafetyError("durable retirement receipt failed") from exc
+        receipt_error = exc
+    else:
+        receipt_error = None
+    operational_error = stop_error or release_error
+    if operational_error is not None:
+        failure = RuntimeSafetyError("owned lifecycle cleanup failed")
+        if receipt_error is not None:
+            failure.add_note("retirement failure receipt was unavailable")
+        raise failure from operational_error
+
+
 def run_native_mvp_visit(
     project_root: str, slots_path: str, transaction_ref: str
 ) -> VisitResult:
     """Launch, bind, attack, prove HOME, and stop one configured local account."""
     project = Path(project_root).resolve(strict=True)
-    control = LocalControlStore(project / "var" / "mvp-local-control.json")
+    authority = DurableSessionAuthority(project / "var" / "mvp-session.sqlite3")
     native = NativeLifecycleApi()
     runtime = Win32Runtime(native)
     host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
@@ -493,24 +632,29 @@ def run_native_mvp_visit(
         if lease.abandoned:
             raise RuntimeSafetyError("WINDOW_BINDING")
         lease.require_usable()
-        configured = control.load()
-        if configured.mode is not LocalBotMode.RUNNING:
+        status = authority.status()
+        configured = authority.configuration()
+        if status.mode is not ControlMode.RUNNING or status.run_nonce is None:
             raise RuntimeSafetyError("persistent control mode is not RUNNING")
         store = _state_store(project)
         lifecycle = store.load()
         if type(lifecycle) is not Ready:
             raise RuntimeSafetyError("WINDOW_BINDING")
-        LiveApprovalStore(project).validate_and_consume(
-            candidate_tree=_candidate_tree(project),
-            lifecycle_bytes=encode_state(lifecycle),
-            control_bytes=encode_control_state(configured),
-            now=int(time.time()),
-        )
         slots = load_private_registry(project, Path(slots_path), _BLUESTACKS_CONF)
         if type(slots) is not tuple or len(slots) != 5:
             raise RuntimeSafetyError("WINDOW_BINDING")
         slot = _select_configured_slot(
-            slots, lifecycle, configured.configuration.instance_ref
+            slots, lifecycle, configured.instance_ref
+        )
+        authority.admit(
+            run_nonce=status.run_nonce,
+            transaction_ref=transaction_ref,
+            purpose="MVP_SINGLE_ACCOUNT_ATTACK",
+            candidate_tree=_candidate_tree(project),
+            ready_bytes=encode_state(lifecycle),
+            configuration_revision=status.configuration_revision,
+            control_revision=status.control_revision,
+            now=int(time.time()),
         )
         players = host.complete_player_snapshot()
         try:
@@ -523,12 +667,17 @@ def run_native_mvp_visit(
             store,
             AcquiredMutexLease(DEFAULT_MUTEX_NAME),
             nonce_factory=lambda: secrets.token_hex(16),
+            preserve_ready_cursor=True,
         )
         binding = supervisor.start(slot)
 
         def enabled() -> bool:
             try:
-                return control.load().mode is LocalBotMode.RUNNING
+                current = authority.status()
+                return (
+                    current.mode is ControlMode.RUNNING
+                    and current.run_nonce == status.run_nonce
+                )
             except BaseException:
                 return False
 
@@ -536,7 +685,7 @@ def run_native_mvp_visit(
             binding, supervisor.capture_owned, account_verified=False
         )
         BgraGameplayRecognizer.recognize(
-            source_recognizer, binding, configured.configuration.account_ref,
+            source_recognizer, binding, configured.account_ref,
             require_home=True,
         )
         input_authorization = InputAuthorization.monitored_attack(enabled)
@@ -546,7 +695,7 @@ def run_native_mvp_visit(
         summary = capture_world_export(
             binding,
             input_port=input_port,
-            expected_tag_sha256=configured.configuration.player_tag_sha256,
+            expected_tag_sha256=configured.player_tag_sha256,
             live_gate=enabled,
             clipboard_read=read_windows_clipboard,
             clipboard_clear=clear_windows_clipboard,
@@ -570,29 +719,33 @@ def run_native_mvp_visit(
                 raise RuntimeSafetyError("KILL_SWITCH")
             time.sleep(1.0)
             if recognizer.recognize(
-                binding, configured.configuration.account_ref
+                binding, configured.account_ref
             ).home is True:
                 home_restored = True
                 break
         if not home_restored:
             raise RuntimeSafetyError("HOME_NOT_RESTORED")
-        executor = BoundedAttackExecutor(
-            binding,
-            input_port,
-            army_ready=recognizer.army_ready,
-            begin_scout_transition=recognizer.capture_scout_source,
-            scout_ready=recognizer.scout_ready,
-            return_home_visible=recognizer.return_home_visible,
-            kill_switch_enabled=enabled,
-            sleep=time.sleep,
+        executor = DurableInputPhaseExecutor(
+            authority,
+            transaction_ref,
+            BoundedAttackExecutor(
+                binding,
+                input_port,
+                army_ready=recognizer.army_ready,
+                begin_scout_transition=recognizer.capture_scout_source,
+                scout_ready=recognizer.scout_ready,
+                return_home_visible=recognizer.return_home_visible,
+                kill_switch_enabled=enabled,
+                sleep=time.sleep,
+            ),
         )
         ports = ConcreteAttackVisitPorts(
             binding=binding,
-            account_ref=configured.configuration.account_ref,
+            account_ref=configured.account_ref,
             recognizer=recognizer,
             executor=executor,
             kill_switch_enabled=enabled,
-            audit=LocalAuditLog(project / "var" / "mvp-local-audit.jsonl"),
+            audit=DurableSessionAudit(authority, transaction_ref),
             cleanup=lambda: input_port.key_up(
                 binding,
                 0x52,
@@ -601,20 +754,26 @@ def run_native_mvp_visit(
                 action=InputAction.CLEANUP_RELEASE,
             ),
         )
-        result = LocalMvpComposition(control, ports).visit_once(transaction_ref)
+        bot = LocalMvpBot(ports)
+        bot.setup(configured)
+        bot.run()
+        result = bot.visit_once(transaction_ref)
+        phase = authority.transaction(transaction_ref).phase
+        if phase in {ActionPhase.PLANNED, ActionPhase.INTENT_RECORDED}:
+            authority.transition_action(
+                transaction_ref,
+                expected=phase,
+                target=ActionPhase.FAILED,
+                reason_code="PRE_INPUT_FAILURE",
+            )
     finally:
-        stop_error: BaseException | None = None
         if supervisor is not None and binding is not None:
+            _retire_owned(supervisor, binding, lease, authority, status.run_nonce)
+        else:
             try:
-                supervisor.stop(binding, None)
+                lease.release()
             except BaseException as exc:
-                stop_error = exc
-        try:
-            lease.release()
-        except BaseException as exc:
-            stop_error = stop_error or exc
-        if stop_error is not None:
-            raise RuntimeSafetyError("owned lifecycle cleanup failed") from stop_error
+                raise RuntimeSafetyError("owned lifecycle cleanup failed") from exc
     if type(result) is not VisitResult:
         raise RuntimeSafetyError("bounded visit did not produce a result")
     return result

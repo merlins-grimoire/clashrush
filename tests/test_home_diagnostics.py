@@ -10,10 +10,11 @@ import pytest
 from clash_rush_rebuild import mvp_local_native as native
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
-from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
+from clash_rush_rebuild.mvp_local_gameplay import MvpConfiguration
 from clash_rush_rebuild.mvp_local_runtime import (
-    BgraGameplayRecognizer, HomeDiagnostic, PersistentControl, RuntimeSafetyError,
+    BgraGameplayRecognizer, HomeDiagnostic, RuntimeSafetyError,
 )
+from clash_rush_rebuild.mvp_session_authority import ControlMode
 
 
 BINDING = PlayerBinding(
@@ -209,17 +210,28 @@ def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_clean
             monkeypatch.setattr(HomeDiagnostic, "to_json", lambda _self: "synthetic-private")
             monkeypatch.setattr(HomeDiagnostic, "reason", property(lambda _self: "synthetic-private"))
     configuration = MvpConfiguration("synthetic-team", ACCOUNT, "slot-2", "a" * 64)
-    control = SimpleNamespace(load=lambda: PersistentControl(configuration, LocalBotMode.RUNNING))
+    status = SimpleNamespace(
+        mode=ControlMode.RUNNING,
+        run_nonce="1" * 32,
+        configuration_revision=1,
+        control_revision=2,
+    )
+    authority = SimpleNamespace(
+        status=lambda: status,
+        configuration=lambda: configuration,
+        admit=lambda **_kw: events.append("admission"),
+        record_retirement=lambda *_args, **_kw: events.append("retirement"),
+    )
     lease = SimpleNamespace(abandoned=False, require_usable=lambda: None,
                             release=lambda: events.append("release"))
     snapshot = SimpleNamespace(identities=(), close=lambda: events.append("snapshot-close"))
-    monkeypatch.setattr(native, "LocalControlStore", lambda _path: control)
+    monkeypatch.setattr(native, "DurableSessionAuthority", lambda _path: authority)
     monkeypatch.setattr(native, "NativeLifecycleApi", lambda: None)
     monkeypatch.setattr(native, "Win32Runtime", lambda _api: SimpleNamespace(acquire_mutex=lambda: lease))
     monkeypatch.setattr(native, "Win32LifecycleHost", lambda *_args, **_kw: SimpleNamespace(complete_player_snapshot=lambda: snapshot))
     monkeypatch.setattr(native, "_state_store", lambda _project: SimpleNamespace(load=lambda: Ready(2)))
     monkeypatch.setattr(native, "_candidate_tree", lambda _project: "a" * 40)
-    monkeypatch.setattr(native, "LiveApprovalStore", lambda _project: SimpleNamespace(validate_and_consume=lambda **_kw: events.append("approval")))
+
     monkeypatch.setattr(native, "load_private_registry", lambda *_args: tuple(range(5)))
     monkeypatch.setattr(native, "_select_configured_slot", lambda *_args: 2)
     def capture(_binding):
@@ -242,4 +254,4 @@ def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_clean
         assert json.loads(payload)["reason"] == "FRACTION_LOW"
         assert json.loads(payload)["orange_pixels"] == 960
         assert ACCOUNT not in payload
-    assert events == ["approval", "snapshot-close", "start", "capture"] + (["input"] if positive else []) + ["stop", "release"]
+    assert events == ["admission", "snapshot-close", "start", "capture"] + (["input"] if positive else []) + ["stop", "release", "retirement"]
