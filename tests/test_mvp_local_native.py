@@ -7,10 +7,16 @@ import pytest
 
 from clash_rush_rebuild import mvp_local_native
 from clash_rush_rebuild.config import load_private_registry
-from clash_rush_rebuild.input_authorization import InputAction, InputAuthorization
+from clash_rush_rebuild.input_authorization import (
+    InputAction,
+    InputAuthorization,
+    InputPurpose,
+)
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
+from clash_rush_rebuild.mvp_account_ready import AccountReady
+from clash_rush_rebuild.mvp_session_authority import ControlMode
 from clash_rush_rebuild.mvp_local_runtime import (
     LocalControlStore,
     PersistentControl,
@@ -95,6 +101,121 @@ def test_cleanup_release_emits_only_for_keys_proven_held_by_this_input_owner(
     ) is True
     assert events[-2:] == [(0x52, 0), (0x52, 0x0002)]
     assert subject._held_keys == set()
+
+
+def test_bound_input_releases_mouse_after_post_down_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[int] = []
+
+    class User32:
+        def ClientToScreen(self, _hwnd, _point):
+            return True
+
+        def SetCursorPos(self, _x, _y):
+            return True
+
+        def mouse_event(self, flag, *_args):
+            events.append(flag)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _user32: None)
+    monkeypatch.setattr(
+        mvp_local_native.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(RuntimeError("synthetic post-down failure")),
+    )
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    with pytest.raises(RuntimeError, match="post-down"):
+        subject.click(
+            BINDING,
+            0.5,
+            0.5,
+            action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        )
+    assert events == [0x0002, 0x0004]
+
+
+def test_bound_drag_releases_mouse_after_post_down_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[int] = []
+
+    class User32:
+        def ClientToScreen(self, _hwnd, _point):
+            return True
+
+        def SetCursorPos(self, _x, _y):
+            return True
+
+        def mouse_event(self, flag, *_args):
+            events.append(flag)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _user32: None)
+    monkeypatch.setattr(
+        mvp_local_native.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(RuntimeError("synthetic post-down failure")),
+    )
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    with pytest.raises(RuntimeError, match="post-down"):
+        subject.drag(
+            BINDING,
+            0.5,
+            0.7,
+            0.5,
+            0.3,
+            action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        )
+    assert events == [0x0002, 0x0004]
+
+
+def test_bound_input_deadline_expiry_immediately_before_down_emits_no_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[int] = []
+
+    class User32:
+        def ClientToScreen(self, _hwnd, _point):
+            return True
+
+        def SetCursorPos(self, _x, _y):
+            return True
+
+        def mouse_event(self, flag, *_args):
+            events.append(flag)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _user32: None)
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+        deadline=10.0,
+        monotonic=lambda: 10.0,
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    assert subject.click(
+        BINDING,
+        0.5,
+        0.5,
+        action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+    ) is False
+    assert events == []
 
 
 def _private_registry(tmp_path):
@@ -344,3 +465,118 @@ def test_retirement_receipt_waits_for_mutex_release() -> None:
             supervisor, BINDING, lease, authority, "1" * 32
         )
     assert events == ["stop", "release", "retirement:False"]
+
+
+def test_native_visit_runs_separate_account_readiness_before_attack_capability(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    configuration = MvpConfiguration("synthetic-team", "synthetic-account", "slot-2", TAG_HASH)
+    status = SimpleNamespace(
+        mode=ControlMode.RUNNING,
+        run_nonce="1" * 32,
+        configuration_revision=1,
+        control_revision=2,
+    )
+    def admit(**kwargs):
+        assert kwargs["purpose"] == "MVP_ACCOUNT_READINESS"
+        events.append("admit")
+
+    authority = SimpleNamespace(
+        status=lambda: status,
+        configuration=lambda: configuration,
+        admit=admit,
+        record_retirement=lambda *_args, **_kwargs: events.append("retire"),
+    )
+    lease = SimpleNamespace(
+        abandoned=False,
+        require_usable=lambda: None,
+        release=lambda: events.append("release"),
+    )
+    snapshot = SimpleNamespace(
+        identities=(), close=lambda: events.append("snapshot-close")
+    )
+    supervisor = SimpleNamespace(
+        start=lambda _slot: events.append("start") or BINDING,
+        capture_owned=lambda _binding: (_ for _ in ()).throw(
+            AssertionError("fake readiness owns capture")
+        ),
+        stop=lambda *_args: events.append("stop"),
+    )
+    monkeypatch.setattr(mvp_local_native, "DurableSessionAuthority", lambda _path: authority)
+    monkeypatch.setattr(mvp_local_native, "NativeLifecycleApi", lambda: None)
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32Runtime",
+        lambda _api: SimpleNamespace(acquire_mutex=lambda: lease),
+    )
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32LifecycleHost",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            complete_player_snapshot=lambda: snapshot
+        ),
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_state_store", lambda _project: SimpleNamespace(load=lambda: Ready(2))
+    )
+    monkeypatch.setattr(mvp_local_native, "_candidate_tree", lambda _project: "a" * 40)
+    monkeypatch.setattr(mvp_local_native, "load_private_registry", lambda *_args: tuple(range(5)))
+    monkeypatch.setattr(mvp_local_native, "_select_configured_slot", lambda *_args: 2)
+    monkeypatch.setattr(mvp_local_native, "LifecycleSupervisor", lambda *_args, **_kwargs: supervisor)
+    monkeypatch.setattr(mvp_local_native, "load_private_visual_profile", lambda *_args: object())
+
+    readiness_input = object()
+    deadlines: list[float] = []
+
+    def input_constructor(_binding, _capture, authorization, **kwargs):
+        events.append(f"input:{authorization.purpose.value}")
+        assert authorization.purpose is InputPurpose.ACCOUNT_READINESS
+        assert callable(kwargs["monotonic"])
+        deadlines.append(kwargs["deadline"])
+        return readiness_input
+
+    def startup_constructor(_binding, _capture, authorization, **kwargs):
+        events.append(f"startup:{authorization.purpose.value}")
+        assert authorization.purpose is InputPurpose.STARTUP_CONTINUE_ONLY
+        assert callable(kwargs["monotonic"])
+        deadlines.append(kwargs["deadline"])
+        return object()
+
+    monkeypatch.setattr(mvp_local_native, "Win32BoundInput", input_constructor)
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32StartupContinueInput",
+        startup_constructor,
+    )
+
+    class Readiness:
+        def __init__(self, **kwargs):
+            assert kwargs["export_input"] is readiness_input
+            events.append("readiness:constructed")
+
+        def run(self, *, deadline):
+            assert type(deadline) is float
+            assert deadlines == [deadline, deadline]
+            events.append("readiness:run")
+            return AccountReady("1" * 32, "ordinary-card-v1")
+
+    monkeypatch.setattr(mvp_local_native, "AccountReadinessController", Readiness)
+
+    result = mvp_local_native.run_native_mvp_account_ready(
+        str(tmp_path), "synthetic-slots", "synthetic-transaction"
+    )
+
+    assert result == AccountReady("1" * 32, "ordinary-card-v1")
+    assert events == [
+        "admit",
+        "snapshot-close",
+        "start",
+        "input:ACCOUNT_READINESS",
+        "startup:STARTUP_CONTINUE_ONLY",
+        "readiness:constructed",
+        "readiness:run",
+        "stop",
+        "release",
+        "retire",
+    ]

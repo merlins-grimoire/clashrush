@@ -14,6 +14,7 @@ from clash_rush_rebuild.diagnostic_child_job import DiagnosticChildOutcome
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import VisitResult
+from clash_rush_rebuild.mvp_account_ready import AccountReady
 from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
 from clash_rush_rebuild.registry import Slot
 
@@ -293,6 +294,40 @@ def test_local_mvp_cli_runs_only_the_sealed_native_entry(monkeypatch, capsys) ->
     assert events == ["visit:X:Y:tx-one"]
     output = capsys.readouterr().out
     assert output.strip() == "visit status=completed reason=RETURNED_HOME"
+
+
+def test_local_mvp_account_ready_cli_stops_before_attack_authority(monkeypatch, capsys) -> None:
+    events: list[str] = []
+
+    def run(project_root: str, slots: str, transaction_ref: str) -> AccountReady:
+        events.append(f"ready:{project_root}:{slots}:{transaction_ref}")
+        return AccountReady("1" * 32, "ordinary-card-v1")
+
+    monkeypatch.setattr(cli_module, "run_native_mvp_account_ready", run)
+
+    status = main([
+        "mvp-account-ready-one",
+        "--project-root", "X",
+        "--slots", "Y",
+        "--transaction-ref", "tx-one",
+    ])
+
+    assert status == 0
+    assert events == ["ready:X:Y:tx-one"]
+    assert capsys.readouterr().out.strip() == "account ready"
+
+
+def test_local_mvp_readiness_run_uses_nonattack_purpose(monkeypatch, capsys) -> None:
+    events: list[tuple[str, bool, str]] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_start_mvp_session",
+        lambda root, *, resume, purpose: events.append((root, resume, purpose)),
+    )
+
+    assert main(["mvp-run-readiness", "--project-root", "X"]) == 0
+    assert events == [("X", False, "MVP_ACCOUNT_READINESS")]
+    assert capsys.readouterr().out.strip() == "local MVP mode=RUNNING"
 
 
 def test_cli_issues_separate_short_lived_reconciliation_approval(capsys) -> None:

@@ -51,6 +51,7 @@ from .guided_setup import (
 from .input_authorization import InputAuthorization
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, StopRecord
 from .lifecycle_state import LifecycleStateStore, Ready, encode_state
+from .mvp_account_ready import AccountReady
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
 from .mvp_session_authority import ControlMode, DurableSessionAuthority
@@ -503,7 +504,16 @@ def _mvp_session_store(project_root: str | Path) -> DurableSessionAuthority:
     return DurableSessionAuthority(Path(project_root) / "var" / "mvp-session.sqlite3")
 
 
-def _start_mvp_session(project_root: str | Path, *, resume: bool):
+def _start_mvp_session(
+    project_root: str | Path, *, resume: bool, purpose: str
+):
+    if (
+        type(resume) is not bool
+        or type(purpose) is not str
+        or purpose not in {"MVP_SINGLE_ACCOUNT_ATTACK", "MVP_ACCOUNT_READINESS"}
+        or (resume and purpose != "MVP_SINGLE_ACCOUNT_ATTACK")
+    ):
+        raise RuntimeSafetyError("MVP run purpose is malformed")
     project = Path(project_root).resolve(strict=True)
     lifecycle = build_native_state_store(project).load()
     if type(lifecycle) is not Ready:
@@ -512,7 +522,7 @@ def _start_mvp_session(project_root: str | Path, *, resume: bool):
     operation = store.resume if resume else store.run
     now = int(time.time())
     return operation(
-        purpose="MVP_SINGLE_ACCOUNT_ATTACK",
+        purpose=purpose,
         candidate_tree=_candidate_tree(project),
         ready_bytes=encode_state(lifecycle),
         deadline=now + 300,
@@ -549,6 +559,15 @@ def run_native_mvp_visit(
 ) -> VisitResult:
     """Late-bind the native implementation so ordinary controls stay inert."""
     from .mvp_local_native import run_native_mvp_visit as run
+
+    return run(project_root, slots_path, transaction_ref)
+
+
+def run_native_mvp_account_ready(
+    project_root: str, slots_path: str, transaction_ref: str
+) -> AccountReady:
+    """Late-bind the readiness-only owned visit."""
+    from .mvp_local_native import run_native_mvp_account_ready as run
 
     return run(project_root, slots_path, transaction_ref)
 
@@ -643,7 +662,14 @@ def _parser() -> argparse.ArgumentParser:
         help="explicitly import the preserved legacy STOPPED control file",
     )
     mvp_import.add_argument("--project-root", required=True)
-    for name in ("mvp-run", "mvp-pause", "mvp-resume", "mvp-stop", "mvp-status"):
+    for name in (
+        "mvp-run",
+        "mvp-run-readiness",
+        "mvp-pause",
+        "mvp-resume",
+        "mvp-stop",
+        "mvp-status",
+    ):
         control = subcommands.add_parser(name)
         control.add_argument("--project-root", required=True)
     mvp_visit = subcommands.add_parser(
@@ -652,6 +678,13 @@ def _parser() -> argparse.ArgumentParser:
     mvp_visit.add_argument("--project-root", required=True)
     mvp_visit.add_argument("--slots", required=True)
     mvp_visit.add_argument("--transaction-ref", required=True)
+    mvp_ready = subcommands.add_parser(
+        "mvp-account-ready-one",
+        help="prove one account ready without requesting an attack or deployment",
+    )
+    mvp_ready.add_argument("--project-root", required=True)
+    mvp_ready.add_argument("--slots", required=True)
+    mvp_ready.add_argument("--transaction-ref", required=True)
     issue_reconciliation = subcommands.add_parser(
         "issue-reconciliation-approval",
         help="issue one exact-state-bound stale-state reconciliation approval",
@@ -800,8 +833,16 @@ def main(
             )
             print("legacy local MVP imported mode=STOPPED")
             return 0
-        if args.command in {"mvp-run", "mvp-resume"}:
-            _start_mvp_session(args.project_root, resume=args.command == "mvp-resume")
+        if args.command in {"mvp-run", "mvp-run-readiness", "mvp-resume"}:
+            _start_mvp_session(
+                args.project_root,
+                resume=args.command == "mvp-resume",
+                purpose=(
+                    "MVP_ACCOUNT_READINESS"
+                    if args.command == "mvp-run-readiness"
+                    else "MVP_SINGLE_ACCOUNT_ATTACK"
+                ),
+            )
             print("local MVP mode=RUNNING")
             return 0
         transitions = {
@@ -832,6 +873,14 @@ def main(
                 raise RuntimeSafetyError("visit result is malformed")
             print(f"visit status={result.status} reason={result.reason_code}")
             return 0 if result.confirmed else 1
+        if args.command == "mvp-account-ready-one":
+            result = run_native_mvp_account_ready(
+                args.project_root, args.slots, args.transaction_ref
+            )
+            if type(result) is not AccountReady:
+                raise RuntimeSafetyError("AccountReady result is malformed")
+            print("account ready")
+            return 0
         if args.command == "issue-reconciliation-approval":
             approval_issuer_builder(args.project_root).issue(
                 lifetime_seconds=args.lifetime_seconds

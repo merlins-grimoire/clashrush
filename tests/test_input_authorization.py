@@ -55,6 +55,20 @@ def test_monitored_attack_rechecks_live_authorization_for_each_input() -> None:
         authorization.require(InputAction.TROOP_DEPLOYMENT)
 
 
+def test_account_readiness_capability_cannot_attack_or_deploy() -> None:
+    authorization = InputAuthorization.account_readiness(lambda: True)
+
+    authorization.require(InputAction.ACCOUNT_EXPORT_NAVIGATION)
+    for action in (
+        InputAction.STARTUP_CONTINUE,
+        InputAction.ATTACK_NAVIGATION,
+        InputAction.TROOP_DEPLOYMENT,
+        InputAction.RETURN_HOME,
+    ):
+        with pytest.raises(InputAuthorizationError, match="not authorized"):
+            authorization.require(action)
+
+
 def test_placement_and_unapproved_authority_remain_unrepresentable() -> None:
     assert PLACEMENT_ENABLED is False
     names = {action.name for action in InputAction}

@@ -1,0 +1,455 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+import pytest
+
+from clash_rush_rebuild.input_authorization import InputAction
+from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
+from clash_rush_rebuild.mvp_account_ready import (
+    AccountReady,
+    AccountReadinessController,
+    AccountReadinessError,
+    ReadinessVisualProfile,
+    TemplateSpec,
+    load_private_visual_profile,
+)
+
+
+BINDING = PlayerBinding(
+    ProcessIdentity(100, 200),
+    ProcessIdentity(100, 200),
+    10,
+    11,
+    640,
+    360,
+    "1" * 32,
+)
+TAG = "#SYNTHETIC"
+NOW = datetime.fromtimestamp(1_788_894_243, UTC)
+
+
+def _template(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 256, size=(7, 7, 3), dtype=np.uint8)
+
+
+def _frame(*entries: tuple[np.ndarray, int, int]) -> np.ndarray:
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    for template, x, y in entries:
+        height, width = template.shape[:2]
+        frame[y : y + height, x : x + width] = template
+    return frame
+
+
+class Input:
+    def __init__(self) -> None:
+        self.events: list[tuple[object, ...]] = []
+
+    def click(self, binding, x, y, *, action):
+        assert binding == BINDING
+        self.events.append(("click", round(x, 3), round(y, 3), action))
+        return True
+
+    def drag(self, binding, x0, y0, x1, y1, *, action):
+        assert binding == BINDING
+        self.events.append(("drag", x0, y0, x1, y1, action))
+        return True
+
+
+class StartupInput:
+    def __init__(self) -> None:
+        self.events: list[tuple[float, float]] = []
+
+    def click_continue(self, binding, x, y):
+        assert binding == BINDING
+        self.events.append((x, y))
+        return True
+
+
+def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests() -> None:
+    templates = {name: _template(index) for index, name in enumerate((
+        "home", "settings_button", "settings", "more_button", "more",
+        "export", "more_close", "settings_close", "ordinary_card",
+    ), start=1)}
+    profile = ReadinessVisualProfile(
+        profile_id="ordinary-card-v1",
+        specs=tuple(
+            TemplateSpec(name, template, hashlib.sha256(template.tobytes()).hexdigest(), 0.99, (0.0, 0.0, 1.0, 1.0))
+            for name, template in templates.items()
+        ),
+    )
+    frames = iter([
+        _frame((templates["home"], 4, 4)),
+        _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
+        _frame((templates["settings"], 4, 4), (templates["more_button"], 40, 70)),
+        _frame((templates["more"], 4, 4)),
+        _frame((templates["more"], 4, 4)),
+        _frame((templates["more"], 4, 4)),
+        _frame((templates["more"], 4, 4), (templates["export"], 60, 55)),
+        _frame((templates["more"], 4, 4), (templates["more_close"], 75, 5)),
+        _frame((templates["settings"], 4, 4), (templates["settings_close"], 75, 5)),
+        _frame((templates["home"], 4, 4), (templates["ordinary_card"], 15, 80)),
+    ])
+    input_port = Input()
+    startup_input = StartupInput()
+    reads = iter([
+        "old clipboard",
+        json.dumps({"tag": TAG, "timestamp": 1_788_894_243, "buildings": []}),
+    ])
+    clears: list[str] = []
+    waits: list[float] = []
+    controller = AccountReadinessController(
+        binding=BINDING,
+        run_nonce="2" * 32,
+        capture=lambda: next(frames),
+        profile=profile,
+        startup_input=startup_input,
+        export_input=input_port,
+        find_continue=lambda _frame: None,
+        live_gate=lambda: True,
+        clipboard_read=lambda: next(reads),
+        clipboard_clear=lambda: clears.append("clear"),
+        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
+        wall_clock=lambda: NOW,
+        monotonic=lambda: 1.0,
+        wait=waits.append,
+    )
+
+    result = controller.run(deadline=10.0)
+
+    assert result == AccountReady("2" * 32, "ordinary-card-v1")
+    assert startup_input.events == []
+    assert [event[-1] for event in input_port.events] == [
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        InputAction.ACCOUNT_EXPORT_NAVIGATION,
+    ]
+    assert not any(
+        event[-1] in {InputAction.ATTACK_NAVIGATION, InputAction.TROOP_DEPLOYMENT}
+        for event in input_port.events
+    )
+    assert clears == ["clear", "clear", "clear"]
+    assert waits == [0.75, 0.75, 0.15, 0.15, 0.15, 0.75, 0.75, 0.75]
+    assert input_port.events[5][1:3] == (round(63.5 / 640, 3), round(58.5 / 360, 3))
+
+
+def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path: Path) -> None:
+    private = tmp_path / "private" / "readiness"
+    private.mkdir(parents=True)
+    entries = {}
+    for index, name in enumerate(sorted({
+        "home", "settings_button", "settings", "more_button", "more",
+        "export", "more_close", "settings_close", "ordinary_card",
+    }), start=1):
+        template = _template(index)
+        ok, encoded = cv2.imencode(".png", template)
+        assert ok
+        asset = private / f"{name}.png"
+        asset.write_bytes(encoded.tobytes())
+        entries[name] = {
+            "file": asset.name,
+            "file_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+            "pixel_sha256": hashlib.sha256(template.tobytes()).hexdigest(),
+            "threshold_ppm": 990_000,
+            "roi_ppm": [0, 0, 1_000_000, 1_000_000],
+        }
+    manifest = private / "profile.json"
+    manifest.write_text(json.dumps({
+        "schema": 1,
+        "profile_id": "ordinary-card-v1",
+        "templates": entries,
+    }), encoding="utf-8")
+
+    profile = load_private_visual_profile(tmp_path, manifest)
+
+    assert profile.profile_id == "ordinary-card-v1"
+    assert profile.spec("ordinary_card").template.flags.writeable is False
+
+    (private / "home.png").write_bytes(b"changed")
+    try:
+        load_private_visual_profile(tmp_path, manifest)
+    except Exception as exc:
+        assert "digest" in str(exc)
+    else:
+        raise AssertionError("changed asset must be rejected")
+
+
+def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
+    names = (
+        "home", "settings_button", "settings", "more_button", "more",
+        "export", "more_close", "settings_close", "ordinary_card",
+    )
+    templates = {name: _template(index + 20) for index, name in enumerate(names)}
+    return ReadinessVisualProfile(
+        "ordinary-card-v1",
+        tuple(TemplateSpec(
+            name, template, hashlib.sha256(template.tobytes()).hexdigest(),
+            0.99, (0.0, 0.0, 1.0, 1.0),
+        ) for name, template in templates.items()),
+    ), templates
+
+
+def _successful_frames(templates: dict[str, np.ndarray], *, card: bool = True):
+    final = [(templates["home"], 4, 4)]
+    if card:
+        final.append((templates["ordinary_card"], 15, 80))
+    return [
+        _frame((templates["home"], 4, 4)),
+        _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
+        _frame((templates["settings"], 4, 4), (templates["more_button"], 40, 70)),
+        _frame((templates["more"], 4, 4)),
+        _frame((templates["more"], 4, 4)),
+        _frame((templates["more"], 4, 4)),
+        _frame((templates["more"], 4, 4), (templates["export"], 60, 55)),
+        _frame((templates["more"], 4, 4), (templates["more_close"], 75, 5)),
+        _frame((templates["settings"], 4, 4), (templates["settings_close"], 75, 5)),
+        _frame(*final),
+    ]
+
+
+def _controller(frames, *, clear=lambda: None, monotonic=lambda: 1.0):
+    profile, templates = _profile()
+    inputs = Input()
+    startup = StartupInput()
+    reads = iter(["old", json.dumps({
+        "tag": TAG, "timestamp": 1_788_894_243, "buildings": [],
+    })])
+    subject = AccountReadinessController(
+        binding=BINDING,
+        run_nonce="2" * 32,
+        capture=iter(frames).__next__,
+        profile=profile,
+        startup_input=startup,
+        export_input=inputs,
+        find_continue=lambda _frame: None,
+        live_gate=lambda: True,
+        clipboard_read=reads.__next__,
+        clipboard_clear=clear,
+        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
+        wall_clock=lambda: NOW,
+        monotonic=monotonic,
+        wait=lambda _seconds: None,
+    )
+    return subject, inputs, startup, templates
+
+
+def test_missing_settings_destination_denies_every_later_gesture() -> None:
+    profile, templates = _profile()
+    frames = [
+        _frame((templates["home"], 4, 4)),
+        _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
+        _frame((templates["home"], 4, 4), (templates["more_button"], 40, 70)),
+    ]
+    subject, inputs, _startup, _templates = _controller(frames)
+    subject._profile = profile
+
+    try:
+        subject.run(deadline=10.0)
+    except AccountReadinessError as exc:
+        assert "settings evidence" in str(exc)
+    else:
+        raise AssertionError("wrong destination must fail")
+    assert len(inputs.events) == 1
+
+
+def test_missing_ordinary_card_denies_account_ready_after_same_home() -> None:
+    profile, templates = _profile()
+    subject, inputs, _startup, _ = _controller(_successful_frames(templates, card=False))
+    subject._profile = profile
+
+    try:
+        subject.run(deadline=10.0)
+    except AccountReadinessError as exc:
+        assert "ordinary-card" in str(exc)
+    else:
+        raise AssertionError("missing card must fail")
+    assert all(event[-1] is InputAction.ACCOUNT_EXPORT_NAVIGATION for event in inputs.events)
+
+
+def test_clipboard_cleanup_fault_overrides_an_otherwise_complete_proof() -> None:
+    profile, templates = _profile()
+    clears = 0
+
+    def clear() -> None:
+        nonlocal clears
+        clears += 1
+        if clears == 2:
+            raise OSError("synthetic private clipboard detail")
+
+    subject, _inputs, _startup, _ = _controller(
+        _successful_frames(templates), clear=clear
+    )
+    subject._profile = profile
+    try:
+        subject.run(deadline=10.0)
+    except AccountReadinessError as exc:
+        assert str(exc) == "clipboard cleanup failed"
+    else:
+        raise AssertionError("cleanup fault must fail")
+
+
+@pytest.mark.parametrize("timestamp_offset", [-121, 31])
+def test_stale_or_future_export_never_returns_account_ready(timestamp_offset: int) -> None:
+    profile, templates = _profile()
+    subject, _inputs, _startup, _ = _controller(_successful_frames(templates))
+    subject._profile = profile
+    reads = iter([
+        "old",
+        json.dumps({
+            "tag": TAG,
+            "timestamp": int(NOW.timestamp()) + timestamp_offset,
+            "buildings": [],
+        }),
+    ])
+    subject._clipboard_read = reads.__next__
+
+    with pytest.raises(AccountReadinessError, match="world export proof failed"):
+        subject.run(deadline=10.0)
+
+
+def test_startup_continue_cap_exhaustion_never_retries_the_click() -> None:
+    profile, templates = _profile()
+    startup = StartupInput()
+    subject = AccountReadinessController(
+        binding=BINDING,
+        run_nonce="2" * 32,
+        capture=iter([_frame(), _frame()]).__next__,
+        profile=profile,
+        startup_input=startup,
+        export_input=Input(),
+        find_continue=lambda _frame: SimpleNamespace(x=0.5, y=0.5),
+        live_gate=lambda: True,
+        clipboard_read=lambda: "",
+        clipboard_clear=lambda: None,
+        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
+        wall_clock=lambda: NOW,
+        monotonic=lambda: 1.0,
+        wait=lambda _seconds: None,
+    )
+
+    try:
+        subject.run(deadline=10.0)
+    except AccountReadinessError as exc:
+        assert "cap exhausted" in str(exc)
+    else:
+        raise AssertionError("second Continue evidence must fail")
+    assert startup.events == [(0.5, 0.5)]
+
+
+def test_deadline_crossing_during_capture_discards_the_frame() -> None:
+    profile, _templates = _profile()
+    calls = iter([9.0, 10.0])
+    private_frame = np.ones((360, 640, 3), dtype=np.uint8)
+    subject = AccountReadinessController(
+        binding=BINDING,
+        run_nonce="2" * 32,
+        capture=lambda: private_frame,
+        profile=profile,
+        startup_input=StartupInput(),
+        export_input=Input(),
+        find_continue=lambda _frame: None,
+        live_gate=lambda: True,
+        clipboard_read=lambda: "",
+        clipboard_clear=lambda: None,
+        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
+        wall_clock=lambda: NOW,
+        monotonic=calls.__next__,
+        wait=lambda _seconds: None,
+    )
+
+    try:
+        subject.run(deadline=10.0)
+    except AccountReadinessError as exc:
+        assert "deadline" in str(exc)
+    else:
+        raise AssertionError("deadline crossing must fail")
+    assert not np.any(private_frame)
+
+
+def test_malformed_capture_is_zeroed_in_traceback_before_failure() -> None:
+    profile, _templates = _profile()
+    private_frame = np.ones((360, 640, 3), dtype=np.float32)
+    subject = AccountReadinessController(
+        binding=BINDING,
+        run_nonce="2" * 32,
+        capture=lambda: private_frame,
+        profile=profile,
+        startup_input=StartupInput(),
+        export_input=Input(),
+        find_continue=lambda _frame: None,
+        live_gate=lambda: True,
+        clipboard_read=lambda: "",
+        clipboard_clear=lambda: None,
+        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
+        wall_clock=lambda: NOW,
+        monotonic=lambda: 1.0,
+        wait=lambda _seconds: None,
+    )
+
+    with pytest.raises(AccountReadinessError) as caught:
+        subject.run(deadline=10.0)
+    trace = caught.value.__traceback__
+    while trace:
+        if trace.tb_frame.f_code.co_name == "_capture_frame":
+            retained = trace.tb_frame.f_locals.get("frame")
+            assert retained is None or not np.any(retained)
+        trace = trace.tb_next
+    assert not np.any(private_frame)
+
+
+def test_deadline_crossing_during_matcher_discards_the_match() -> None:
+    profile, templates = _profile()
+    calls = iter([9.0, 10.0])
+    subject, _inputs, _startup, _ = _controller([], monotonic=calls.__next__)
+    subject._profile = profile
+
+    try:
+        subject._match(
+            _frame((templates["home"], 4, 4)), "home", 10.0
+        )
+    except AccountReadinessError as exc:
+        assert "deadline" in str(exc)
+    else:
+        raise AssertionError("matcher deadline crossing must fail")
+
+
+def test_deadline_crossing_at_native_gate_emits_no_input() -> None:
+    profile, _templates = _profile()
+    calls = iter([9.0, 10.0])
+    subject, inputs, _startup, _ = _controller([], monotonic=calls.__next__)
+    subject._profile = profile
+
+    try:
+        subject._click(SimpleNamespace(x=0.5, y=0.5), 10.0)
+    except AccountReadinessError as exc:
+        assert "deadline" in str(exc)
+    else:
+        raise AssertionError("native gate deadline crossing must fail")
+    assert inputs.events == []
+
+
+@pytest.mark.parametrize("color", [(0, 0, 255), (0, 255, 0)])
+def test_plain_red_or_green_wrong_screen_never_authorizes_a_control(color) -> None:
+    profile, _templates = _profile()
+    decoy = np.zeros((360, 640, 3), dtype=np.uint8)
+    decoy[:] = color
+    calls = iter([1.0] * 8 + [10.0])
+    subject, inputs, startup, _ = _controller([decoy], monotonic=calls.__next__)
+    subject._profile = profile
+
+    with pytest.raises(AccountReadinessError, match="deadline"):
+        subject.run(deadline=10.0)
+    assert inputs.events == []
+    assert startup.events == []

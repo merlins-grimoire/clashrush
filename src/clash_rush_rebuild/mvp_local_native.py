@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import re
 import secrets
@@ -15,7 +16,10 @@ import subprocess
 import time
 from collections.abc import Callable
 from ctypes import wintypes
+from datetime import UTC, datetime
 from pathlib import Path
+
+import numpy as np
 
 from .config import load_private_registry
 from .input_authorization import (
@@ -26,6 +30,11 @@ from .input_authorization import (
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, PlayerBinding
 from .lifecycle_state import LifecycleStateStore, Ready, encode_state
 from .mvp_local_gameplay import LocalBotMode, LocalMvpBot, MvpConfiguration, VisitResult
+from .mvp_account_ready import (
+    AccountReady,
+    AccountReadinessController,
+    load_private_visual_profile,
+)
 from .mvp_local_runtime import (
     BgraGameplayRecognizer,
     BoundedAttackExecutor,
@@ -33,11 +42,9 @@ from .mvp_local_runtime import (
     LocalControlStore,
     RuntimeSafetyError,
 )
-from .mvp_local_world_export import (
-    capture_world_export,
-    clear_windows_clipboard,
-    read_windows_clipboard,
-)
+from .mvp_local_world_export import clear_windows_clipboard, read_windows_clipboard
+from .no_input_home_diagnostic import HomeDiagnosticResult, NoInputHomeDiagnosticController
+from .startup_continue_recovery import find_continue
 from .mvp_session_authority import (
     ActionPhase,
     ControlMode,
@@ -50,9 +57,6 @@ from .win32_runtime import DEFAULT_MUTEX_NAME, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
 
 _BLUESTACKS_CONF = Path(r"C:\ProgramData\BlueStacks_nxt\bluestacks.conf")
-_SETTINGS_CLOSE_X = (0.802, 0.119)
-
-
 class LocalAuditLog:
     """Append only transaction phase facts without Team/account/instance values."""
 
@@ -219,16 +223,30 @@ class Win32BoundInput:
         binding: PlayerBinding,
         safety_check,
         authorization: InputAuthorization,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if (
             type(binding) is not PlayerBinding
             or not callable(safety_check)
             or type(authorization) is not InputAuthorization
+            or (
+                deadline is not None
+                and (
+                    type(deadline) not in (int, float)
+                    or type(deadline) is bool
+                    or not math.isfinite(float(deadline))
+                    or not callable(monotonic)
+                )
+            )
         ):
             raise RuntimeSafetyError("exact native input binding and authorization required")
         self._binding = binding
         self._safety_check = safety_check
         self._authorization = authorization
+        self._deadline = None if deadline is None else float(deadline)
+        self._monotonic = monotonic
         self._held_keys: set[int] = set()
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         _configure_input_signatures(self._user32)
@@ -254,6 +272,20 @@ class Win32BoundInput:
             return True
         except InputAuthorizationError:
             return False
+
+    def _deadline_open(self) -> bool:
+        if self._deadline is None:
+            return True
+        try:
+            current = self._monotonic()
+        except BaseException:
+            return False
+        return bool(
+            type(current) in (int, float)
+            and type(current) is not bool
+            and math.isfinite(float(current))
+            and float(current) < self._deadline
+        )
 
     def click(
         self,
@@ -281,11 +313,13 @@ class Win32BoundInput:
             return False
         if not self._authorized(action) or not self._user32.SetCursorPos(point.x, point.y):
             return False
-        if not self._authorized(action):
+        if not self._authorized(action) or not self._deadline_open():
             return False
-        self._user32.mouse_event(0x0002, 0, 0, 0, None)
-        time.sleep(0.02)
-        self._user32.mouse_event(0x0004, 0, 0, 0, None)
+        try:
+            self._user32.mouse_event(0x0002, 0, 0, 0, None)
+            time.sleep(0.02)
+        finally:
+            self._user32.mouse_event(0x0004, 0, 0, 0, None)
         return True
 
     def drag(
@@ -318,12 +352,19 @@ class Win32BoundInput:
                 return False
         if not self._authorized(action) or not self._user32.SetCursorPos(start.x, start.y):
             return False
-        if not self._authorized(action):
+        if not self._authorized(action) or not self._deadline_open():
             return False
-        self._user32.mouse_event(0x0002, 0, 0, 0, None)
-        time.sleep(0.05)
-        moved = self._authorized(action) and self._user32.SetCursorPos(end.x, end.y)
-        self._user32.mouse_event(0x0004, 0, 0, 0, None)
+        moved = False
+        try:
+            self._user32.mouse_event(0x0002, 0, 0, 0, None)
+            time.sleep(0.05)
+            moved = (
+                self._authorized(action)
+                and self._deadline_open()
+                and self._user32.SetCursorPos(end.x, end.y)
+            )
+        finally:
+            self._user32.mouse_event(0x0004, 0, 0, 0, None)
         return bool(moved)
 
     def key_down(
@@ -370,13 +411,22 @@ class Win32StartupContinueInput:
         binding: PlayerBinding,
         safety_check,
         authorization: InputAuthorization,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if (
             type(authorization) is not InputAuthorization
             or authorization.purpose.value != "STARTUP_CONTINUE_ONLY"
         ):
             raise RuntimeSafetyError("exact Continue authorization required")
-        self._input = Win32BoundInput(binding, safety_check, authorization)
+        self._input = Win32BoundInput(
+            binding,
+            safety_check,
+            authorization,
+            deadline=deadline,
+            monotonic=monotonic,
+        )
         self._used = False
 
     def click_continue(
@@ -616,9 +666,15 @@ def _retire_owned(
 
 
 def run_native_mvp_visit(
-    project_root: str, slots_path: str, transaction_ref: str
-) -> VisitResult:
+    project_root: str,
+    slots_path: str,
+    transaction_ref: str,
+    *,
+    readiness_only: bool = False,
+) -> VisitResult | AccountReady:
     """Launch, bind, attack, prove HOME, and stop one configured local account."""
+    if type(readiness_only) is not bool:
+        raise RuntimeSafetyError("readiness mode is malformed")
     project = Path(project_root).resolve(strict=True)
     authority = DurableSessionAuthority(project / "var" / "mvp-session.sqlite3")
     native = NativeLifecycleApi()
@@ -649,7 +705,11 @@ def run_native_mvp_visit(
         authority.admit(
             run_nonce=status.run_nonce,
             transaction_ref=transaction_ref,
-            purpose="MVP_SINGLE_ACCOUNT_ATTACK",
+            purpose=(
+                "MVP_ACCOUNT_READINESS"
+                if readiness_only
+                else "MVP_SINGLE_ACCOUNT_ATTACK"
+            ),
             candidate_tree=_candidate_tree(project),
             ready_bytes=encode_state(lifecycle),
             configuration_revision=status.configuration_revision,
@@ -681,50 +741,86 @@ def run_native_mvp_visit(
             except BaseException:
                 return False
 
-        source_recognizer = BgraGameplayRecognizer(
-            binding, supervisor.capture_owned, account_verified=False
-        )
-        BgraGameplayRecognizer.recognize(
-            source_recognizer, binding, configured.account_ref,
-            require_home=True,
-        )
-        input_authorization = InputAuthorization.monitored_attack(enabled)
+        # Preserve the established attack entry's no-input hard-negative gate.
+        # The readiness-only command owns the startup recovery sequence and may
+        # legitimately begin before HOME is visible.
+        if not readiness_only:
+            source_recognizer = BgraGameplayRecognizer(
+                binding, supervisor.capture_owned, account_verified=False
+            )
+            BgraGameplayRecognizer.recognize(
+                source_recognizer,
+                binding,
+                configured.account_ref,
+                require_home=True,
+            )
+
+        readiness_deadline = time.monotonic() + 120.0
+        input_authorization = InputAuthorization.account_readiness(enabled)
         input_port = Win32BoundInput(
-            binding, supervisor.capture_owned, input_authorization
-        )
-        summary = capture_world_export(
             binding,
-            input_port=input_port,
-            expected_tag_sha256=configured.player_tag_sha256,
+            supervisor.capture_owned,
+            input_authorization,
+            deadline=readiness_deadline,
+            monotonic=time.monotonic,
+        )
+        startup_input = Win32StartupContinueInput(
+            binding,
+            supervisor.capture_owned,
+            InputAuthorization.startup_continue_only(enabled),
+            deadline=readiness_deadline,
+            monotonic=time.monotonic,
+        )
+        font_path = project / "private" / "assets" / "CCBackBeat.ttf"
+
+        def capture_bgr() -> np.ndarray:
+            width, height, pixels = supervisor.capture_owned(binding)
+            if (
+                type(width) is not int
+                or type(height) is not int
+                or (width, height) != (binding.width, binding.height)
+                or type(pixels) is not bytes
+                or len(pixels) != width * height * 4
+            ):
+                raise RuntimeSafetyError("FRAME_VALIDATION_FAILED")
+            return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4)[:, :, :3].copy()
+
+        readiness = AccountReadinessController(
+            binding=binding,
+            run_nonce=status.run_nonce,
+            capture=capture_bgr,
+            profile=load_private_visual_profile(
+                project, project / "private" / "readiness" / "profile.json"
+            ),
+            startup_input=startup_input,
+            export_input=input_port,
+            find_continue=lambda frame: find_continue(
+                frame, font_path, binding.height
+            ),
+            home_ready=lambda frame: (
+                NoInputHomeDiagnosticController.detect_frame(frame)
+                is HomeDiagnosticResult.HOME
+            ),
             live_gate=enabled,
             clipboard_read=read_windows_clipboard,
             clipboard_clear=clear_windows_clipboard,
-            sleep=time.sleep,
-        )
-        if summary.account_matches is not True:
+            expected_tag_sha256=configured.player_tag_sha256,
+            wall_clock=lambda: datetime.now(UTC),
+            monotonic=time.monotonic,
+            wait=time.sleep,
+        ).run(deadline=readiness_deadline)
+        if readiness.run_nonce != status.run_nonce:
             raise RuntimeSafetyError("ACCOUNT_MISMATCH")
+        if readiness_only:
+            return readiness
         recognizer = BgraGameplayRecognizer(
             binding, supervisor.capture_owned, account_verified=True
         )
-        home_restored = False
-        for _ in range(3):
-            if (
-                enabled() is not True
-                or input_port.click(
-                    binding,
-                    *_SETTINGS_CLOSE_X,
-                    action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
-                ) is not True
-            ):
-                raise RuntimeSafetyError("KILL_SWITCH")
-            time.sleep(1.0)
-            if recognizer.recognize(
-                binding, configured.account_ref
-            ).home is True:
-                home_restored = True
-                break
-        if not home_restored:
-            raise RuntimeSafetyError("HOME_NOT_RESTORED")
+        input_port = Win32BoundInput(
+            binding,
+            supervisor.capture_owned,
+            InputAuthorization.monitored_attack(enabled),
+        )
         executor = DurableInputPhaseExecutor(
             authority,
             transaction_ref,
@@ -779,11 +875,27 @@ def run_native_mvp_visit(
     return result
 
 
+def run_native_mvp_account_ready(
+    project_root: str, slots_path: str, transaction_ref: str
+) -> AccountReady:
+    """Run the owned readiness chain and retire before attack authority exists."""
+    result = run_native_mvp_visit(
+        project_root,
+        slots_path,
+        transaction_ref,
+        readiness_only=True,
+    )
+    if type(result) is not AccountReady:
+        raise RuntimeSafetyError("AccountReady result is malformed")
+    return result
+
+
 __all__ = [
     "LocalAuditLog",
     "StoppedControlPreparer",
     "Win32BoundInput",
     "Win32StartupContinueInput",
     "prepare_native_mvp_control",
+    "run_native_mvp_account_ready",
     "run_native_mvp_visit",
 ]

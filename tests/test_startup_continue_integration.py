@@ -146,7 +146,7 @@ def test_native_continue_port_revalidates_authority_and_is_one_shot(monkeypatch)
     calls: list[object] = []
 
     class BoundInput:
-        def __init__(self, binding, safety_check, authorization):
+        def __init__(self, binding, safety_check, authorization, **_kwargs):
             calls.append((binding, safety_check, authorization.purpose))
 
         def click(self, binding, x, y, *, action):

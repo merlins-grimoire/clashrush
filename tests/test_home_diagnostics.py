@@ -240,7 +240,7 @@ def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_clean
     monkeypatch.setattr(native, "LifecycleSupervisor", lambda *_args, **_kw: SimpleNamespace(
         start=lambda _slot: events.append("start") or BINDING, capture_owned=capture,
         stop=lambda *_args: events.append("stop")))
-    def input_constructor(*_args):
+    def input_constructor(*_args, **_kwargs):
         events.append("input")
         raise RuntimeSafetyError("SYNTHETIC_INPUT_SENTINEL")
     monkeypatch.setattr(native, "Win32BoundInput", input_constructor)

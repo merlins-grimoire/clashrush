@@ -22,6 +22,7 @@ class InputPurpose(StrEnum):
     NO_INPUT_DIAGNOSTIC = "NO_INPUT_DIAGNOSTIC"
     STARTUP_CONTINUE_ONLY = "STARTUP_CONTINUE_ONLY"
     STARTUP_DEBUG = "STARTUP_DEBUG"
+    ACCOUNT_READINESS = "ACCOUNT_READINESS"
     MONITORED_ATTACK = "MONITORED_ATTACK"
 
 
@@ -56,6 +57,7 @@ class InputAuthorization:
             purpose in {
                 InputPurpose.STARTUP_CONTINUE_ONLY,
                 InputPurpose.STARTUP_DEBUG,
+                InputPurpose.ACCOUNT_READINESS,
                 InputPurpose.MONITORED_ATTACK,
             }
             and not callable(live_gate)
@@ -73,6 +75,12 @@ class InputAuthorization:
         cls, live_gate: Callable[[], bool]
     ) -> InputAuthorization:
         return cls(InputPurpose.MONITORED_ATTACK, live_gate)
+
+    @classmethod
+    def account_readiness(
+        cls, live_gate: Callable[[], bool]
+    ) -> InputAuthorization:
+        return cls(InputPurpose.ACCOUNT_READINESS, live_gate)
 
     @classmethod
     def startup_continue_only(
@@ -100,6 +108,9 @@ class InputAuthorization:
                 InputAction.STARTUP_LAUNCH_GAME, InputAction.STARTUP_CLOSE_PROMO,
                 InputAction.STARTUP_OKAY, InputAction.STARTUP_CONTINUE,
             }
+        ) or (
+            self._purpose is InputPurpose.ACCOUNT_READINESS
+            and action is InputAction.ACCOUNT_EXPORT_NAVIGATION
         ) or (
             self._purpose is InputPurpose.MONITORED_ATTACK
             and action in {
