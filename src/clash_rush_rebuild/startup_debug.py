@@ -172,10 +172,7 @@ class StartupDetector:
     def __init__(self, font_path):
         self.font_path = Path(font_path)
 
-    def __call__(self, frame):
-        point = launcher_position(frame)
-        if point:
-            return InputAction.STARTUP_LAUNCH_GAME, point
+    def detect_non_launcher(self, frame):
         if find_update(frame, self.font_path, frame.shape[0]):
             raise StartupDebugError("UPDATE_REQUIRED")
         for action in (InputAction.STARTUP_CLOSE_PROMO, InputAction.STARTUP_OKAY):
@@ -184,6 +181,12 @@ class StartupDetector:
                 return action, point
         match = find_continue(frame, self.font_path, frame.shape[0])
         return (InputAction.STARTUP_CONTINUE, (match.x, match.y)) if match else None
+
+    def __call__(self, frame):
+        point = launcher_position(frame)
+        if point:
+            return InputAction.STARTUP_LAUNCH_GAME, point
+        return self.detect_non_launcher(frame)
 
 
 class DebugEvidence:

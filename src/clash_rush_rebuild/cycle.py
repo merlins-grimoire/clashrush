@@ -413,3 +413,9 @@ class StartupDebugCycle(StartupContinueCycle):
         if failure is not None:
             raise_fault(failure)
         return result
+
+
+class ReadinessCalibrationCycle(StartupContinueCycle):
+    """Reuse the complete owned recovery cycle with calibration-only approval."""
+
+    _approval_action = ApprovalAction.READINESS_CALIBRATION

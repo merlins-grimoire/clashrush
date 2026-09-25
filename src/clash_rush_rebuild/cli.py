@@ -650,6 +650,21 @@ def _parser() -> argparse.ArgumentParser:
     debug_child.add_argument('--project-root', required=True)
     debug_child.add_argument('--slots', required=True)
     debug_child.add_argument('--allow-private-full-frames', action='store_true')
+    calibration_issue = subcommands.add_parser('issue-readiness-calibration-approval')
+    calibration_issue.add_argument('--project-root', required=True)
+    calibration_issue.add_argument('--lifetime-seconds', type=int, default=300)
+    calibration_issue.add_argument('--allow-private-full-frames', action='store_true')
+    calibration = subcommands.add_parser('calibrate-readiness')
+    calibration.add_argument('--project-root', required=True)
+    calibration.add_argument('--slots', required=True)
+    calibration.add_argument('--allow-private-full-frames', action='store_true')
+    calibration.add_argument('--timeout-seconds', type=int, default=240)
+    calibration_child = subcommands.add_parser(
+        'calibrate-readiness-child', help=argparse.SUPPRESS
+    )
+    calibration_child.add_argument('--project-root', required=True)
+    calibration_child.add_argument('--slots', required=True)
+    calibration_child.add_argument('--allow-private-full-frames', action='store_true')
     export = subcommands.add_parser(
         "export-setup-example",
         help="write a public-safe synthetic installation configuration",
@@ -741,6 +756,9 @@ def main(
     startup_approval_issuer: Callable[[str, int], object] = issue_startup_continue_approval,
     startup_continue_runner: Callable[[str, str], StartupContinueResult] | None = None,
     startup_debug_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
+    calibration_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
+    calibration_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    calibration_approval_issuer: Callable[[str, int], object] | None = None,
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
     sanitized_commands = {
@@ -749,6 +767,8 @@ def main(
         "startup-debug-child",
         "visit-one",
         "visit-one-child",
+        "calibrate-readiness",
+        "calibrate-readiness-child",
     }
     if tuple(diagnostic_argv[:1]) in tuple((name,) for name in sanitized_commands):
         try:
@@ -763,8 +783,16 @@ def main(
             if tuple(diagnostic_argv[:1]) == ("visit-one-child",):
                 sys.stderr.write("LIFECYCLE\n")
                 return 2
+            if tuple(diagnostic_argv[:1]) == ("calibrate-readiness-child",):
+                sys.stderr.write("CALIBRATION\n")
+                return 2
             if tuple(diagnostic_argv[:1]) == ("visit-one",):
                 print("inert lifecycle arguments invalid", file=sys.stderr)
+                raise SystemExit(2) from None
+            if tuple(diagnostic_argv[:1]) in {
+                ("calibrate-readiness",),
+            }:
+                print("calibration arguments invalid", file=sys.stderr)
                 raise SystemExit(2) from None
             print("diagnostic arguments invalid", file=sys.stderr)
             raise SystemExit(2) from None
@@ -892,6 +920,113 @@ def main(
                 return 2
             print(result.value)
             return 0 if result is StartupContinueResult.HOME else 1
+        if args.command == 'issue-readiness-calibration-approval':
+            if args.allow_private_full_frames is not True:
+                return 2
+            if calibration_approval_issuer is None:
+                from .readiness_calibration_native import issue_approval
+
+                issuer = issue_approval
+            else:
+                issuer = calibration_approval_issuer
+            issuer(args.project_root, args.lifetime_seconds)
+            print('readiness calibration approval issued')
+            return 0
+        if args.command == 'calibrate-readiness-child':
+            if args.allow_private_full_frames is not True:
+                sys.stderr.write('CALIBRATION\n')
+                return 2
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    if calibration_cycle_builder is None:
+                        from .readiness_calibration_native import build_cycle
+
+                        builder = build_cycle
+                    else:
+                        builder = calibration_cycle_builder
+                    result = builder(args.project_root, args.slots).visit_once()
+                    if type(result) is not StartupContinueResult or result is not StartupContinueResult.HOME:
+                        raise RuntimeError('calibration result malformed')
+            except BaseException:
+                sys.stderr.write('CALIBRATION\n')
+                return 2
+            print('CALIBRATED')
+            return 0
+        if args.command == 'calibrate-readiness':
+            if (
+                args.allow_private_full_frames is not True
+                or type(args.timeout_seconds) is not int
+                or not 1 <= args.timeout_seconds <= 600
+            ):
+                return 2
+            command = [
+                sys.executable,
+                '-m',
+                'clash_rush_rebuild',
+                'calibrate-readiness-child',
+                '--project-root',
+                args.project_root,
+                '--slots',
+                args.slots,
+                '--allow-private-full-frames',
+            ]
+            try:
+                if calibration_child_runner is None:
+                    completed = run_owned_diagnostic_child(
+                        command, timeout=args.timeout_seconds
+                    )
+                else:
+                    completed = calibration_child_runner(
+                        command,
+                        timeout=args.timeout_seconds,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+            except BaseException:
+                return _emit_diagnostic_failure('CLEANUP', None, False)
+            if type(completed) is DiagnosticChildOutcome:
+                if (
+                    (completed.reason is not None and type(completed.reason) is not DiagnosticParentReason)
+                    or (
+                        completed.prior_reason is not None
+                        and type(completed.prior_reason)
+                        not in (DiagnosticParentReason, StartupReason)
+                    )
+                    or completed.operational_failure is not False
+                    or completed.cleanup_succeeded is not True
+                    or completed.child_wait_completed is not True
+                ):
+                    return _emit_diagnostic_failure(
+                        'CLEANUP', None, completed.child_wait_completed is True
+                    )
+                child_status, stdout, stderr = (
+                    completed.returncode, completed.stdout, completed.stderr
+                )
+            elif (
+                type(completed) is subprocess.CompletedProcess
+                and calibration_child_runner is not None
+            ):
+                child_status, stdout, stderr = (
+                    completed.returncode, completed.stdout, completed.stderr
+                )
+            else:
+                return _emit_diagnostic_failure('PARENT_COMMUNICATION', None, False)
+            if (
+                type(child_status) is int
+                and child_status == 0
+                and type(stdout) is str
+                and stdout == 'CALIBRATED\n'
+                and type(stderr) is str
+                and stderr == ''
+            ):
+                print('CALIBRATED')
+                return 0
+            if child_status == 2 and stdout == '' and stderr == 'CALIBRATION\n':
+                return _emit_diagnostic_failure('RECOGNITION', 2, True)
+            return _emit_diagnostic_failure(
+                'SCALAR_PARSE', child_status if type(child_status) is int else None, True
+            )
         if args.command == "setup-startup-font":
             startup_font_installer(Path(args.project_root), Path(args.font))
             return 0
