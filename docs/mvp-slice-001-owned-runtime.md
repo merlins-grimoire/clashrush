@@ -41,6 +41,23 @@ IDLE
 
 Any uncertain transition stays `ACTIVE`, preserves authoritative handles/evidence until each bounded retirement attempt has run, and forbids another admission. A blocked native worker is bounded by an owner outside that worker. Forced retirement may release only a matching already-held control; it never emits a new press, move, or click. An abandoned host mutex is a sticky consistency fault: releasing the abandoned lease and later receiving an ordinary kernel acquisition does not make the process usable. Only an explicit reconciliation boundary may clear it.
 
+## Public command ownership
+
+The operator-facing `visit-one` command never composes or executes `InertCycle`
+in its own process. It starts exactly one hidden `visit-one-child` through the
+Hermes-derived atomic Job owner, applies a fixed 120-second parent deadline,
+and accepts only the exact `0 / STOPPED / empty-stderr` scalar after child wait,
+Job-empty cleanup, and stream cleanup all succeed. Timeout, malformed output,
+child failure, or uncertain retirement produces one sanitized failure and no
+automatic retry. The hidden child alone owns the host mutex and the complete
+`InertCycle`; if it is forcibly retired, durable `ACTIVE` remains the
+fail-closed reconciliation barrier.
+
+This was selected as an architecture reassessment rather than an in-process
+timeout patch: Python cannot safely interrupt a blocked native `PrintWindow`
+call in the lifecycle thread, while the already-pinned donor owner provides an
+external process boundary and authoritative descendant retirement.
+
 ## Immutable donor/import manifest
 
 Primary ownership donor:
@@ -57,7 +74,8 @@ Comparison donors (behavior only; neither replaces lifecycle ownership):
 Four boundary adaptations remain fixed:
 
 1. Exactly one selected BlueStacks instance under the protected host mutex and private Job.
-2. Explicit one-shot, tree/state-bound authorization; this slice performs only synthetic/inert verification.
+2. Explicit one-command operator approval for the inert visit; this slice does
+   not claim durable tree/state-bound approval, and performs no gameplay input.
 3. Private configuration and memory-only full-frame capture; source/export verification excludes private canaries and machine-local helper scripts.
 4. Zero gameplay input and no spending/reward/account-switch executor. Forced cleanup can only release a matching control proven held by the retired worker.
 

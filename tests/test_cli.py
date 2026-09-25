@@ -10,7 +10,10 @@ import pytest
 import clash_rush_rebuild.cli as cli_module
 import clash_rush_rebuild.cycle as cycle_module
 from clash_rush_rebuild.cli import build_native_state_store, main
-from clash_rush_rebuild.diagnostic_child_job import DiagnosticChildOutcome
+from clash_rush_rebuild.diagnostic_child_job import (
+    DiagnosticChildOutcome,
+    DiagnosticParentReason,
+)
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import VisitResult
@@ -30,6 +33,11 @@ class FakeCycle:
     def initialize(self) -> object:
         self.events.append("initialize")
         return object()
+
+
+class SpoofedText:
+    def __eq__(self, _other: object) -> bool:
+        return True
 
 
 class FakeApprovalIssuer:
@@ -62,7 +70,68 @@ def test_cli_refuses_inert_visit_without_explicit_owner_approval() -> None:
     assert events == []
 
 
-def test_cli_composes_exactly_one_visit_after_explicit_owner_approval() -> None:
+def test_cli_bounds_exactly_one_approved_inert_visit_in_owned_child() -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return CompletedProcess(command, 0, "STOPPED\n", "")
+
+    status = main(
+        [
+            "visit-one",
+            "--project-root",
+            "X",
+            "--slots",
+            "Y",
+            "--owner-approved",
+        ],
+        inert_child_runner=run,
+    )
+
+    assert status == 0
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[-6:] == [
+        "visit-one-child",
+        "--project-root",
+        "X",
+        "--slots",
+        "Y",
+        "--owner-approved",
+    ]
+    assert kwargs == {
+        "timeout": 120,
+        "check": False,
+        "capture_output": True,
+        "text": True,
+    }
+
+
+def test_public_inert_visit_forwards_diagnostic_cursor_preservation() -> None:
+    commands: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return CompletedProcess(command, 0, "STOPPED\n", "")
+
+    assert main(
+        [
+            "visit-one",
+            "--project-root",
+            "X",
+            "--slots",
+            "Y",
+            "--owner-approved",
+            "--diagnostic-preserve-cursor",
+        ],
+        inert_child_runner=run,
+    ) == 0
+
+    assert commands[0][-1] == "--diagnostic-preserve-cursor"
+
+
+def test_private_inert_child_composes_exactly_one_visit_and_closed_result(capsys) -> None:
     events: list[str] = []
 
     def build(project_root: str, slots_path: str) -> FakeCycle:
@@ -71,7 +140,7 @@ def test_cli_composes_exactly_one_visit_after_explicit_owner_approval() -> None:
 
     status = main(
         [
-            "visit-one",
+            "visit-one-child",
             "--project-root",
             "X",
             "--slots",
@@ -83,6 +152,124 @@ def test_cli_composes_exactly_one_visit_after_explicit_owner_approval() -> None:
 
     assert status == 0
     assert events == ["build:X:Y", "visit"]
+    assert capsys.readouterr().out == "STOPPED\n"
+
+
+def test_public_inert_visit_fails_closed_when_owned_child_cleanup_is_unproved(
+    monkeypatch,
+    capsys,
+) -> None:
+    built: list[object] = []
+    monkeypatch.setattr(
+        cli_module,
+        "run_owned_diagnostic_child",
+        lambda command, *, timeout: DiagnosticChildOutcome(
+            None,
+            None,
+            None,
+            False,
+            False,
+        ),
+    )
+
+    status = main(
+        [
+            "visit-one",
+            "--project-root",
+            "PRIVATE_ROOT",
+            "--slots",
+            "PRIVATE_SLOTS",
+            "--owner-approved",
+        ],
+        cycle_builder=lambda *_args: built.append(object()),
+    )
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert built == []
+    assert captured.out == ""
+    assert captured.err == "inert lifecycle visit failed\n"
+    assert "PRIVATE" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        DiagnosticChildOutcome(True, "STOPPED\n", "", True, True),
+        DiagnosticChildOutcome(0, SpoofedText(), "", True, True),
+        DiagnosticChildOutcome(0, "STOPPED\n", SpoofedText(), True, True),
+        DiagnosticChildOutcome(0, "STOPPED\nextra", "", True, True),
+        DiagnosticChildOutcome(0, "STOPPED\n", "PRIVATE_STDERR", True, True),
+        DiagnosticChildOutcome(0, "STOPPED\n", "", 1, True),
+        DiagnosticChildOutcome(0, "STOPPED\n", "", True, 1),
+        DiagnosticChildOutcome(0, "STOPPED\n", "", True, True, 0),
+        DiagnosticChildOutcome(
+            0,
+            "STOPPED\n",
+            "",
+            True,
+            True,
+            reason=DiagnosticParentReason.CLEANUP,
+        ),
+        DiagnosticChildOutcome(
+            0,
+            "STOPPED\n",
+            "",
+            True,
+            True,
+            prior_reason=DiagnosticParentReason.TIMEOUT,
+        ),
+    ],
+)
+def test_public_inert_visit_rejects_every_nonexact_owned_outcome(
+    outcome: DiagnosticChildOutcome,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "run_owned_diagnostic_child",
+        lambda _command, *, timeout: outcome,
+    )
+
+    assert main(
+        [
+            "visit-one",
+            "--project-root",
+            "PRIVATE_ROOT",
+            "--slots",
+            "PRIVATE_SLOTS",
+            "--owner-approved",
+        ]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "inert lifecycle visit failed\n"
+    assert "PRIVATE" not in captured.err
+
+
+def test_private_inert_child_sanitizes_cycle_failure(capsys) -> None:
+    def fail(_project_root: str, _slots_path: str) -> FakeCycle:
+        raise RuntimeError("PRIVATE_NATIVE_DETAIL")
+
+    status = main(
+        [
+            "visit-one-child",
+            "--project-root",
+            "PRIVATE_ROOT",
+            "--slots",
+            "PRIVATE_SLOTS",
+            "--owner-approved",
+        ],
+        cycle_builder=fail,
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == "LIFECYCLE\n"
+    assert "PRIVATE" not in captured.err
 
 
 def test_native_cli_routes_approved_visit_through_donor_boundary_adapter() -> None:

@@ -69,6 +69,7 @@ from .win32_runtime import NativeWin32Api, Win32Runtime
 from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
 
 _BLUESTACKS_CONF = Path(r"C:\ProgramData\BlueStacks_nxt\bluestacks.conf")
+_INERT_VISIT_TIMEOUT_SECONDS = 120
 _DIAGNOSTIC_STAGE_STDERR = {
     f"{stage.value}\n": stage.value for stage in DiagnosticFailureStage
 }
@@ -591,6 +592,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="preserve the admitted READY cursor for an explicit diagnostic visit",
     )
+    visit_child = subcommands.add_parser("visit-one-child", help=argparse.SUPPRESS)
+    visit_child.add_argument("--project-root", required=True)
+    visit_child.add_argument("--slots", required=True)
+    visit_child.add_argument("--owner-approved", action="store_true")
+    visit_child.add_argument("--diagnostic-preserve-cursor", action="store_true")
     donor_visit = subcommands.add_parser(
         "donor-visit-one",
         help="run one authorized donor-spine no-input launch/stop visit",
@@ -729,6 +735,7 @@ def main(
     ] = build_native_reconciler,
     diagnostic_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
     diagnostic_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    inert_child_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     authorized_visit_runner: Callable[[str, str], object] | None = None,
     startup_font_installer: Callable[[Path, Path], object] = install_private_startup_font,
     startup_approval_issuer: Callable[[str, int], object] = issue_startup_continue_approval,
@@ -736,7 +743,14 @@ def main(
     startup_debug_cycle_builder: Callable[[str, str], CycleCommand] | None = None,
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
-    if tuple(diagnostic_argv[:1]) in (("diagnose-home",), ("startup-debug-one",), ("startup-debug-child",)):
+    sanitized_commands = {
+        "diagnose-home",
+        "startup-debug-one",
+        "startup-debug-child",
+        "visit-one",
+        "visit-one-child",
+    }
+    if tuple(diagnostic_argv[:1]) in tuple((name,) for name in sanitized_commands):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 args = _parser().parse_args(diagnostic_argv)
@@ -746,17 +760,101 @@ def main(
             if tuple(diagnostic_argv[:1]) == ("startup-debug-child",):
                 sys.stderr.write("AUTHORIZATION\n")
                 return 2
+            if tuple(diagnostic_argv[:1]) == ("visit-one-child",):
+                sys.stderr.write("LIFECYCLE\n")
+                return 2
+            if tuple(diagnostic_argv[:1]) == ("visit-one",):
+                print("inert lifecycle arguments invalid", file=sys.stderr)
+                raise SystemExit(2) from None
             print("diagnostic arguments invalid", file=sys.stderr)
             raise SystemExit(2) from None
     else:
         args = _parser().parse_args(argv)
     if (
-        args.command in {"visit-one", "donor-visit-one"}
+        args.command in {"visit-one", "visit-one-child", "donor-visit-one"}
         and args.owner_approved is not True
     ):
         return 2
 
     try:
+        if args.command == "visit-one":
+            command = [
+                sys.executable,
+                "-m",
+                "clash_rush_rebuild",
+                "visit-one-child",
+                "--project-root",
+                args.project_root,
+                "--slots",
+                args.slots,
+                "--owner-approved",
+            ]
+            if args.diagnostic_preserve_cursor is True:
+                command.append("--diagnostic-preserve-cursor")
+            try:
+                if inert_child_runner is None:
+                    completed = run_owned_diagnostic_child(
+                        command,
+                        timeout=_INERT_VISIT_TIMEOUT_SECONDS,
+                    )
+                else:
+                    completed = inert_child_runner(
+                        command,
+                        timeout=_INERT_VISIT_TIMEOUT_SECONDS,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+            except BaseException:
+                sys.stderr.write("inert lifecycle visit failed\n")
+                return 1
+            if type(completed) is DiagnosticChildOutcome:
+                success = (
+                    type(completed.returncode) is int
+                    and completed.returncode == 0
+                    and type(completed.stdout) is str
+                    and completed.stdout == "STOPPED\n"
+                    and type(completed.stderr) is str
+                    and completed.stderr == ""
+                    and completed.child_wait_completed is True
+                    and completed.cleanup_succeeded is True
+                    and completed.operational_failure is False
+                    and completed.reason is None
+                    and completed.prior_reason is None
+                )
+            elif type(completed) is subprocess.CompletedProcess and inert_child_runner is not None:
+                success = (
+                    type(completed.returncode) is int
+                    and completed.returncode == 0
+                    and type(completed.stdout) is str
+                    and completed.stdout == "STOPPED\n"
+                    and type(completed.stderr) is str
+                    and completed.stderr == ""
+                )
+            else:
+                success = False
+            if not success:
+                sys.stderr.write("inert lifecycle visit failed\n")
+                return 1
+            print("inert lifecycle visit completed")
+            return 0
+        if args.command == "visit-one-child":
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    if cycle_builder is None:
+                        cycle = build_inert_cycle(
+                            args.project_root,
+                            args.slots,
+                            preserve_ready_cursor=args.diagnostic_preserve_cursor is True,
+                        )
+                    else:
+                        cycle = cycle_builder(args.project_root, args.slots)
+                    cycle.visit_once()
+            except BaseException:
+                sys.stderr.write("LIFECYCLE\n")
+                return 2
+            print("STOPPED")
+            return 0
         if args.command == "export-setup-example":
             with Path(args.output).open("x", encoding="utf-8", newline="\n") as stream:
                 stream.write(synthetic_exporter())

@@ -199,7 +199,7 @@ class FakeHost:
 
 @pytest.mark.parametrize("initial_slot", [0, 3, 4])
 @pytest.mark.parametrize("preserve_cursor", [False, True])
-def test_composed_visit_one_selects_rotation_or_diagnostic_cursor_preservation(
+def test_composed_inert_child_selects_rotation_or_diagnostic_cursor_preservation(
     monkeypatch,
     initial_slot: int,
     preserve_cursor: bool,
@@ -247,7 +247,7 @@ def test_composed_visit_one_selects_rotation_or_diagnostic_cursor_preservation(
     monkeypatch.setattr(cli_module, "load_private_registry", lambda *_args: slots)
 
     command = [
-        "visit-one",
+        "visit-one-child",
         "--project-root",
         "synthetic-project",
         "--slots",
