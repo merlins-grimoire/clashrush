@@ -22,9 +22,7 @@ ASPECT_BASELINE: dict[str, tuple[int, int]] = {
     ASPECT_16_9: (2560, 1440),
     ASPECT_16_10: (2560, 1600),
 }
-_ALLOWED_TEMPLATES = frozenset(
-    {"builder.png", "gbuilder.png", "mbuilder.png", "settings.png", "changeuser.png"}
-)
+_ALLOWED_TEMPLATES = frozenset({"builder.png", "gbuilder.png", "mbuilder.png"})
 
 
 class RecognitionReason(StrEnum):

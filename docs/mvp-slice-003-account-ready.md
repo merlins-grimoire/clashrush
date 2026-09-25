@@ -68,14 +68,6 @@ The operator-supplied startup font remains `private/assets/CCBackBeat.ttf`. Redi
 
 DOC GAP: neither platform documentation nor donor source establishes the meaning or safe ROI of this installation's current game controls/cards. Those values must come from separately reviewed private calibration and remain pending live evidence.
 
-The bounded static implementation for producing that private profile is
-documented in [s003-readiness-calibration.md](s003-readiness-calibration.md).
-It remains a separately approved calibration transaction and does not promote
-or authorize this readiness run. Calibration re-locates each captured control
-inside its bounded ROI, requires the detected center to remain near the pinned
-donor coordinate, and requires Export to produce a nonempty clipboard replacement
-that is immediately cleared.
-
 ## Verification contract
 
 Synthetic tests cover the full real `cv2.matchTemplate` adapter trace, exact moved-target centers, wrong destination denial, missing card denial, private manifest/digest sealing, clipboard cleanup failure, one-click Continue cap exhaustion, deadline crossing during capture, separate startup/readiness capabilities, and the owned native readiness-only composition. Existing world-export tests cover wrong-account and clipboard replacement failures. Canonical test counts and exact tree identity belong in the task handoff, not this source-controlled document.

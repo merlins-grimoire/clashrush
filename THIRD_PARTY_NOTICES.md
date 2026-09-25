@@ -55,14 +55,6 @@ see `docs/startup-failure-spine.md` for callers, tests and boundary adaptations.
 
 `src/clash_rush_rebuild/readiness_catalog.py` records the same BasePilot revision and `app/services/vision.py:185-267` as MIT evidence for bounded region validation and the normalized-correlation contract. Its admitted templates are public procedural motifs; no donor or game artwork is included. The exact CoC_Bot and ClashAutomation pins already listed above are recorded as geometry/BGR bounds evidence only, with no implementation or assets copied into this catalog seam.
 
-`src/clash_rush_rebuild/readiness_calibration_native.py` and the four packaged
-`assets/basepilot_templates/16_9|16_10/settings.png|changeuser.png` files copy
-and narrowly adapt the same pinned BasePilot revision's positive Home/Settings
-template seam. The files are copied unchanged. Calibration adds local
-authorization, private-artifact, source/destination, deadline, and cleanup
-boundaries and never clicks the `changeuser` control. See
-`docs/s003-readiness-calibration.md` for the complete donor map.
-
 > MIT License
 >
 > Copyright (c) 2026 Efe Bolukbasi
