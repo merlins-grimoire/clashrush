@@ -51,6 +51,7 @@ from .guided_setup import (
 from .input_authorization import InputAuthorization
 from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, StopRecord
 from .lifecycle_state import LifecycleStateStore, Ready, encode_state
+from .manual_readiness_profile import build_manual_readiness_profile
 from .mvp_account_ready import AccountReady
 from .mvp_local_gameplay import LocalBotMode, MvpConfiguration, VisitResult
 from .mvp_local_runtime import LocalControlStore, RuntimeSafetyError
@@ -691,6 +692,12 @@ def _parser() -> argparse.ArgumentParser:
     mvp_ready.add_argument("--project-root", required=True)
     mvp_ready.add_argument("--slots", required=True)
     mvp_ready.add_argument("--transaction-ref", required=True)
+    manual_profile = subcommands.add_parser(
+        "build-readiness-profile",
+        help="build the private runtime profile from reviewed narrow crops",
+    )
+    manual_profile.add_argument("--project-root", required=True)
+    manual_profile.add_argument("--review-manifest", required=True)
     issue_reconciliation = subcommands.add_parser(
         "issue-reconciliation-approval",
         help="issue one exact-state-bound stale-state reconciliation approval",
@@ -979,6 +986,10 @@ def main(
                 raise RuntimeSafetyError("AccountReady result is malformed")
             print("account ready")
             return 0
+        if args.command == "build-readiness-profile":
+            build_manual_readiness_profile(args.project_root, args.review_manifest)
+            print("private readiness profile built")
+            return 0
         if args.command == "issue-reconciliation-approval":
             approval_issuer_builder(args.project_root).issue(
                 lifetime_seconds=args.lifetime_seconds
@@ -1118,6 +1129,9 @@ def main(
             cycle.visit_once()
     except BaseException:  # noqa: BLE001 - CLI emits no private native/config details
         if args.command in {"diagnose-home", "diagnose-home-child", "startup-debug-one", "startup-debug-child"}:
+            return 1
+        if args.command == "build-readiness-profile":
+            sys.stderr.write("private readiness profile build failed\n")
             return 1
         sys.stderr.write("inert lifecycle visit failed\n")
         return 1

@@ -79,6 +79,14 @@ see `docs/startup-failure-spine.md` for callers, tests and boundary adaptations.
 
 ## ClashAutomation fixture and test adaptation
 
+`src/clash_rush_rebuild/manual_readiness_profile.py` adapts the offline
+read/validate/extract/save template flow from ClashAutomation
+`dev_tools/harness.py::cmd_extract_template` at the pinned revision above. The
+local adapter accepts only owner-reviewed narrow crops below ignored `private/`,
+adds strict schema/path/dimension checks, canonical encoding, digest sealing,
+private DACLs, cleanup, and manifest-last publication, and copies none of the
+donor's live/debug persistence behavior.
+
 `tests/fixtures/donor/home_screen.png` is a privacy-redacted derivative of ClashAutomation's `tests/fixtures/home_screen.png` at commit `c41fe12a6df051e241c695b71b6859286e24c612` (tree `b549901e7ca8b871a17265517d730f0b3c84a618`), and the tracked-fixture/fail-closed assertion pattern in `tests/test_no_input_home_diagnostic.py` is adapted from the same revision. The source fixture is identified by SHA-256 `279acc36eaf56c298c668ecb110d5001628c2ec5607f0f57604d8460bdb42611`; it is not tracked because it exposes identifying account HUD fields. The derivative preserves the 1728x1080 geometry and Home-builder detector region while replacing every peripheral identity-bearing HUD region and the in-scene account-associated identity label and badge with opaque pixels. Its SHA-256 is `d5a9cdded32cf353da3473b23bb9015b7d0b3332ee8c28d6644fae3a9dc9aa84`; exact transformation provenance and regression-enforced regions are recorded in `tests/fixtures/donor/home_screen.redaction.json`.
 
 > MIT License
