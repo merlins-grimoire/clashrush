@@ -38,6 +38,8 @@ from .mvp_account_ready import (
     load_private_visual_profile,
     manual_home_frame_verified,
 )
+from .mvp_account_startup import await_account_home
+from .startup_debug import popup_position
 from .mvp_local_runtime import (
     BgraGameplayRecognizer,
     BoundedAttackExecutor,
@@ -201,6 +203,8 @@ def _configure_input_signatures(user32: object) -> None:
     user32.ClientToScreen.restype = wintypes.BOOL
     user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
     user32.SetCursorPos.restype = wintypes.BOOL
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    user32.GetCursorPos.restype = wintypes.BOOL
     user32.mouse_event.argtypes = [
         wintypes.DWORD,
         wintypes.DWORD,
@@ -409,6 +413,175 @@ class Win32BoundInput:
         for key in releasable:
             self._user32.keybd_event(key, 0, 0x0002, None)
             self._held_keys.discard(key)
+        return True
+
+
+class Win32AccountStartupInput:
+    """One-use Okay input with a fresh exact target proof immediately before down."""
+
+    def __init__(
+        self,
+        binding: PlayerBinding,
+        *,
+        safety_check: Callable[[PlayerBinding], object],
+        authorization: InputAuthorization,
+        capture: Callable[[], np.ndarray],
+        font_path: str | Path,
+        deadline: float,
+        monotonic: Callable[[], float],
+        detector: Callable[..., tuple[float, float] | None] = popup_position,
+    ) -> None:
+        if (
+            type(binding) is not PlayerBinding
+            or not callable(safety_check)
+            or type(authorization) is not InputAuthorization
+            or authorization.purpose.value != "ACCOUNT_STARTUP"
+            or not callable(capture)
+            or type(font_path) not in (str, Path)
+            or type(deadline) not in (int, float)
+            or type(deadline) is bool
+            or not math.isfinite(float(deadline))
+            or not callable(monotonic)
+            or not callable(detector)
+        ):
+            raise RuntimeSafetyError("exact account-startup input boundary required")
+        self._binding = binding
+        self._safety_check = safety_check
+        self._authorization = authorization
+        self._capture = capture
+        self._font_path = font_path
+        self._deadline = float(deadline)
+        self._monotonic = monotonic
+        self._detector = detector
+        self._used = False
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        _configure_input_signatures(self._user32)
+
+    def click_okay(self, expected_point: tuple[float, float]) -> bool:
+        if self._used:
+            return False
+        self._used = True
+        if (
+            type(expected_point) is not tuple
+            or len(expected_point) != 2
+            or any(
+                type(value) not in (int, float)
+                or type(value) is bool
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+                for value in expected_point
+            )
+        ):
+            return False
+        expected = (float(expected_point[0]), float(expected_point[1]))
+
+        # Every arbitrary/caller-controlled check completes before final capture.
+        try:
+            self._authorization.require(InputAction.STARTUP_OKAY)
+            now = self._monotonic()
+            if (
+                type(now) not in (int, float)
+                or type(now) is bool
+                or not math.isfinite(float(now))
+                or float(now) >= self._deadline
+            ):
+                return False
+            self._safety_check(self._binding)
+        except BaseException:
+            return False
+
+        # Restore/focus and settle the cursor before the final visual proof.
+        # Doing any of these state-changing calls after proof could make the
+        # target stale before mouse-down.
+        user32 = self._user32
+        binding = self._binding
+        point = wintypes.POINT(
+            round(expected[0] * (binding.width - 1)),
+            round(expected[1] * (binding.height - 1)),
+        )
+        try:
+            user32.ShowWindow(wintypes.HWND(binding.root_hwnd), 9)
+            user32.BringWindowToTop(wintypes.HWND(binding.root_hwnd))
+            user32.SetForegroundWindow(wintypes.HWND(binding.root_hwnd))
+            active = user32.GetForegroundWindow()
+            if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
+                return False
+            if not user32.ClientToScreen(
+                wintypes.HWND(binding.render_hwnd), ctypes.byref(point)
+            ) or not user32.SetCursorPos(point.x, point.y):
+                return False
+            time.sleep(0.04)
+            frame = self._capture()
+        except BaseException:
+            return False
+        try:
+            if (
+                type(frame) is not np.ndarray
+                or frame.dtype != np.uint8
+                or frame.shape != (self._binding.height, self._binding.width, 3)
+                or not frame.flags.writeable
+            ):
+                return False
+            fresh = self._detector(frame, InputAction.STARTUP_OKAY, self._font_path)
+            if (
+                type(fresh) is not tuple
+                or len(fresh) != 2
+                or any(
+                    type(value) not in (int, float) or type(value) is bool
+                    for value in fresh
+                )
+                or abs(float(fresh[0]) - expected[0]) > 0.01
+                or abs(float(fresh[1]) - expected[1]) > 0.01
+            ):
+                return False
+            fresh_point = wintypes.POINT(
+                round(float(fresh[0]) * (binding.width - 1)),
+                round(float(fresh[1]) * (binding.height - 1)),
+            )
+        except BaseException:
+            return False
+        finally:
+            if type(frame) is np.ndarray and frame.flags.writeable:
+                frame.fill(0)
+            frame = None
+
+        # From final proof to down: direct read/check calls and immutable scalar
+        # reads only. The freshly detected center must map to the already-settled
+        # cursor within two render pixels.
+        active = user32.GetForegroundWindow()
+        if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
+            return False
+        if not user32.ClientToScreen(
+            wintypes.HWND(binding.render_hwnd), ctypes.byref(fresh_point)
+        ):
+            return False
+        if abs(fresh_point.x - point.x) > 2 or abs(fresh_point.y - point.y) > 2:
+            return False
+        cursor = wintypes.POINT()
+        if (
+            not user32.GetCursorPos(ctypes.byref(cursor))
+            or cursor.x != point.x
+            or cursor.y != point.y
+            or int(user32.GetAncestor(user32.GetForegroundWindow(), 2))
+            != binding.root_hwnd
+        ):
+            return False
+
+        primary: BaseException | None = None
+        try:
+            user32.mouse_event(0x0002, 0, 0, 0, None)
+            time.sleep(0.02)
+        except BaseException as exc:
+            primary = exc
+        try:
+            user32.mouse_event(0x0004, 0, 0, 0, None)
+        except BaseException as cleanup_error:
+            if primary is not None:
+                primary.add_note("mouse-up cleanup also failed")
+                raise primary
+            raise cleanup_error
+        if primary is not None:
+            raise primary
         return True
 
 
@@ -772,29 +945,27 @@ def run_native_mvp_visit(
             )
 
         readiness_deadline = time.monotonic() + 120.0
-        while True:
-            now = time.monotonic()
-            if (
-                type(now) not in (int, float)
-                or type(now) is bool
-                or not math.isfinite(float(now))
-                or float(now) >= readiness_deadline
-            ):
-                raise AccountReadinessError("manual Home deadline expired")
-            first_frame = capture_bgr()
-            try:
-                home_verified = manual_home_frame_verified(
-                    first_frame, visual_profile
-                )
-            finally:
-                first_frame.fill(0)
-                first_frame = None
-            if home_verified:
-                break
-            remaining = readiness_deadline - time.monotonic()
-            if remaining <= 0:
-                raise AccountReadinessError("manual Home deadline expired")
-            time.sleep(min(0.25, remaining))
+        startup_font = project / "private" / "assets" / "CCBackBeat.ttf"
+        await_account_home(
+            capture=capture_bgr,
+            home_verified=lambda frame: manual_home_frame_verified(
+                frame, visual_profile
+            ),
+            popup_detector=popup_position,
+            startup_input_factory=lambda: Win32AccountStartupInput(
+                binding,
+                safety_check=supervisor.capture_owned,
+                authorization=InputAuthorization.account_startup(enabled),
+                capture=capture_bgr,
+                font_path=startup_font,
+                deadline=readiness_deadline,
+                monotonic=time.monotonic,
+            ),
+            font_path=startup_font,
+            deadline=readiness_deadline,
+            monotonic=time.monotonic,
+            wait=time.sleep,
+        )
 
         input_authorization = InputAuthorization.account_readiness(enabled)
         input_port = Win32BoundInput(
@@ -921,6 +1092,7 @@ __all__ = [
     "LocalAuditLog",
     "StoppedControlPreparer",
     "Win32BoundInput",
+    "Win32AccountStartupInput",
     "Win32StartupContinueInput",
     "prepare_native_mvp_control",
     "run_native_mvp_account_ready",

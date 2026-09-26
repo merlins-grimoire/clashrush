@@ -510,7 +510,7 @@ def test_retirement_receipt_waits_for_mutex_release() -> None:
     assert events == ["stop", "release", "retirement:False"]
 
 
-def test_native_visit_waits_for_manual_home_before_input_construction(
+def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -534,7 +534,7 @@ def test_native_visit_waits_for_manual_home_before_input_construction(
     )
     snapshot = SimpleNamespace(identities=(), close=lambda: events.append("snapshot-close"))
     first_pixels = bytes(BINDING.width * BINDING.height * 4)
-    captures = iter(("launcher", "home"))
+    captures = iter(("welcome", "home"))
 
     def capture_owned(_binding):
         screen = next(captures)
@@ -591,6 +591,22 @@ def test_native_visit_waits_for_manual_home_before_input_construction(
         return readiness_input
 
     monkeypatch.setattr(mvp_local_native, "Win32BoundInput", input_constructor)
+    monkeypatch.setattr(
+        mvp_local_native,
+        "popup_position",
+        lambda _frame, action, _font: events.append(f"popup:{action.value}")
+        or (0.5, 0.75),
+    )
+
+    class StartupInput:
+        def __init__(self, _binding, **kwargs):
+            events.append(f"startup-input:{kwargs['authorization'].purpose.value}")
+
+        def click_okay(self, point):
+            events.append(f"okay:{point}")
+            return True
+
+    monkeypatch.setattr(mvp_local_native, "Win32AccountStartupInput", StartupInput)
 
     class Readiness:
         def __init__(self, **kwargs):
@@ -619,8 +635,11 @@ def test_native_visit_waits_for_manual_home_before_input_construction(
         "admit:MVP_ACCOUNT_READINESS",
         "snapshot-close",
         "start-clash",
-        "capture:launcher",
+        "capture:welcome",
         "prove:1",
+        "popup:STARTUP_OKAY",
+        "startup-input:ACCOUNT_STARTUP",
+        "okay:(0.5, 0.75)",
         "capture:home",
         "prove:2",
         "input:ACCOUNT_READINESS",
@@ -707,7 +726,7 @@ def test_first_manual_home_negative_has_no_input(
         ),
     )
 
-    with pytest.raises(AccountReadinessError, match="deadline"):
+    with pytest.raises(AccountReadinessError, match="Welcome Back"):
         mvp_local_native.run_native_mvp_account_ready(
             str(tmp_path), "synthetic-slots", "synthetic-transaction"
         )

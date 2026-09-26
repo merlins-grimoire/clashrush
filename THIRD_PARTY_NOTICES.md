@@ -88,6 +88,18 @@ adapter replaces shell/shortcut execution with one exact, suspended
 existing private Job before resume; it accepts no arbitrary package or launch
 arguments.
 
+`src/clash_rush_rebuild/mvp_account_startup.py` and the account-readiness
+composition in `src/clash_rush_rebuild/mvp_local_native.py` narrowly adapt
+ClashAutomation's post-launch `dismiss_blocking_popups` call and bounded
+capture/detect/click/settle loop from `main.py`, `utils/base_actions.py:179-236`,
+and `utils/object_detection.py:168-265` at commit
+`c41fe12a6df051e241c695b71b6859286e24c612`. The local seam admits only the
+first-party exact `Welcome Back` plus `Okay` detector, permits one
+`STARTUP_OKAY` gesture under a separate closed capability, revalidates a fresh
+owned frame immediately before input, and excludes every other donor popup,
+reward, launcher, Android-debug, and fallback action. The private CCBackBeat
+font is runtime-only and is not copied or distributed.
+
 `src/clash_rush_rebuild/manual_readiness_profile.py` adapts the offline
 read/validate/extract/save template flow from ClashAutomation
 `dev_tools/harness.py::cmd_extract_template` at the pinned revision above. The

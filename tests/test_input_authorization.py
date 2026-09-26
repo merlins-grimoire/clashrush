@@ -64,6 +64,16 @@ def test_account_readiness_capability_authorizes_only_export_navigation() -> Non
             authorization.require(action)
 
 
+def test_account_startup_capability_authorizes_only_startup_okay() -> None:
+    authorization = InputAuthorization.account_startup(lambda: True)
+
+    assert authorization.purpose is InputPurpose.ACCOUNT_STARTUP
+    authorization.require(InputAction.STARTUP_OKAY)
+    for action in set(InputAction) - {InputAction.STARTUP_OKAY}:
+        with pytest.raises(InputAuthorizationError, match="not authorized"):
+            authorization.require(action)
+
+
 def test_placement_and_unapproved_authority_remain_unrepresentable() -> None:
     assert PLACEMENT_ENABLED is False
     names = {action.name for action in InputAction}
