@@ -225,6 +225,47 @@ class DurableSessionAuthority:
             raise
         return self.status()
 
+    def rebind_stopped_instance(
+        self, *, expected_instance_ref: str, instance_ref: str
+    ) -> SessionStatus:
+        if (
+            type(expected_instance_ref) is not str
+            or _SLOT.fullmatch(expected_instance_ref) is None
+            or type(instance_ref) is not str
+            or _SLOT.fullmatch(instance_ref) is None
+        ):
+            raise SessionAuthorityError("exact instance references are required")
+        connection = self._open()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            control = connection.execute(
+                "SELECT mode FROM control WHERE singleton=1"
+            ).fetchone()
+            if (
+                control is None
+                or control["mode"] != ControlMode.STOPPED.value
+            ):
+                raise SessionAuthorityError("instance rebind requires STOPPED mode")
+            configuration = connection.execute(
+                "SELECT instance_ref FROM configuration WHERE singleton=1"
+            ).fetchone()
+            if configuration is None:
+                raise SessionAuthorityError("local MVP is not configured")
+            if configuration["instance_ref"] != expected_instance_ref:
+                raise SessionAuthorityError("configured instance changed")
+            if instance_ref == expected_instance_ref:
+                raise SessionAuthorityError("configured instance is already selected")
+            connection.execute(
+                "UPDATE configuration SET revision=revision+1,instance_ref=? WHERE singleton=1",
+                (instance_ref,),
+            )
+            connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        return self.status()
+
     def import_stopped_legacy(self, path: Path) -> SessionStatus:
         if self._open().execute("SELECT 1 FROM configuration").fetchone() is not None:
             raise SessionAuthorityError("local MVP is already configured")

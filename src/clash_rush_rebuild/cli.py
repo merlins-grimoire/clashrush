@@ -669,6 +669,11 @@ def _parser() -> argparse.ArgumentParser:
         help="explicitly import the preserved legacy STOPPED control file",
     )
     mvp_import.add_argument("--project-root", required=True)
+    mvp_rebind = subcommands.add_parser(
+        "mvp-rebind-ready-instance",
+        help="rebind stopped MVP configuration to the lifecycle READY slot",
+    )
+    mvp_rebind.add_argument("--project-root", required=True)
     for name in (
         "mvp-run",
         "mvp-run-readiness",
@@ -934,6 +939,19 @@ def main(
                 )
             )
             print("local MVP configured mode=STOPPED")
+            return 0
+        if args.command == "mvp-rebind-ready-instance":
+            project = Path(args.project_root).resolve(strict=True)
+            lifecycle = build_native_state_store(project).load()
+            if type(lifecycle) is not Ready:
+                raise RuntimeError("lifecycle READY state required")
+            authority = _mvp_session_store(args.project_root)
+            current = authority.configuration()
+            authority.rebind_stopped_instance(
+                expected_instance_ref=current.instance_ref,
+                instance_ref=f"slot-{lifecycle.next_slot}",
+            )
+            print("local MVP instance rebound mode=STOPPED")
             return 0
         if args.command == "mvp-import-stopped":
             project = Path(args.project_root).resolve(strict=True)

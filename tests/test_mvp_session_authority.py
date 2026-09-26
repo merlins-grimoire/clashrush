@@ -88,6 +88,44 @@ def test_mismatched_selection_never_consumes_admission(tmp_path: Path) -> None:
     assert store.status().admission_consumed is False
 
 
+def test_stopped_instance_rebind_preserves_identity_and_advances_revision(
+    tmp_path: Path,
+) -> None:
+    store = authority(tmp_path)
+
+    before = store.status()
+    after = store.rebind_stopped_instance(
+        expected_instance_ref="slot-2",
+        instance_ref="slot-3",
+    )
+
+    assert after.configuration_revision == before.configuration_revision + 1
+    assert store.configuration() == MvpConfiguration(
+        CONFIG.team_ref,
+        CONFIG.account_ref,
+        "slot-3",
+        CONFIG.player_tag_sha256,
+    )
+
+
+def test_instance_rebind_rejects_running_or_stale_configuration(tmp_path: Path) -> None:
+    store = authority(tmp_path)
+    start(store)
+
+    with pytest.raises(SessionAuthorityError, match="STOPPED"):
+        store.rebind_stopped_instance(
+            expected_instance_ref="slot-2",
+            instance_ref="slot-3",
+        )
+
+    store.command(ControlMode.STOPPED, command_id="stop-one")
+    with pytest.raises(SessionAuthorityError, match="changed"):
+        store.rebind_stopped_instance(
+            expected_instance_ref="slot-1",
+            instance_ref="slot-3",
+        )
+
+
 def test_concurrent_pause_and_stop_cannot_lose_stop(tmp_path: Path) -> None:
     path = tmp_path / "session.sqlite3"
     store = authority(tmp_path)
