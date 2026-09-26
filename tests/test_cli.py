@@ -454,12 +454,45 @@ def test_local_mvp_rebind_uses_ready_slot_without_disclosing_instance(
         "--player-tag-sha256", "a" * 64,
     ]) == 0
 
-    assert main(["mvp-rebind-ready-instance", *common]) == 0
+    assert main([
+        "mvp-rebind-ready-instance", *common,
+        "--expected-instance-ref", "slot-2",
+    ]) == 0
 
     authority = cli_module._mvp_session_store(str(tmp_path))
     assert authority.configuration().instance_ref == "slot-3"
     output = capsys.readouterr().out
     assert "local MVP instance rebound mode=STOPPED" in output
+    assert "slot-2" not in output
+    assert "slot-3" not in output
+
+
+def test_local_mvp_rebind_rejects_an_unapproved_source_instance(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "build_native_state_store",
+        lambda _project: type("State", (), {"load": lambda self: Ready(3)})(),
+    )
+    common = ["--project-root", str(tmp_path)]
+    assert main([
+        "mvp-setup", *common,
+        "--team-ref", "team-secret",
+        "--account-ref", "account-secret",
+        "--instance-ref", "slot-1",
+        "--player-tag-sha256", "a" * 64,
+    ]) == 0
+
+    assert main([
+        "mvp-rebind-ready-instance", *common,
+        "--expected-instance-ref", "slot-2",
+    ]) == 1
+
+    authority = cli_module._mvp_session_store(str(tmp_path))
+    assert authority.configuration().instance_ref == "slot-1"
+    output = capsys.readouterr().out
+    assert "slot-1" not in output
     assert "slot-2" not in output
     assert "slot-3" not in output
 

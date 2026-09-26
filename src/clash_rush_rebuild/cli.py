@@ -674,6 +674,7 @@ def _parser() -> argparse.ArgumentParser:
         help="rebind stopped MVP configuration to the lifecycle READY slot",
     )
     mvp_rebind.add_argument("--project-root", required=True)
+    mvp_rebind.add_argument("--expected-instance-ref", required=True)
     for name in (
         "mvp-run",
         "mvp-run-readiness",
@@ -946,9 +947,8 @@ def main(
             if type(lifecycle) is not Ready:
                 raise RuntimeError("lifecycle READY state required")
             authority = _mvp_session_store(args.project_root)
-            current = authority.configuration()
             authority.rebind_stopped_instance(
-                expected_instance_ref=current.instance_ref,
+                expected_instance_ref=args.expected_instance_ref,
                 instance_ref=f"slot-{lifecycle.next_slot}",
             )
             print("local MVP instance rebound mode=STOPPED")
