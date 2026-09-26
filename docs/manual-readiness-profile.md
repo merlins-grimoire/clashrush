@@ -5,7 +5,9 @@
 `build-readiness-profile` replaces automated calibration navigation with an
 offline import step. It reads exactly nine owner-reviewed **narrow PNG crops**,
 validates a strict review manifest, canonicalizes and seals the images, and
-publishes the existing runtime `private/readiness/profile.json` last. It never
+publishes the existing runtime `private/readiness/profile.json` last with an
+atomic create-if-absent hard link. It never overwrites a profile, including one
+created concurrently. It never
 launches BlueStacks, captures a screen, reads the clipboard, or sends input.
 
 Do not provide full screenshots. Use the Windows Snipping Tool or another local
@@ -52,7 +54,8 @@ narrow PNG files in it:
 | `ordinary_card` | Configured ordinary-account identity card cue |
 
 Each crop must be at least 8 pixels on each side and no more than 320 pixels on
-its largest side. Tight crops are preferred. A full frame is rejected.
+its largest side. Every input must be an actual PNG with a lowercase `.png`
+filename. Tight crops are preferred. A full frame is rejected.
 
 Beside them, create `review.json` with this exact schema:
 

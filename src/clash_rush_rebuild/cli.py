@@ -751,6 +751,7 @@ def main(
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
     sanitized_commands = {
+        "build-readiness-profile",
         "diagnose-home",
         "startup-debug-one",
         "startup-debug-child",
@@ -772,6 +773,9 @@ def main(
                 return 2
             if tuple(diagnostic_argv[:1]) == ("visit-one",):
                 print("inert lifecycle arguments invalid", file=sys.stderr)
+                raise SystemExit(2) from None
+            if tuple(diagnostic_argv[:1]) == ("build-readiness-profile",):
+                print("private readiness profile arguments invalid", file=sys.stderr)
                 raise SystemExit(2) from None
             print("diagnostic arguments invalid", file=sys.stderr)
             raise SystemExit(2) from None

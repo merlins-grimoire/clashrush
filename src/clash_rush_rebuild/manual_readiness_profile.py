@@ -50,10 +50,16 @@ def _inside(path: Path, root: Path) -> bool:
 def _load_review_packet(project_root: str | Path, manifest_path: str | Path):
     try:
         project = Path(project_root).resolve(strict=True)
-        private = (project / "private").resolve(strict=True)
+        expected_private = project / "private"
+        private = expected_private.resolve(strict=True)
         manifest = Path(manifest_path).resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ManualReadinessProfileError("review packet is unavailable") from exc
+    if (
+        not _inside(private, project)
+        or private != expected_private.absolute()
+    ):
+        raise ManualReadinessProfileError("private root escaped")
     target = private / "readiness"
     if (
         not _inside(manifest, private)
@@ -98,6 +104,7 @@ def _prepare_templates(private: Path, manifest: Path, raw: dict[str, object]):
             or type(entry.get("file")) is not str
             or not entry["file"]
             or Path(entry["file"]).name != entry["file"]
+            or Path(entry["file"]).suffix != ".png"
             or entry["file"] in filenames
             or type(entry.get("threshold_ppm")) is not int
             or type(entry["threshold_ppm"]) is bool
@@ -126,8 +133,11 @@ def _prepare_templates(private: Path, manifest: Path, raw: dict[str, object]):
             encoded = source.read_bytes()
         except OSError as exc:
             raise ManualReadinessProfileError("review packet is unavailable") from exc
-        if not encoded or len(encoded) > 4_000_000:
-            raise ManualReadinessProfileError("review packet is malformed")
+        if (
+            not encoded.startswith(b"\x89PNG\r\n\x1a\n")
+            or len(encoded) > 4_000_000
+        ):
+            raise ManualReadinessProfileError("reviewed input is not a narrow crop")
         pixels = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
         if (
             type(pixels) is not np.ndarray
@@ -221,9 +231,10 @@ def build_manual_readiness_profile(
             os.fsync(stream.fileno())
         created.append(manifest_temp)
         permission_sealer(manifest_temp, False)
-        if profile.exists():
-            raise ManualReadinessProfileError("private readiness profile already exists")
-        os.replace(manifest_temp, profile)
+        # A same-directory hard link publishes the fully flushed manifest in one
+        # atomic create-if-absent operation. Unlike replace/rename, it cannot
+        # overwrite a profile created by another process in the race window.
+        os.link(manifest_temp, profile)
         return raw["profile_id"]
     except BaseException as exc:
         for path in reversed(created):

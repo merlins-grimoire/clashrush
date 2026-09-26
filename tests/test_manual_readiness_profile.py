@@ -158,6 +158,37 @@ def test_runtime_target_cannot_be_a_private_path_escape(tmp_path: Path) -> None:
     assert not (outside / "profile.json").exists()
 
 
+def test_private_root_cannot_be_a_junction_outside_project(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    private = project / "private"
+    try:
+        private.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("directory symlinks unavailable")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(private), str(outside)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            pytest.skip("directory junctions unavailable")
+    manifest = _review_packet(project)
+
+    with pytest.raises(ManualReadinessProfileError, match="private root"):
+        build_manual_readiness_profile(
+            project,
+            manifest,
+            permission_sealer=lambda _path, _directory: None,
+        )
+
+    assert not (outside / "readiness" / "profile.json").exists()
+
+
 def test_existing_runtime_profile_is_never_replaced(tmp_path: Path) -> None:
     manifest = _review_packet(tmp_path)
     output = tmp_path / "private" / "readiness"
@@ -173,6 +204,45 @@ def test_existing_runtime_profile_is_never_replaced(tmp_path: Path) -> None:
         )
 
     assert existing.read_bytes() == b"existing"
+
+
+def test_racing_runtime_profile_creation_is_never_replaced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest = _review_packet(tmp_path)
+    original_link = os.link
+
+    def racing_link(source: str | Path, destination: str | Path) -> None:
+        Path(destination).write_bytes(b"racer")
+        original_link(source, destination)
+
+    monkeypatch.setattr("clash_rush_rebuild.manual_readiness_profile.os.link", racing_link)
+
+    with pytest.raises(ManualReadinessProfileError, match="publication failed"):
+        build_manual_readiness_profile(
+            tmp_path,
+            manifest,
+            permission_sealer=lambda _path, _directory: None,
+            nonce_factory=lambda: "c" * 32,
+        )
+
+    assert (tmp_path / "private" / "readiness" / "profile.json").read_bytes() == b"racer"
+
+
+def test_non_png_reviewed_input_is_rejected(tmp_path: Path) -> None:
+    manifest = _review_packet(tmp_path)
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    pixels = cv2.imread(str(manifest.parent / "home.png"))
+    assert cv2.imwrite(str(manifest.parent / "home.jpg"), pixels)
+    raw["templates"]["home"]["file"] = "home.jpg"
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ManualReadinessProfileError, match="review packet"):
+        build_manual_readiness_profile(
+            tmp_path,
+            manifest,
+            permission_sealer=lambda _path, _directory: None,
+        )
 
 
 def test_failure_before_manifest_publication_removes_new_assets(tmp_path: Path) -> None:
@@ -241,3 +311,16 @@ def test_cli_build_failure_does_not_emit_private_details(monkeypatch, capsys) ->
 
     assert status == 1
     assert capsys.readouterr() == ("", "private readiness profile build failed\n")
+
+
+def test_cli_argument_failure_does_not_echo_private_values(capsys) -> None:
+    marker = "PRIVATE_EXTRA_MARKER"
+
+    with pytest.raises(SystemExit) as failure:
+        main(["build-readiness-profile", "--unexpected", marker])
+
+    assert failure.value.code == 2
+    captured = capsys.readouterr()
+    assert marker not in captured.out
+    assert marker not in captured.err
+    assert captured.err == "private readiness profile arguments invalid\n"
