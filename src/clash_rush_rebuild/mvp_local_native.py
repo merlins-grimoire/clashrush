@@ -563,24 +563,28 @@ class Win32AccountStartupInput:
         # From final authorization to down: direct read/check calls and immutable
         # scalar reads only. The freshly detected center must map to the
         # already-settled cursor within two render pixels.
-        active = user32.GetForegroundWindow()
-        if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
-            return False
-        if not user32.ClientToScreen(
-            wintypes.HWND(binding.render_hwnd), ctypes.byref(fresh_point)
-        ):
-            return False
-        if abs(fresh_point.x - point.x) > 2 or abs(fresh_point.y - point.y) > 2:
-            return False
-        cursor = wintypes.POINT()
-        if (
-            not user32.GetCursorPos(ctypes.byref(cursor))
-            or cursor.x != point.x
-            or cursor.y != point.y
-            or int(user32.GetAncestor(user32.GetForegroundWindow(), 2))
-            != binding.root_hwnd
-        ):
-            return False
+        try:
+            active = user32.GetForegroundWindow()
+            if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
+                return False
+            if not user32.ClientToScreen(
+                wintypes.HWND(binding.render_hwnd), ctypes.byref(fresh_point)
+            ):
+                return False
+            if abs(fresh_point.x - point.x) > 2 or abs(fresh_point.y - point.y) > 2:
+                return False
+            cursor = wintypes.POINT()
+            if (
+                not user32.GetCursorPos(ctypes.byref(cursor))
+                or cursor.x != point.x
+                or cursor.y != point.y
+                or int(user32.GetAncestor(user32.GetForegroundWindow(), 2))
+                != binding.root_hwnd
+            ):
+                return False
+        except BaseException as exc:
+            exc.startup_input_phase = StartupInputPhase.NO_GESTURE.value
+            raise
 
         primary: BaseException | None = None
         down_returned = False

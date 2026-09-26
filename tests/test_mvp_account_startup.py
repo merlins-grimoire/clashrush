@@ -456,6 +456,61 @@ def test_native_okay_rejects_foreground_or_cursor_change_after_proof(
     assert not np.any(frame)
 
 
+@pytest.mark.parametrize("blocked", ["foreground", "ancestor", "map", "cursor"])
+def test_native_okay_pre_down_os_exception_remains_no_gesture(
+    monkeypatch: pytest.MonkeyPatch, blocked: str,
+) -> None:
+    mouse: list[int] = []
+    frame = np.ones((BINDING.height, BINDING.width, 3), np.uint8)
+    calls = {"foreground": 0, "ancestor": 0, "map": 0}
+
+    class User32:
+        def ShowWindow(self, *_args): return True
+        def BringWindowToTop(self, *_args): return True
+        def SetForegroundWindow(self, *_args): return True
+        def GetForegroundWindow(self):
+            calls["foreground"] += 1
+            if blocked == "foreground" and calls["foreground"] == 2:
+                raise RuntimeError("pre-down")
+            return 10
+        def GetAncestor(self, *_args):
+            calls["ancestor"] += 1
+            if blocked == "ancestor" and calls["ancestor"] == 2:
+                raise RuntimeError("pre-down")
+            return 10
+        def ClientToScreen(self, _hwnd, _point):
+            calls["map"] += 1
+            if blocked == "map" and calls["map"] == 2:
+                raise RuntimeError("pre-down")
+            return True
+        def SetCursorPos(self, _x, _y): return True
+        def GetCursorPos(self, _point):
+            if blocked == "cursor":
+                raise RuntimeError("pre-down")
+            return True
+        def mouse_event(self, flag, *_args): mouse.append(flag)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
+    subject = mvp_local_native.Win32AccountStartupInput(
+        BINDING,
+        safety_check=lambda _binding: None,
+        authorization=InputAuthorization.account_startup(lambda: True),
+        capture=lambda: frame,
+        font_path="private-font",
+        deadline=10.0,
+        detector=lambda *_args: (0.5, 0.75),
+    )
+
+    with pytest.raises(RuntimeError, match="pre-down") as raised:
+        subject.click_okay((0.5, 0.75))
+    assert raised.value.startup_input_phase == "NO_GESTURE"
+    assert mouse == []
+    assert not np.any(frame)
+
+
 def test_native_okay_mouse_up_failure_does_not_replace_primary_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
