@@ -105,8 +105,9 @@ def test_normal_home_constructs_no_startup_input_and_zeros_frame() -> None:
 @pytest.mark.parametrize("screen", ["unknown", "Continue", "launcher", "loading"])
 def test_non_welcome_startup_screen_emits_no_input(screen: str) -> None:
     frame = _frame(1)
+    clock = iter((1.0, 10.0))
 
-    with pytest.raises(AccountReadinessError, match="Welcome Back"):
+    with pytest.raises(AccountReadinessError, match="deadline"):
         await_account_home(
             capture=lambda: frame,
             home_verified=lambda _frame: False,
@@ -114,7 +115,7 @@ def test_non_welcome_startup_screen_emits_no_input(screen: str) -> None:
             startup_input_factory=lambda: pytest.fail(f"input on {screen}"),
             font_path="private-font",
             deadline=10.0,
-            monotonic=lambda: 1.0,
+            monotonic=clock.__next__,
             wait=lambda _seconds: None,
         )
     assert not np.any(frame)

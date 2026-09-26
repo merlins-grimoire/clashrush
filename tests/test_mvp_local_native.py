@@ -768,7 +768,7 @@ def test_first_manual_home_negative_has_no_input(
         ),
     )
 
-    with pytest.raises(AccountReadinessError, match="Welcome Back"):
+    with pytest.raises(AccountReadinessError, match="deadline"):
         mvp_local_native.run_native_mvp_account_ready(
             str(tmp_path), "synthetic-slots", "synthetic-transaction"
         )

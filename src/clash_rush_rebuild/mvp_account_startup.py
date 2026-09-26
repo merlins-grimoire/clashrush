@@ -121,7 +121,7 @@ def await_account_home(
             if type(frame) is np.ndarray and frame.flags.writeable:
                 frame.fill(0)
             frame = None
-        if clicked:
+        if clicked or point is None:
             try:
                 _time(monotonic, float(deadline))
                 wait(0.25)
@@ -132,11 +132,6 @@ def await_account_home(
                     AccountReadinessError("startup wait failed"), input_phase
                 ) from exc
             continue
-        if point is None:
-            raise _tag_startup_error(
-                AccountReadinessError("exact Welcome Back popup unavailable"),
-                input_phase,
-            )
         try:
             startup_input = startup_input_factory()
         except BaseException as exc:
