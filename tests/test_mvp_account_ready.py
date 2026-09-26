@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from clash_rush_rebuild.mvp_account_ready import (
     AccountReady,
     AccountReadinessController,
     AccountReadinessError,
+    PrivateBootstrapLocator,
     ReadinessVisualProfile,
     TemplateSpec,
     load_private_visual_profile,
@@ -71,6 +74,71 @@ class StartupInput:
         assert binding == BINDING
         self.events.append((x, y))
         return True
+
+
+def _bootstrap_locator(tmp_path: Path, template: np.ndarray) -> PrivateBootstrapLocator:
+    root = tmp_path / "private" / "readiness" / "bootstrap"
+    root.mkdir(parents=True)
+    ok, encoded = cv2.imencode(".png", template)
+    assert ok
+    payload = encoded.tobytes()
+    (root / "launcher.png").write_bytes(payload)
+    (root / "profile.json").write_text(json.dumps({
+        "schema": 1,
+        "controls": {
+            "launcher": {
+                "file": "launcher.png",
+                "file_sha256": hashlib.sha256(payload).hexdigest(),
+                "pixel_sha256": hashlib.sha256(template.tobytes()).hexdigest(),
+                "roi_ppm": [0, 0, 1_000_000, 1_000_000],
+                "threshold_ppm": 990_000,
+            }
+        },
+    }), encoding="utf-8")
+    return PrivateBootstrapLocator(tmp_path)
+
+
+def test_private_bootstrap_locator_loads_and_locates_digest_sealed_launcher(
+    tmp_path: Path,
+) -> None:
+    launcher = _template(91)
+    locator = _bootstrap_locator(tmp_path, launcher)
+    frame = _frame((launcher, 120, 80))
+
+    located = locator(frame, "launcher")
+
+    assert located.x == pytest.approx((120 + 3) / 639)
+    assert located.y == pytest.approx((80 + 3) / 359)
+    (tmp_path / "private" / "readiness" / "bootstrap" / "launcher.png").write_bytes(
+        b"changed"
+    )
+    with pytest.raises(AccountReadinessError, match="bootstrap evidence unavailable"):
+        PrivateBootstrapLocator(tmp_path)
+
+
+def test_private_bootstrap_locator_rejects_a_junction_escape(tmp_path: Path) -> None:
+    outside_project = tmp_path / "outside-project"
+    _bootstrap_locator(outside_project, _template(95))
+    outside = outside_project / "private" / "readiness" / "bootstrap"
+    readiness = tmp_path / "private" / "readiness"
+    readiness.mkdir(parents=True)
+    target = readiness / "bootstrap"
+    try:
+        target.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("directory symlinks unavailable")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(target), str(outside)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            pytest.skip("directory junctions unavailable")
+
+    with pytest.raises(AccountReadinessError, match="path escaped"):
+        PrivateBootstrapLocator(tmp_path)
 
 
 def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests() -> None:
@@ -199,6 +267,90 @@ def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
             0.99, (0.0, 0.0, 1.0, 1.0),
         ) for name, template in templates.items()),
     ), templates
+
+
+def _launcher_controller(
+    frames: list[np.ndarray], locator: PrivateBootstrapLocator
+) -> tuple[AccountReadinessController, Input]:
+    profile, _templates = _profile()
+    inputs = Input()
+    subject = AccountReadinessController(
+        binding=BINDING,
+        run_nonce="2" * 32,
+        capture=iter(frames).__next__,
+        profile=profile,
+        startup_input=StartupInput(),
+        export_input=inputs,
+        find_continue=lambda _frame: None,
+        locate_bootstrap=locator,
+        live_gate=lambda: True,
+        clipboard_read=lambda: "",
+        clipboard_clear=lambda: None,
+        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
+        wall_clock=lambda: NOW,
+        monotonic=lambda: 1.0,
+        wait=lambda _seconds: None,
+    )
+    return subject, inputs
+
+
+def test_three_fresh_stable_launcher_frames_click_once_then_reach_home(
+    tmp_path: Path,
+) -> None:
+    profile, templates = _profile()
+    launcher = _template(92)
+    locator = _bootstrap_locator(tmp_path, launcher)
+    launcher_frame = _frame((launcher, 120, 80))
+    subject, inputs = _launcher_controller(
+        [launcher_frame.copy() for _ in range(3)]
+        + [_frame(), _frame((templates["home"], 4, 4))],
+        locator,
+    )
+    subject._profile = profile
+
+    subject._reach_home(10.0)
+
+    assert [event[-1] for event in inputs.events] == [
+        InputAction.STARTUP_LAUNCH_GAME
+    ]
+
+
+@pytest.mark.parametrize("mode", ["unstable", "no-match"])
+def test_unstable_or_unmatched_launcher_emits_no_click(
+    tmp_path: Path, mode: str,
+) -> None:
+    launcher = _template(93)
+    locator = _bootstrap_locator(tmp_path, launcher)
+    first = _frame((launcher, 120, 80))
+    second = first.copy()
+    if mode == "unstable":
+        second[:, :20] = 255
+    else:
+        first.fill(0)
+    subject, inputs = _launcher_controller([first, second], locator)
+
+    with pytest.raises(AccountReadinessError):
+        subject._reach_home(10.0)
+
+    assert inputs.events == []
+
+
+def test_repeated_launcher_after_one_click_fails_without_second_click(
+    tmp_path: Path,
+) -> None:
+    launcher = _template(94)
+    locator = _bootstrap_locator(tmp_path, launcher)
+    launcher_frame = _frame((launcher, 120, 80))
+    subject, inputs = _launcher_controller(
+        [launcher_frame.copy() for _ in range(4)], locator
+    )
+
+    with pytest.raises(AccountReadinessError, match="launcher cap exhausted"):
+        subject._reach_home(10.0)
+
+    assert [event[-1] for event in inputs.events] == [
+        InputAction.STARTUP_LAUNCH_GAME
+    ]
 
 
 def _successful_frames(templates: dict[str, np.ndarray]):

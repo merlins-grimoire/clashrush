@@ -33,6 +33,7 @@ from .mvp_local_gameplay import LocalBotMode, LocalMvpBot, MvpConfiguration, Vis
 from .mvp_account_ready import (
     AccountReady,
     AccountReadinessController,
+    PrivateBootstrapLocator,
     load_private_visual_profile,
 )
 from .mvp_local_runtime import (
@@ -684,6 +685,7 @@ def run_native_mvp_visit(
     supervisor: LifecycleSupervisor | None = None
     binding: PlayerBinding | None = None
     result: VisitResult | None = None
+    admitted = False
     try:
         if lease.abandoned:
             raise RuntimeSafetyError("WINDOW_BINDING")
@@ -716,6 +718,7 @@ def run_native_mvp_visit(
             control_revision=status.control_revision,
             now=int(time.time()),
         )
+        admitted = True
         players = host.complete_player_snapshot()
         try:
             if players.identities:
@@ -756,6 +759,7 @@ def run_native_mvp_visit(
             )
 
         readiness_deadline = time.monotonic() + 120.0
+        bootstrap_locator = PrivateBootstrapLocator(project)
         input_authorization = InputAuthorization.account_readiness(enabled)
         input_port = Win32BoundInput(
             binding,
@@ -797,6 +801,7 @@ def run_native_mvp_visit(
             find_continue=lambda frame: find_continue(
                 frame, font_path, binding.height
             ),
+            locate_bootstrap=bootstrap_locator,
             home_ready=lambda frame: (
                 NoInputHomeDiagnosticController.detect_frame(frame)
                 is HomeDiagnosticResult.HOME
@@ -862,6 +867,20 @@ def run_native_mvp_visit(
                 target=ActionPhase.FAILED,
                 reason_code="PRE_INPUT_FAILURE",
             )
+    except BaseException as failure:
+        if admitted:
+            try:
+                phase = authority.transaction(transaction_ref).phase
+                if phase in {ActionPhase.PLANNED, ActionPhase.INTENT_RECORDED}:
+                    authority.transition_action(
+                        transaction_ref,
+                        expected=phase,
+                        target=ActionPhase.FAILED,
+                        reason_code="PRE_INPUT_FAILURE",
+                    )
+            except BaseException:
+                failure.add_note("pre-input failure bookkeeping was unavailable")
+        raise
     finally:
         if supervisor is not None and binding is not None:
             _retire_owned(supervisor, binding, lease, authority, status.run_nonce)

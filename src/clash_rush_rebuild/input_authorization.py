@@ -110,7 +110,10 @@ class InputAuthorization:
             }
         ) or (
             self._purpose is InputPurpose.ACCOUNT_READINESS
-            and action is InputAction.ACCOUNT_EXPORT_NAVIGATION
+            and action in {
+                InputAction.STARTUP_LAUNCH_GAME,
+                InputAction.ACCOUNT_EXPORT_NAVIGATION,
+            }
         ) or (
             self._purpose is InputPurpose.MONITORED_ATTACK
             and action in {

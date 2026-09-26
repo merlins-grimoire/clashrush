@@ -16,7 +16,7 @@ from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
 from clash_rush_rebuild.mvp_account_ready import AccountReady
-from clash_rush_rebuild.mvp_session_authority import ControlMode
+from clash_rush_rebuild.mvp_session_authority import ActionPhase, ControlMode
 from clash_rush_rebuild.mvp_local_runtime import (
     LocalControlStore,
     PersistentControl,
@@ -525,6 +525,10 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
     monkeypatch.setattr(mvp_local_native, "_select_configured_slot", lambda *_args: 2)
     monkeypatch.setattr(mvp_local_native, "LifecycleSupervisor", lambda *_args, **_kwargs: supervisor)
     monkeypatch.setattr(mvp_local_native, "load_private_visual_profile", lambda *_args: object())
+    bootstrap_locator = object()
+    monkeypatch.setattr(
+        mvp_local_native, "PrivateBootstrapLocator", lambda *_args: bootstrap_locator
+    )
 
     readiness_input = object()
     deadlines: list[float] = []
@@ -553,6 +557,7 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
     class Readiness:
         def __init__(self, **kwargs):
             assert kwargs["export_input"] is readiness_input
+            assert kwargs["locate_bootstrap"] is bootstrap_locator
             events.append("readiness:constructed")
 
         def run(self, *, deadline):
@@ -576,6 +581,94 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
         "startup:STARTUP_CONTINUE_ONLY",
         "readiness:constructed",
         "readiness:run",
+        "stop",
+        "release",
+        "retire",
+    ]
+
+
+def test_native_readiness_exception_records_pre_input_failure_before_clean_retirement(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    status = SimpleNamespace(
+        mode=ControlMode.RUNNING,
+        run_nonce="1" * 32,
+        configuration_revision=1,
+        control_revision=2,
+    )
+    authority = SimpleNamespace(
+        status=lambda: status,
+        configuration=lambda: MvpConfiguration(
+            "synthetic-team", "synthetic-account", "slot-2", TAG_HASH
+        ),
+        admit=lambda **_kwargs: events.append("admit"),
+        transaction=lambda _ref: SimpleNamespace(phase=ActionPhase.PLANNED),
+        transition_action=lambda _ref, **kwargs: events.append(
+            f"transition:{kwargs['expected'].value}:{kwargs['target'].value}:"
+            f"{kwargs['reason_code']}"
+        ),
+        record_retirement=lambda *_args, **_kwargs: events.append("retire"),
+    )
+    lease = SimpleNamespace(
+        abandoned=False,
+        require_usable=lambda: None,
+        release=lambda: events.append("release"),
+    )
+    snapshot = SimpleNamespace(identities=(), close=lambda: None)
+    supervisor = SimpleNamespace(
+        start=lambda _slot: BINDING,
+        capture_owned=lambda _binding: (_ for _ in ()).throw(AssertionError),
+        stop=lambda *_args: events.append("stop"),
+    )
+    monkeypatch.setattr(mvp_local_native, "DurableSessionAuthority", lambda _path: authority)
+    monkeypatch.setattr(mvp_local_native, "NativeLifecycleApi", lambda: None)
+    monkeypatch.setattr(
+        mvp_local_native, "Win32Runtime",
+        lambda _api: SimpleNamespace(acquire_mutex=lambda: lease),
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "Win32LifecycleHost",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            complete_player_snapshot=lambda: snapshot
+        ),
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_state_store", lambda _project: SimpleNamespace(load=lambda: Ready(2))
+    )
+    monkeypatch.setattr(mvp_local_native, "_candidate_tree", lambda _project: "a" * 40)
+    monkeypatch.setattr(mvp_local_native, "load_private_registry", lambda *_args: tuple(range(5)))
+    monkeypatch.setattr(mvp_local_native, "_select_configured_slot", lambda *_args: 2)
+    monkeypatch.setattr(mvp_local_native, "LifecycleSupervisor", lambda *_args, **_kwargs: supervisor)
+    monkeypatch.setattr(mvp_local_native, "load_private_visual_profile", lambda *_args: object())
+
+    def reject_bootstrap(*_args):
+        raise RuntimeError("synthetic readiness failure")
+
+    monkeypatch.setattr(mvp_local_native, "PrivateBootstrapLocator", reject_bootstrap)
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32BoundInput",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("input must not be constructed")
+        ),
+    )
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32StartupContinueInput",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup input must not be constructed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic readiness failure"):
+        mvp_local_native.run_native_mvp_account_ready(
+            str(tmp_path), "synthetic-slots", "synthetic-transaction"
+        )
+
+    assert events == [
+        "admit",
+        "transition:PLANNED:FAILED:PRE_INPUT_FAILURE",
         "stop",
         "release",
         "retire",
