@@ -6,7 +6,10 @@ import pytest
 from clash_rush_rebuild import mvp_local_native
 from clash_rush_rebuild.input_authorization import InputAction, InputAuthorization
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
-from clash_rush_rebuild.mvp_account_startup import await_account_home
+from clash_rush_rebuild.mvp_account_startup import (
+    StartupInputPhase,
+    await_account_home,
+)
 from clash_rush_rebuild.mvp_account_ready import AccountReadinessError
 
 
@@ -48,7 +51,7 @@ def test_welcome_back_gets_one_okay_click_then_home_and_zeros_frames() -> None:
         wait=lambda seconds: events.append(("wait", seconds)),
     )
 
-    assert result is True
+    assert result is StartupInputPhase.COMPLETED
     assert events == [
         ("detect", InputAction.STARTUP_OKAY, "private-font"),
         "construct",
@@ -57,6 +60,30 @@ def test_welcome_back_gets_one_okay_click_then_home_and_zeros_frames() -> None:
     ]
     assert len(captured) == 2
     assert all(not np.any(frame) for frame in captured)
+
+
+def test_completed_startup_click_is_preserved_when_post_click_deadline_expires() -> None:
+    frame = _frame(1)
+    clocks = iter((1.0, 10.0))
+
+    class StartupInput:
+        def click_okay(self, _expected_point):
+            return True
+
+    with pytest.raises(AccountReadinessError, match="deadline") as raised:
+        await_account_home(
+            capture=lambda: frame,
+            home_verified=lambda _frame: False,
+            popup_detector=lambda *_args: (0.5, 0.75),
+            startup_input_factory=StartupInput,
+            font_path="private-font",
+            deadline=10.0,
+            monotonic=clocks.__next__,
+            wait=lambda _seconds: None,
+        )
+
+    assert raised.value.startup_input_phase == "COMPLETED"
+    assert not np.any(frame)
 
 
 def test_normal_home_constructs_no_startup_input_and_zeros_frame() -> None:
@@ -71,7 +98,7 @@ def test_normal_home_constructs_no_startup_input_and_zeros_frame() -> None:
         deadline=10.0,
         monotonic=lambda: 1.0,
         wait=lambda _seconds: None,
-    ) is True
+    ) is StartupInputPhase.NO_GESTURE
     assert not np.any(frame)
 
 
@@ -111,7 +138,7 @@ def test_ambiguous_or_malformed_popup_emits_no_input(failure: BaseException) -> 
     assert not np.any(frame)
 
 
-def test_native_okay_click_revalidates_fresh_target_and_has_no_callback_after_proof(
+def test_native_okay_click_revalidates_then_finally_authorizes_before_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[object] = []
@@ -137,6 +164,9 @@ def test_native_okay_click_revalidates_fresh_target_and_has_no_callback_after_pr
     monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
     monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
     monkeypatch.setattr(mvp_local_native.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        mvp_local_native.time, "monotonic", lambda: events.append("clock") or 1.0
+    )
     subject = mvp_local_native.Win32AccountStartupInput(
         BINDING,
         safety_check=lambda binding: events.append(("safety", binding)),
@@ -146,7 +176,6 @@ def test_native_okay_click_revalidates_fresh_target_and_has_no_callback_after_pr
         capture=lambda: events.append("capture") or final_frame,
         font_path="private-font",
         deadline=10.0,
-        monotonic=lambda: events.append("clock") or 1.0,
         detector=lambda frame, action, font: (
             events.append(("proof", action, font, int(frame[0, 0, 0])))
             or (0.5, 0.75)
@@ -160,11 +189,14 @@ def test_native_okay_click_revalidates_fresh_target_and_has_no_callback_after_pr
     )
     for event in ("show", "top", "foreground-set", "map", "cursor-set"):
         assert events.index(event) < proof_index
-    assert not any(
-        event in {"authorize", "clock"}
-        for event in events[proof_index + 1:]
-        if isinstance(event, str)
-    )
+    authorization_indexes = [
+        i for i, event in enumerate(events) if event == "authorize"
+    ]
+    assert len(authorization_indexes) == 2
+    assert authorization_indexes[-1] > proof_index
+    final_clock_index = max(i for i, event in enumerate(events) if event == "clock")
+    assert authorization_indexes[-1] < final_clock_index < events.index(0x0002)
+    assert "authorize" not in events[final_clock_index + 1:]
     assert not any(
         isinstance(event, tuple) and event[0] == "safety"
         for event in events[proof_index + 1:]
@@ -173,6 +205,139 @@ def test_native_okay_click_revalidates_fresh_target_and_has_no_callback_after_pr
     assert events.count(0x0004) == 1
     assert subject.click_okay((0.5, 0.75)) is False
     assert not np.any(final_frame)
+
+
+def test_native_okay_detector_cannot_revoke_authorization_then_trigger_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mouse: list[int] = []
+    authorized = True
+    frame = np.ones((BINDING.height, BINDING.width, 3), np.uint8)
+
+    class User32:
+        def ShowWindow(self, *_args): return True
+        def BringWindowToTop(self, *_args): return True
+        def SetForegroundWindow(self, *_args): return True
+        def GetForegroundWindow(self): return 10
+        def GetAncestor(self, *_args): return 10
+        def ClientToScreen(self, _hwnd, _point): return True
+        def SetCursorPos(self, _x, _y): return True
+        def GetCursorPos(self, point):
+            point._obj.x = round(0.5 * (BINDING.width - 1))
+            point._obj.y = round(0.75 * (BINDING.height - 1))
+            return True
+        def mouse_event(self, flag, *_args): mouse.append(flag)
+
+    def revoke_then_approve(*_args):
+        nonlocal authorized
+        authorized = False
+        return (0.5, 0.75)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
+    subject = mvp_local_native.Win32AccountStartupInput(
+        BINDING,
+        safety_check=lambda _binding: None,
+        authorization=InputAuthorization.account_startup(lambda: authorized),
+        capture=lambda: frame,
+        font_path="private-font",
+        deadline=10.0,
+        detector=revoke_then_approve,
+    )
+
+    assert subject.click_okay((0.5, 0.75)) is False
+    assert mouse == []
+    assert not np.any(frame)
+
+
+def test_native_okay_deadline_expiry_after_detection_emits_no_mouse_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mouse: list[int] = []
+    clocks = iter((1.0, 10.0))
+    frame = np.ones((BINDING.height, BINDING.width, 3), np.uint8)
+
+    class User32:
+        def ShowWindow(self, *_args): return True
+        def BringWindowToTop(self, *_args): return True
+        def SetForegroundWindow(self, *_args): return True
+        def GetForegroundWindow(self): return 10
+        def GetAncestor(self, *_args): return 10
+        def ClientToScreen(self, _hwnd, _point): return True
+        def SetCursorPos(self, _x, _y): return True
+        def GetCursorPos(self, point):
+            point._obj.x = round(0.5 * (BINDING.width - 1))
+            point._obj.y = round(0.75 * (BINDING.height - 1))
+            return True
+        def mouse_event(self, flag, *_args): mouse.append(flag)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", clocks.__next__)
+    subject = mvp_local_native.Win32AccountStartupInput(
+        BINDING,
+        safety_check=lambda _binding: None,
+        authorization=InputAuthorization.account_startup(lambda: True),
+        capture=lambda: frame,
+        font_path="private-font",
+        deadline=10.0,
+        detector=lambda *_args: (0.5, 0.75),
+    )
+
+    assert subject.click_okay((0.5, 0.75)) is False
+    assert mouse == []
+    assert not np.any(frame)
+
+
+def test_native_okay_final_authorization_cannot_run_past_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mouse: list[int] = []
+    now = 1.0
+    authorization_checks = 0
+    frame = np.ones((BINDING.height, BINDING.width, 3), np.uint8)
+
+    class User32:
+        def ShowWindow(self, *_args): return True
+        def BringWindowToTop(self, *_args): return True
+        def SetForegroundWindow(self, *_args): return True
+        def GetForegroundWindow(self): return 10
+        def GetAncestor(self, *_args): return 10
+        def ClientToScreen(self, _hwnd, _point): return True
+        def SetCursorPos(self, _x, _y): return True
+        def GetCursorPos(self, point):
+            point._obj.x = round(0.5 * (BINDING.width - 1))
+            point._obj.y = round(0.75 * (BINDING.height - 1))
+            return True
+        def mouse_event(self, flag, *_args): mouse.append(flag)
+
+    def authorize():
+        nonlocal authorization_checks, now
+        authorization_checks += 1
+        if authorization_checks == 2:
+            now = 10.0
+        return True
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: now)
+    subject = mvp_local_native.Win32AccountStartupInput(
+        BINDING,
+        safety_check=lambda _binding: None,
+        authorization=InputAuthorization.account_startup(authorize),
+        capture=lambda: frame,
+        font_path="private-font",
+        deadline=10.0,
+        detector=lambda *_args: (0.5, 0.75),
+    )
+
+    assert subject.click_okay((0.5, 0.75)) is False
+    assert mouse == []
+    assert not np.any(frame)
 
 
 @pytest.mark.parametrize("fresh", [None, (0.7, 0.75), (0.5, 0.9)])
@@ -194,6 +359,7 @@ def test_native_okay_rejects_disappeared_or_moved_fresh_target(
 
     monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
     monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
     subject = mvp_local_native.Win32AccountStartupInput(
         BINDING,
         safety_check=lambda _binding: None,
@@ -201,7 +367,6 @@ def test_native_okay_rejects_disappeared_or_moved_fresh_target(
         capture=lambda: frame,
         font_path="private-font",
         deadline=10.0,
-        monotonic=lambda: 1.0,
         detector=lambda *_args: fresh,
     )
 
@@ -226,6 +391,11 @@ def test_native_okay_rechecks_authority_deadline_and_binding_before_final_captur
         if blocked == "binding":
             raise RuntimeError("changed")
 
+    monkeypatch.setattr(
+        mvp_local_native.time,
+        "monotonic",
+        lambda: events.append("clock") or (10.0 if blocked == "deadline" else 1.0),
+    )
     subject = mvp_local_native.Win32AccountStartupInput(
         BINDING,
         safety_check=safety,
@@ -235,7 +405,6 @@ def test_native_okay_rechecks_authority_deadline_and_binding_before_final_captur
         capture=lambda: events.append("capture") or pytest.fail("capture forbidden"),
         font_path="private-font",
         deadline=10.0,
-        monotonic=lambda: events.append("clock") or (10.0 if blocked == "deadline" else 1.0),
         detector=lambda *_args: pytest.fail("detector forbidden"),
     )
 
@@ -271,6 +440,7 @@ def test_native_okay_rejects_foreground_or_cursor_change_after_proof(
 
     monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
     monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
     subject = mvp_local_native.Win32AccountStartupInput(
         BINDING,
         safety_check=lambda _binding: None,
@@ -278,7 +448,6 @@ def test_native_okay_rejects_foreground_or_cursor_change_after_proof(
         capture=lambda: frame,
         font_path="private-font",
         deadline=10.0,
-        monotonic=lambda: 1.0,
         detector=lambda *_args: (0.5, 0.75),
     )
 
@@ -321,6 +490,7 @@ def test_native_okay_mouse_up_failure_does_not_replace_primary_error(
             raise RuntimeError("primary failure")
 
     monkeypatch.setattr(mvp_local_native.time, "sleep", sleep)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
     subject = mvp_local_native.Win32AccountStartupInput(
         BINDING,
         safety_check=lambda _binding: None,
@@ -328,7 +498,6 @@ def test_native_okay_mouse_up_failure_does_not_replace_primary_error(
         capture=lambda: frame,
         font_path="private-font",
         deadline=10.0,
-        monotonic=lambda: 1.0,
         detector=lambda *_args: (0.5, 0.75),
     )
 
@@ -336,6 +505,7 @@ def test_native_okay_mouse_up_failure_does_not_replace_primary_error(
         subject.click_okay((0.5, 0.75))
     assert mouse == [0x0002, 0x0004]
     assert raised.value.__notes__ == ["mouse-up cleanup also failed"]
+    assert raised.value.startup_input_phase == "STARTED_UNCERTAIN"
 
 
 def test_native_okay_down_exception_still_attempts_one_up_and_preserves_down_error(
@@ -364,6 +534,7 @@ def test_native_okay_down_exception_still_attempts_one_up_and_preserves_down_err
 
     monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_a, **_k: User32())
     monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _api: None)
+    monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
     subject = mvp_local_native.Win32AccountStartupInput(
         BINDING,
         safety_check=lambda _binding: None,
@@ -371,7 +542,6 @@ def test_native_okay_down_exception_still_attempts_one_up_and_preserves_down_err
         capture=lambda: frame,
         font_path="private-font",
         deadline=10.0,
-        monotonic=lambda: 1.0,
         detector=lambda *_args: (0.5, 0.75),
     )
 
@@ -379,4 +549,4 @@ def test_native_okay_down_exception_still_attempts_one_up_and_preserves_down_err
         subject.click_okay((0.5, 0.75))
     assert mouse == [0x0002, 0x0004]
     assert raised.value.__notes__ == ["mouse-up cleanup also failed"]
-
+    assert raised.value.startup_input_phase == "STARTED_UNCERTAIN"

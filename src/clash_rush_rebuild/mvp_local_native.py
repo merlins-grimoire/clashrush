@@ -38,7 +38,7 @@ from .mvp_account_ready import (
     load_private_visual_profile,
     manual_home_frame_verified,
 )
-from .mvp_account_startup import await_account_home
+from .mvp_account_startup import StartupInputPhase, await_account_home
 from .startup_debug import popup_position
 from .mvp_local_runtime import (
     BgraGameplayRecognizer,
@@ -428,7 +428,6 @@ class Win32AccountStartupInput:
         capture: Callable[[], np.ndarray],
         font_path: str | Path,
         deadline: float,
-        monotonic: Callable[[], float],
         detector: Callable[..., tuple[float, float] | None] = popup_position,
     ) -> None:
         if (
@@ -441,7 +440,6 @@ class Win32AccountStartupInput:
             or type(deadline) not in (int, float)
             or type(deadline) is bool
             or not math.isfinite(float(deadline))
-            or not callable(monotonic)
             or not callable(detector)
         ):
             raise RuntimeSafetyError("exact account-startup input boundary required")
@@ -451,7 +449,9 @@ class Win32AccountStartupInput:
         self._capture = capture
         self._font_path = font_path
         self._deadline = float(deadline)
-        self._monotonic = monotonic
+        # Unlike recognition and authorization hooks, this is the trusted
+        # process monotonic clock rather than a caller-controlled callback.
+        self._monotonic = time.monotonic
         self._detector = detector
         self._used = False
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -545,9 +545,24 @@ class Win32AccountStartupInput:
                 frame.fill(0)
             frame = None
 
-        # From final proof to down: direct read/check calls and immutable scalar
-        # reads only. The freshly detected center must map to the already-settled
-        # cursor within two render pixels.
+        # Recheck authorization after the detector, then sample the trusted
+        # monotonic clock. No caller-controlled callback remains before down.
+        try:
+            self._authorization.require(InputAction.STARTUP_OKAY)
+            now = self._monotonic()
+            if (
+                type(now) not in (int, float)
+                or type(now) is bool
+                or not math.isfinite(float(now))
+                or float(now) >= self._deadline
+            ):
+                return False
+        except BaseException:
+            return False
+
+        # From final authorization to down: direct read/check calls and immutable
+        # scalar reads only. The freshly detected center must map to the
+        # already-settled cursor within two render pixels.
         active = user32.GetForegroundWindow()
         if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
             return False
@@ -568,19 +583,34 @@ class Win32AccountStartupInput:
             return False
 
         primary: BaseException | None = None
+        down_returned = False
+        up_returned = False
         try:
             user32.mouse_event(0x0002, 0, 0, 0, None)
+            down_returned = True
             time.sleep(0.02)
         except BaseException as exc:
             primary = exc
         try:
             user32.mouse_event(0x0004, 0, 0, 0, None)
+            up_returned = True
         except BaseException as cleanup_error:
             if primary is not None:
+                primary.startup_input_phase = (
+                    StartupInputPhase.STARTED_UNCERTAIN.value
+                )
                 primary.add_note("mouse-up cleanup also failed")
                 raise primary
+            cleanup_error.startup_input_phase = (
+                StartupInputPhase.STARTED_UNCERTAIN.value
+            )
             raise cleanup_error
         if primary is not None:
+            primary.startup_input_phase = (
+                StartupInputPhase.COMPLETED.value
+                if down_returned and up_returned
+                else StartupInputPhase.STARTED_UNCERTAIN.value
+            )
             raise primary
         return True
 
@@ -847,6 +877,24 @@ def _retire_owned(
         raise failure from operational_error
 
 
+def _startup_failure_reason(
+    failure: BaseException | None, retained_phase: StartupInputPhase
+) -> str:
+    phase = retained_phase
+    if failure is not None:
+        try:
+            phase = StartupInputPhase(
+                getattr(failure, "startup_input_phase", retained_phase.value)
+            )
+        except (TypeError, ValueError):
+            phase = retained_phase
+    if phase is StartupInputPhase.COMPLETED:
+        return "STARTUP_INPUT_COMPLETED_FAILURE"
+    if phase is StartupInputPhase.STARTED_UNCERTAIN:
+        return "STARTUP_INPUT_UNCERTAIN_FAILURE"
+    return "PRE_INPUT_FAILURE"
+
+
 def run_native_mvp_visit(
     project_root: str,
     slots_path: str,
@@ -867,6 +915,7 @@ def run_native_mvp_visit(
     binding: PlayerBinding | None = None
     result: VisitResult | None = None
     admitted = False
+    startup_input_phase = StartupInputPhase.NO_GESTURE
     try:
         if lease.abandoned:
             raise RuntimeSafetyError("WINDOW_BINDING")
@@ -946,7 +995,7 @@ def run_native_mvp_visit(
 
         readiness_deadline = time.monotonic() + 120.0
         startup_font = project / "private" / "assets" / "CCBackBeat.ttf"
-        await_account_home(
+        startup_input_phase = await_account_home(
             capture=capture_bgr,
             home_verified=lambda frame: manual_home_frame_verified(
                 frame, visual_profile
@@ -959,7 +1008,6 @@ def run_native_mvp_visit(
                 capture=capture_bgr,
                 font_path=startup_font,
                 deadline=readiness_deadline,
-                monotonic=time.monotonic,
             ),
             font_path=startup_font,
             deadline=readiness_deadline,
@@ -1040,7 +1088,7 @@ def run_native_mvp_visit(
                 transaction_ref,
                 expected=phase,
                 target=ActionPhase.FAILED,
-                reason_code="PRE_INPUT_FAILURE",
+                reason_code=_startup_failure_reason(None, startup_input_phase),
             )
     except BaseException as failure:
         if admitted:
@@ -1051,7 +1099,9 @@ def run_native_mvp_visit(
                         transaction_ref,
                         expected=phase,
                         target=ActionPhase.FAILED,
-                        reason_code="PRE_INPUT_FAILURE",
+                        reason_code=_startup_failure_reason(
+                            failure, startup_input_phase
+                        ),
                     )
             except BaseException:
                 failure.add_note("pre-input failure bookkeeping was unavailable")

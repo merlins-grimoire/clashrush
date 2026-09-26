@@ -16,6 +16,7 @@ from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.lifecycle_state import Ready
 from clash_rush_rebuild.mvp_local_gameplay import LocalBotMode, MvpConfiguration
 from clash_rush_rebuild.mvp_account_ready import AccountReady, AccountReadinessError
+from clash_rush_rebuild.mvp_account_startup import StartupInputPhase
 from clash_rush_rebuild.mvp_session_authority import ActionPhase, ControlMode
 from clash_rush_rebuild.mvp_local_runtime import (
     LocalControlStore,
@@ -510,8 +511,33 @@ def test_retirement_receipt_waits_for_mutex_release() -> None:
     assert events == ["stop", "release", "retirement:False"]
 
 
+@pytest.mark.parametrize(
+    ("startup_phase", "expected_reason"),
+    [
+        (StartupInputPhase.NO_GESTURE, "PRE_INPUT_FAILURE"),
+        (
+            StartupInputPhase.STARTED_UNCERTAIN,
+            "STARTUP_INPUT_UNCERTAIN_FAILURE",
+        ),
+        (
+            StartupInputPhase.COMPLETED,
+            "STARTUP_INPUT_COMPLETED_FAILURE",
+        ),
+    ],
+)
+def test_startup_gesture_phase_selects_truthful_failure_reason(
+    startup_phase: StartupInputPhase, expected_reason: str
+) -> None:
+    later_failure = AccountReadinessError("future readiness failed")
+
+    assert mvp_local_native._startup_failure_reason(
+        later_failure, startup_phase
+    ) == expected_reason
+
+
+@pytest.mark.parametrize("readiness_fails", [False, True])
 def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
-    tmp_path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, readiness_fails: bool,
 ) -> None:
     events: list[str] = []
     configuration = MvpConfiguration("synthetic-team", "synthetic-account", "slot-2", TAG_HASH)
@@ -525,6 +551,11 @@ def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
         status=lambda: status,
         configuration=lambda: configuration,
         admit=lambda **kwargs: events.append(f"admit:{kwargs['purpose']}"),
+        transaction=lambda _ref: SimpleNamespace(phase=ActionPhase.PLANNED),
+        transition_action=lambda _ref, **kwargs: events.append(
+            f"transition:{kwargs['expected'].value}:{kwargs['target'].value}:"
+            f"{kwargs['reason_code']}"
+        ),
         record_retirement=lambda *_args, **_kwargs: events.append("retire"),
     )
     lease = SimpleNamespace(
@@ -619,18 +650,26 @@ def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
         def run(self, *, deadline):
             assert type(deadline) is float
             events.append("readiness:run")
+            if readiness_fails:
+                raise AccountReadinessError("future readiness failed")
             return AccountReady("1" * 32, "ordinary-card-v1")
 
     monkeypatch.setattr(mvp_local_native, "AccountReadinessController", Readiness)
     monkeypatch.setattr(mvp_local_native.time, "monotonic", lambda: 1.0)
     monkeypatch.setattr(mvp_local_native.time, "sleep", lambda _seconds: None)
 
-    result = mvp_local_native.run_native_mvp_account_ready(
-        str(tmp_path), "synthetic-slots", "synthetic-transaction"
-    )
+    if readiness_fails:
+        with pytest.raises(AccountReadinessError, match="future readiness"):
+            mvp_local_native.run_native_mvp_account_ready(
+                str(tmp_path), "synthetic-slots", "synthetic-transaction"
+            )
+    else:
+        result = mvp_local_native.run_native_mvp_account_ready(
+            str(tmp_path), "synthetic-slots", "synthetic-transaction"
+        )
+        assert result == AccountReady("1" * 32, "ordinary-card-v1")
 
-    assert result == AccountReady("1" * 32, "ordinary-card-v1")
-    assert events == [
+    expected = [
         "profile",
         "admit:MVP_ACCOUNT_READINESS",
         "snapshot-close",
@@ -645,10 +684,13 @@ def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
         "input:ACCOUNT_READINESS",
         "readiness:constructed",
         "readiness:run",
-        "stop",
-        "release",
-        "retire",
     ]
+    if readiness_fails:
+        expected.append(
+            "transition:PLANNED:FAILED:STARTUP_INPUT_COMPLETED_FAILURE"
+        )
+    expected.extend(["stop", "release", "retire"])
+    assert events == expected
 
 
 @pytest.mark.parametrize("first_screen", ["non-home", "continue", "launcher", "loading"])
