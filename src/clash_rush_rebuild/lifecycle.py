@@ -171,6 +171,7 @@ class LifecycleHostPort(Protocol):
     def create_job(self) -> object: ...
     def set_kill_on_close(self, job: object) -> None: ...
     def create_suspended(self, internal_name: str) -> CreatedProcess: ...
+    def create_suspended_clash(self, internal_name: str) -> CreatedProcess: ...
     def identity_from_handle(
         self, process: object, expected_pid: int
     ) -> ProcessIdentity: ...
@@ -233,6 +234,15 @@ class LifecycleSupervisor:
         self._owned: _OwnedRun | None = None
 
     def start(self, slot: Slot) -> PlayerBinding:
+        return self._start(slot, direct_clash=False)
+
+    def start_clash(self, slot: Slot) -> PlayerBinding:
+        """Start the one hardcoded Clash package inside the owned player process."""
+        return self._start(slot, direct_clash=True)
+
+    def _start(self, slot: Slot, *, direct_clash: bool) -> PlayerBinding:
+        if type(direct_clash) is not bool:
+            raise LifecycleError("exact launch mode required")
         if type(slot) is not Slot:
             raise LifecycleError("exact selected slot required")
         if self._owned is not None:
@@ -262,7 +272,11 @@ class LifecycleSupervisor:
             job = self._host.create_job()
             self._host.set_kill_on_close(job)
             reason = BlockReason.PROCESS_CREATE
-            created = self._host.create_suspended(slot.internal_name)
+            created = (
+                self._host.create_suspended_clash(slot.internal_name)
+                if direct_clash
+                else self._host.create_suspended(slot.internal_name)
+            )
             reason = BlockReason.IDENTITY
             identity = self._host.identity_from_handle(
                 created.process_handle, created.pid

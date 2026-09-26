@@ -743,7 +743,7 @@ def run_native_mvp_visit(
             nonce_factory=lambda: secrets.token_hex(16),
             preserve_ready_cursor=True,
         )
-        binding = supervisor.start(slot)
+        binding = supervisor.start_clash(slot)
 
         def enabled() -> bool:
             try:

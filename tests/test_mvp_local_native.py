@@ -542,7 +542,7 @@ def test_native_visit_waits_for_manual_home_before_input_construction(
         return BINDING.width, BINDING.height, first_pixels
 
     supervisor = SimpleNamespace(
-        start=lambda _slot: events.append("start") or BINDING,
+        start_clash=lambda _slot: events.append("start-clash") or BINDING,
         capture_owned=capture_owned,
         stop=lambda *_args: events.append("stop"),
     )
@@ -618,7 +618,7 @@ def test_native_visit_waits_for_manual_home_before_input_construction(
         "profile",
         "admit:MVP_ACCOUNT_READINESS",
         "snapshot-close",
-        "start",
+        "start-clash",
         "capture:launcher",
         "prove:1",
         "capture:home",
@@ -663,7 +663,7 @@ def test_first_manual_home_negative_has_no_input(
     )
     snapshot = SimpleNamespace(identities=(), close=lambda: None)
     supervisor = SimpleNamespace(
-        start=lambda _slot: events.append("start") or BINDING,
+        start_clash=lambda _slot: events.append("start-clash") or BINDING,
         capture_owned=lambda _binding: events.append(f"capture:{first_screen}") or (
             BINDING.width,
             BINDING.height,
@@ -714,7 +714,7 @@ def test_first_manual_home_negative_has_no_input(
 
     assert events == [
         "admit",
-        "start",
+        "start-clash",
         f"capture:{first_screen}",
         f"reject:{first_screen}",
         "transition:PLANNED:FAILED:PRE_INPUT_FAILURE",
@@ -765,7 +765,7 @@ def test_bookkeeping_failure_preserves_readiness_error_and_owned_cleanup_order(
         raise RuntimeError("synthetic stop cleanup failure")
 
     supervisor = SimpleNamespace(
-        start=lambda _slot: events.append("start") or BINDING,
+        start_clash=lambda _slot: events.append("start-clash") or BINDING,
         capture_owned=lambda _binding: (
             BINDING.width,
             BINDING.height,
@@ -823,7 +823,7 @@ def test_bookkeeping_failure_preserves_readiness_error_and_owned_cleanup_order(
     ]
     assert events == [
         "admit",
-        "start",
+        "start-clash",
         "readiness",
         "bookkeeping",
         "stop",

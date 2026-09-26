@@ -239,6 +239,29 @@ def test_create_suspended_uses_only_the_exact_bluestacks_command() -> None:
     assert len(api.calls) == 1
 
 
+def test_create_suspended_clash_uses_only_the_exact_donor_launch_command() -> None:
+    api = SyntheticNative()
+    host = _host(api)
+
+    host.create_suspended_clash("Pie64_slot_1")
+
+    assert api.calls == [
+        (
+            "create",
+            BLUESTACKS_PLAYER_PATH,
+            f'"{BLUESTACKS_PLAYER_PATH}" --instance Pie64_slot_1 --cmd launchApp '
+            '--package "com.supercell.clashofclans" --source desktop_shortcut',
+            False,
+            4,
+        )
+    ]
+    with pytest.raises(TypeError):
+        host.create_suspended_clash("Pie64_slot_1", object())
+    with pytest.raises(Win32LifecycleHostError, match="internal instance"):
+        host.create_suspended_clash("Pie64_slot_1 --evil")
+    assert len(api.calls) == 1
+
+
 def test_player_snapshot_filters_exact_name_and_retains_identity_handles() -> None:
     api = SyntheticNative()
     api.processes = [

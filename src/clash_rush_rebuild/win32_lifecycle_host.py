@@ -538,6 +538,19 @@ class Win32LifecycleHost:
         command_line = f'"{BLUESTACKS_PLAYER_PATH}" --instance {internal_name}'
         return self._runtime.create_suspended(BLUESTACKS_PLAYER_PATH, command_line)
 
+    def create_suspended_clash(self, internal_name: str) -> CreatedProcess:
+        """Adapt ClashAutomation's direct game start to the owned process seam."""
+        if (
+            type(internal_name) is not str
+            or _INTERNAL_NAME.fullmatch(internal_name) is None
+        ):
+            raise Win32LifecycleHostError("strict internal instance name required")
+        command_line = (
+            f'"{BLUESTACKS_PLAYER_PATH}" --instance {internal_name} --cmd launchApp '
+            '--package "com.supercell.clashofclans" --source desktop_shortcut'
+        )
+        return self._runtime.create_suspended(BLUESTACKS_PLAYER_PATH, command_line)
+
     def identity_from_handle(
         self, process: object, expected_pid: int
     ) -> ProcessIdentity:

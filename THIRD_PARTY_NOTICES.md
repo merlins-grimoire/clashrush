@@ -79,6 +79,15 @@ see `docs/startup-failure-spine.md` for callers, tests and boundary adaptations.
 
 ## ClashAutomation fixture and test adaptation
 
+`src/clash_rush_rebuild/win32_lifecycle_host.py` and
+`src/clash_rush_rebuild/mvp_local_native.py` adapt ClashAutomation's direct
+game-program startup seam from `main.py:51-90` and
+`utils/game_program_controller.py` at the pinned revision above. The local
+adapter replaces shell/shortcut execution with one exact, suspended
+`HD-Player.exe` command for `com.supercell.clashofclans`, assigned to the
+existing private Job before resume; it accepts no arbitrary package or launch
+arguments.
+
 `src/clash_rush_rebuild/manual_readiness_profile.py` adapts the offline
 read/validate/extract/save template flow from ClashAutomation
 `dev_tools/harness.py::cmd_extract_template` at the pinned revision above. The

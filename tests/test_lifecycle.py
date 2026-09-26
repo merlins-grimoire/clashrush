@@ -99,6 +99,12 @@ class FakeHost:
         self.running = True
         return CreatedProcess("process", "thread", 100)
 
+    def create_suspended_clash(self, internal_name: str) -> CreatedProcess:
+        self.events.append(f"process:create-suspended-clash:{internal_name}")
+        self._fail_once("process:create")
+        self.running = True
+        return CreatedProcess("process", "thread", 100)
+
     def identity_from_handle(
         self, process: object, expected_pid: int
     ) -> ProcessIdentity:
@@ -299,6 +305,28 @@ def test_start_commits_active_before_creating_native_objects() -> None:
         "window:bind",
         "capture:ready",
     ]
+
+
+def test_start_clash_keeps_active_job_assignment_and_resume_order() -> None:
+    events: list[str] = []
+    supervisor = LifecycleSupervisor(
+        FakeHost(events),
+        FakeStateStore(Ready(0), events),
+        AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
+        nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+    )
+
+    supervisor.start_clash(
+        Slot(0, "Pie64", "Example Slot 0", 1280, 720, 240)
+    )
+
+    assert events.index("state:commit:ACTIVE") < events.index(
+        "process:create-suspended-clash:Pie64"
+    )
+    assert events.index("process:create-suspended-clash:Pie64") < events.index(
+        "job:assign"
+    )
+    assert events.index("job:assign") < events.index("thread:resume")
 
 
 def test_owned_capture_revalidates_exact_binding_and_job_before_pixels() -> None:
