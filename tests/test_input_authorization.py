@@ -55,20 +55,11 @@ def test_monitored_attack_rechecks_live_authorization_for_each_input() -> None:
         authorization.require(InputAction.TROOP_DEPLOYMENT)
 
 
-def test_account_readiness_capability_cannot_attack_or_deploy() -> None:
+def test_account_readiness_capability_authorizes_only_export_navigation() -> None:
     authorization = InputAuthorization.account_readiness(lambda: True)
 
     authorization.require(InputAction.ACCOUNT_EXPORT_NAVIGATION)
-    authorization.require(InputAction.STARTUP_LAUNCH_GAME)
-    for action in (
-        InputAction.STARTUP_CONTINUE,
-        InputAction.STARTUP_CLOSE_PROMO,
-        InputAction.STARTUP_OKAY,
-        InputAction.ATTACK_NAVIGATION,
-        InputAction.TROOP_DEPLOYMENT,
-        InputAction.RETURN_HOME,
-        InputAction.CLEANUP_RELEASE,
-    ):
+    for action in set(InputAction) - {InputAction.ACCOUNT_EXPORT_NAVIGATION}:
         with pytest.raises(InputAuthorizationError, match="not authorized"):
             authorization.require(action)
 

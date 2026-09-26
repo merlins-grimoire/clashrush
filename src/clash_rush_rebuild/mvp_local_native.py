@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from ctypes import wintypes
@@ -33,8 +34,9 @@ from .mvp_local_gameplay import LocalBotMode, LocalMvpBot, MvpConfiguration, Vis
 from .mvp_account_ready import (
     AccountReady,
     AccountReadinessController,
-    PrivateBootstrapLocator,
+    AccountReadinessError,
     load_private_visual_profile,
+    manual_home_frame_verified,
 )
 from .mvp_local_runtime import (
     BgraGameplayRecognizer,
@@ -44,8 +46,6 @@ from .mvp_local_runtime import (
     RuntimeSafetyError,
 )
 from .mvp_local_world_export import clear_windows_clipboard, read_windows_clipboard
-from .no_input_home_diagnostic import HomeDiagnosticResult, NoInputHomeDiagnosticController
-from .startup_continue_recovery import find_continue
 from .mvp_session_authority import (
     ActionPhase,
     ControlMode,
@@ -712,7 +712,6 @@ def run_native_mvp_visit(
         slot = _select_configured_slot(
             slots, lifecycle, configured.instance_ref
         )
-        bootstrap_locator = PrivateBootstrapLocator(project)
         visual_profile = load_private_visual_profile(
             project, project / "private" / "readiness" / "profile.json"
         )
@@ -756,38 +755,6 @@ def run_native_mvp_visit(
             except BaseException:
                 return False
 
-        # Preserve the established attack entry's no-input hard-negative gate.
-        # The readiness-only command owns the startup recovery sequence and may
-        # legitimately begin before HOME is visible.
-        if not readiness_only:
-            source_recognizer = BgraGameplayRecognizer(
-                binding, supervisor.capture_owned, account_verified=False
-            )
-            BgraGameplayRecognizer.recognize(
-                source_recognizer,
-                binding,
-                configured.account_ref,
-                require_home=True,
-            )
-
-        readiness_deadline = time.monotonic() + 120.0
-        input_authorization = InputAuthorization.account_readiness(enabled)
-        input_port = Win32BoundInput(
-            binding,
-            supervisor.capture_owned,
-            input_authorization,
-            deadline=readiness_deadline,
-            monotonic=time.monotonic,
-        )
-        startup_input = Win32StartupContinueInput(
-            binding,
-            supervisor.capture_owned,
-            InputAuthorization.startup_continue_only(enabled),
-            deadline=readiness_deadline,
-            monotonic=time.monotonic,
-        )
-        font_path = project / "private" / "assets" / "CCBackBeat.ttf"
-
         def capture_bgr() -> np.ndarray:
             width, height, pixels = supervisor.capture_owned(binding)
             if (
@@ -798,23 +765,51 @@ def run_native_mvp_visit(
                 or len(pixels) != width * height * 4
             ):
                 raise RuntimeSafetyError("FRAME_VALIDATION_FAILED")
-            return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4)[:, :, :3].copy()
+            return (
+                np.frombuffer(pixels, dtype=np.uint8)
+                .reshape(height, width, 4)[:, :, :3]
+                .copy()
+            )
 
+        readiness_deadline = time.monotonic() + 120.0
+        while True:
+            now = time.monotonic()
+            if (
+                type(now) not in (int, float)
+                or type(now) is bool
+                or not math.isfinite(float(now))
+                or float(now) >= readiness_deadline
+            ):
+                raise AccountReadinessError("manual Home deadline expired")
+            first_frame = capture_bgr()
+            try:
+                home_verified = manual_home_frame_verified(
+                    first_frame, visual_profile
+                )
+            finally:
+                first_frame.fill(0)
+                first_frame = None
+            if home_verified:
+                break
+            remaining = readiness_deadline - time.monotonic()
+            if remaining <= 0:
+                raise AccountReadinessError("manual Home deadline expired")
+            time.sleep(min(0.25, remaining))
+
+        input_authorization = InputAuthorization.account_readiness(enabled)
+        input_port = Win32BoundInput(
+            binding,
+            supervisor.capture_owned,
+            input_authorization,
+            deadline=readiness_deadline,
+            monotonic=time.monotonic,
+        )
         readiness = AccountReadinessController(
             binding=binding,
             run_nonce=status.run_nonce,
             capture=capture_bgr,
             profile=visual_profile,
-            startup_input=startup_input,
             export_input=input_port,
-            find_continue=lambda frame: find_continue(
-                frame, font_path, binding.height
-            ),
-            locate_bootstrap=bootstrap_locator,
-            home_ready=lambda frame: (
-                NoInputHomeDiagnosticController.detect_frame(frame)
-                is HomeDiagnosticResult.HOME
-            ),
             live_gate=enabled,
             clipboard_read=read_windows_clipboard,
             clipboard_clear=clear_windows_clipboard,
@@ -891,13 +886,17 @@ def run_native_mvp_visit(
                 failure.add_note("pre-input failure bookkeeping was unavailable")
         raise
     finally:
-        if supervisor is not None and binding is not None:
-            _retire_owned(supervisor, binding, lease, authority, status.run_nonce)
-        else:
-            try:
+        prior_error = sys.exception()
+        try:
+            if supervisor is not None and binding is not None:
+                _retire_owned(supervisor, binding, lease, authority, status.run_nonce)
+            else:
                 lease.release()
-            except BaseException as exc:
-                raise RuntimeSafetyError("owned lifecycle cleanup failed") from exc
+        except BaseException as cleanup_error:
+            if prior_error is None:
+                raise
+            prior_error.add_note("owned lifecycle cleanup also failed")
+            cleanup_error = None
     if type(result) is not VisitResult:
         raise RuntimeSafetyError("bounded visit did not produce a result")
     return result

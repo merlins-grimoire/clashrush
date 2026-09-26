@@ -3,18 +3,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from types import SimpleNamespace
 
 import pytest
 
-from clash_rush_rebuild import mvp_local_native as native
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
-from clash_rush_rebuild.lifecycle_state import Ready
-from clash_rush_rebuild.mvp_local_gameplay import MvpConfiguration
 from clash_rush_rebuild.mvp_local_runtime import (
-    BgraGameplayRecognizer, HomeDiagnostic, RuntimeSafetyError,
+    BgraGameplayRecognizer, RuntimeSafetyError,
 )
-from clash_rush_rebuild.mvp_session_authority import ControlMode
 
 
 BINDING = PlayerBinding(
@@ -177,83 +172,3 @@ def test_diagnostic_processing_failure_releases_frame_locals(monkeypatch):
             assert trace.tb_frame.f_locals["frame"] is None
             assert trace.tb_frame.f_locals.get("pixels") is None
         trace = trace.tb_next
-
-
-@pytest.mark.parametrize("positive", [False, True])
-@pytest.mark.parametrize("diagnostic_mode", ["normal", "none", "fake", "mutated", "positive", "shadow", "valid_mutation", "valid_replacement", "raise"])
-def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_cleanup(monkeypatch, tmp_path, positive, diagnostic_mode):
-    events = []
-    if diagnostic_mode != "normal":
-        def get_diagnostic(self):
-            if diagnostic_mode == "raise":
-                raise AssertionError("native must not read exposed diagnostic")
-            if diagnostic_mode == "none":
-                return None
-            if diagnostic_mode == "fake":
-                return SimpleNamespace(to_json=lambda: "synthetic-private")
-            value = self._home_diagnostic
-            if diagnostic_mode == "valid_replacement":
-                values = asdict(value)
-                values.update(dict.fromkeys(("hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels"), 1))
-                return HomeDiagnostic(**values)
-            if diagnostic_mode == "valid_mutation":
-                for name in ("hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels"):
-                    object.__setattr__(value, name, 959)
-            if diagnostic_mode == "mutated":
-                object.__setattr__(value, "orange_pixels", True)
-            if diagnostic_mode == "positive":
-                for name in ("hue_pixels", "saturation_pixels", "value_pixels", "orange_pixels"):
-                    object.__setattr__(value, name, value.roi_pixels)
-            return value
-        monkeypatch.setattr(BgraGameplayRecognizer, "home_diagnostic", property(get_diagnostic))
-        if diagnostic_mode == "shadow":
-            monkeypatch.setattr(HomeDiagnostic, "to_json", lambda _self: "synthetic-private")
-            monkeypatch.setattr(HomeDiagnostic, "reason", property(lambda _self: "synthetic-private"))
-    configuration = MvpConfiguration("synthetic-team", ACCOUNT, "slot-2", "a" * 64)
-    status = SimpleNamespace(
-        mode=ControlMode.RUNNING,
-        run_nonce="1" * 32,
-        configuration_revision=1,
-        control_revision=2,
-    )
-    authority = SimpleNamespace(
-        status=lambda: status,
-        configuration=lambda: configuration,
-        admit=lambda **_kw: events.append("admission"),
-        record_retirement=lambda *_args, **_kw: events.append("retirement"),
-    )
-    lease = SimpleNamespace(abandoned=False, require_usable=lambda: None,
-                            release=lambda: events.append("release"))
-    snapshot = SimpleNamespace(identities=(), close=lambda: events.append("snapshot-close"))
-    monkeypatch.setattr(native, "DurableSessionAuthority", lambda _path: authority)
-    monkeypatch.setattr(native, "NativeLifecycleApi", lambda: None)
-    monkeypatch.setattr(native, "Win32Runtime", lambda _api: SimpleNamespace(acquire_mutex=lambda: lease))
-    monkeypatch.setattr(native, "Win32LifecycleHost", lambda *_args, **_kw: SimpleNamespace(complete_player_snapshot=lambda: snapshot))
-    monkeypatch.setattr(native, "_state_store", lambda _project: SimpleNamespace(load=lambda: Ready(2)))
-    monkeypatch.setattr(native, "_candidate_tree", lambda _project: "a" * 40)
-
-    monkeypatch.setattr(native, "load_private_registry", lambda *_args: tuple(range(5)))
-    monkeypatch.setattr(native, "_select_configured_slot", lambda *_args: 2)
-    monkeypatch.setattr(native, "PrivateBootstrapLocator", lambda *_args: object())
-    monkeypatch.setattr(native, "load_private_visual_profile", lambda *_args: object())
-    def capture(_binding):
-        events.append("capture")
-        return frame(count=3200 if positive else 960)
-    monkeypatch.setattr(native, "LifecycleSupervisor", lambda *_args, **_kw: SimpleNamespace(
-        start=lambda _slot: events.append("start") or BINDING, capture_owned=capture,
-        stop=lambda *_args: events.append("stop")))
-    def input_constructor(*_args, **_kwargs):
-        events.append("input")
-        raise RuntimeSafetyError("SYNTHETIC_INPUT_SENTINEL")
-    monkeypatch.setattr(native, "Win32BoundInput", input_constructor)
-    with pytest.raises(RuntimeSafetyError) as caught:
-        native.run_native_mvp_visit(str(tmp_path), "unused", "synthetic-visit")
-    if positive:
-        assert str(caught.value) == "SYNTHETIC_INPUT_SENTINEL"
-    else:
-        prefix, payload = str(caught.value).split(" ", 1)
-        assert prefix == "HOME_NOT_VERIFIED"
-        assert json.loads(payload)["reason"] == "FRACTION_LOW"
-        assert json.loads(payload)["orange_pixels"] == 960
-        assert ACCOUNT not in payload
-    assert events == ["admission", "snapshot-close", "start", "capture"] + (["input"] if positive else []) + ["stop", "release", "retirement"]

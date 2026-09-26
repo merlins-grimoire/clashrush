@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,12 +16,14 @@ from clash_rush_rebuild.mvp_account_ready import (
     AccountReady,
     AccountReadinessController,
     AccountReadinessError,
-    PrivateBootstrapLocator,
     ReadinessVisualProfile,
     TemplateSpec,
-    _Match,
-    _decode_narrow_png,
     load_private_visual_profile,
+    require_manual_home_frame,
+)
+from clash_rush_rebuild.no_input_home_diagnostic import (
+    HomeDiagnosticResult,
+    NoInputHomeDiagnosticController,
 )
 from clash_rush_rebuild.win32_state_io import (
     FILE_ATTRIBUTE_NORMAL,
@@ -77,45 +77,7 @@ class Input:
         return True
 
 
-class StartupInput:
-    def __init__(self) -> None:
-        self.events: list[tuple[float, float]] = []
-
-    def click_continue(self, binding, x, y):
-        assert binding == BINDING
-        self.events.append((x, y))
-        return True
-
-
-def _bootstrap_locator(
-    tmp_path: Path, template: np.ndarray, *, file_api=None
-) -> PrivateBootstrapLocator:
-    root = tmp_path / "private" / "readiness" / "bootstrap"
-    root.mkdir(parents=True)
-    ok, encoded = cv2.imencode(".png", template)
-    assert ok
-    payload = encoded.tobytes()
-    (root / "launcher.png").write_bytes(payload)
-    (root / "profile.json").write_text(json.dumps({
-        "schema": 1,
-        "controls": {
-            "launcher": {
-                "file": "launcher.png",
-                "file_sha256": hashlib.sha256(payload).hexdigest(),
-                "pixel_sha256": hashlib.sha256(template.tobytes()).hexdigest(),
-                "roi_ppm": [0, 0, 1_000_000, 1_000_000],
-                "threshold_ppm": 990_000,
-            }
-        },
-    }), encoding="utf-8")
-    return (
-        PrivateBootstrapLocator(tmp_path)
-        if file_api is None
-        else PrivateBootstrapLocator(tmp_path, file_api=file_api)
-    )
-
-
-class BootstrapFileApi:
+class PrivateProfileFileApi:
     def __init__(self, root: Path) -> None:
         self.files = {
             str(path.resolve(strict=True)): path.read_bytes()
@@ -154,100 +116,6 @@ class BootstrapFileApi:
         return True
 
 
-def test_private_bootstrap_locator_loads_and_locates_digest_sealed_launcher(
-    tmp_path: Path,
-) -> None:
-    launcher = _template(91)
-    locator = _bootstrap_locator(tmp_path, launcher)
-    frame = _frame((launcher, 120, 80))
-
-    located = locator(frame, "launcher")
-
-    assert located.x == pytest.approx((120 + 3) / 639)
-    assert located.y == pytest.approx((80 + 3) / 359)
-    (tmp_path / "private" / "readiness" / "bootstrap" / "launcher.png").write_bytes(
-        b"changed"
-    )
-    with pytest.raises(AccountReadinessError, match="bootstrap evidence unavailable"):
-        PrivateBootstrapLocator(tmp_path)
-
-
-def test_private_bootstrap_locator_rejects_a_junction_escape(tmp_path: Path) -> None:
-    outside_project = tmp_path / "outside-project"
-    _bootstrap_locator(outside_project, _template(95))
-    outside = outside_project / "private" / "readiness" / "bootstrap"
-    readiness = tmp_path / "private" / "readiness"
-    readiness.mkdir(parents=True)
-    target = readiness / "bootstrap"
-    try:
-        target.symlink_to(outside, target_is_directory=True)
-    except OSError:
-        if os.name != "nt":
-            pytest.skip("directory symlinks unavailable")
-        completed = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(target), str(outside)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            pytest.skip("directory junctions unavailable")
-
-    with pytest.raises(AccountReadinessError, match="path escaped"):
-        PrivateBootstrapLocator(tmp_path)
-
-
-@pytest.mark.parametrize(
-    "fault", ["final-path", "reparse", "manifest-oversize", "asset-oversize"]
-)
-def test_private_bootstrap_handle_bound_reads_reject_swaps_reparse_and_oversize(
-    tmp_path: Path, fault: str,
-) -> None:
-    _bootstrap_locator(tmp_path, _template(99))
-    root = tmp_path / "private" / "readiness" / "bootstrap"
-    api = BootstrapFileApi(root)
-    if fault == "final-path":
-        api.final_path_override = str(tmp_path / "outside" / "profile.json")
-    elif fault == "reparse":
-        api.attributes |= FILE_ATTRIBUTE_REPARSE_POINT
-    elif fault == "manifest-oversize":
-        manifest = str((root / "profile.json").resolve(strict=True))
-        api.files[manifest] = b"x" * 64_001
-    else:
-        asset = str((root / "launcher.png").resolve(strict=True))
-        api.files[asset] = b"x" * 4_000_001
-
-    with pytest.raises(AccountReadinessError):
-        PrivateBootstrapLocator(tmp_path, file_api=api)
-
-    assert [call[0] for call in api.calls].count("close") == len(api.handles)
-    assert all(
-        call[2:] == (GENERIC_READ, 0, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT)
-        for call in api.calls
-        if call[0] == "open"
-    )
-
-
-def test_bootstrap_rejects_oversized_png_header_before_decode(monkeypatch) -> None:
-    payload = (
-        b"\x89PNG\r\n\x1a\n"
-        + (13).to_bytes(4, "big")
-        + b"IHDR"
-        + (10_000).to_bytes(4, "big")
-        + (10_000).to_bytes(4, "big")
-        + b"\x08\x02\x00\x00\x00"
-        + b"\x00\x00\x00\x00"
-    )
-    monkeypatch.setattr(
-        cv2,
-        "imdecode",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("decode must not run")),
-    )
-
-    with pytest.raises(AccountReadinessError, match="narrow PNG"):
-        _decode_narrow_png(payload)
-
-
 def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests() -> None:
     templates = {name: _template(index) for index, name in enumerate((
         "home", "settings_button", "settings", "more_button", "more",
@@ -261,7 +129,6 @@ def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests
         ),
     )
     frames = iter([
-        _frame((templates["home"], 4, 4)),
         _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
         _frame((templates["settings"], 4, 4), (templates["more_button"], 40, 70)),
         _frame((templates["more"], 4, 4)),
@@ -273,7 +140,6 @@ def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests
         _frame((templates["home"], 4, 4)),
     ])
     input_port = Input()
-    startup_input = StartupInput()
     reads = iter([
         "old clipboard",
         json.dumps({"tag": TAG, "timestamp": 1_788_894_243, "buildings": []}),
@@ -285,9 +151,7 @@ def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests
         run_nonce="2" * 32,
         capture=lambda: next(frames),
         profile=profile,
-        startup_input=startup_input,
         export_input=input_port,
-        find_continue=lambda _frame: None,
         live_gate=lambda: True,
         clipboard_read=lambda: next(reads),
         clipboard_clear=lambda: clears.append("clear"),
@@ -300,7 +164,6 @@ def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests
     result = controller.run(deadline=10.0)
 
     assert result == AccountReady("2" * 32, "ordinary-card-v1")
-    assert startup_input.events == []
     assert [event[-1] for event in input_port.events] == [
         InputAction.ACCOUNT_EXPORT_NAVIGATION,
         InputAction.ACCOUNT_EXPORT_NAVIGATION,
@@ -320,10 +183,11 @@ def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests
     assert input_port.events[5][1:3] == (round(63.5 / 640, 3), round(58.5 / 360, 3))
 
 
-def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path: Path) -> None:
+def _visual_profile_packet(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
     private = tmp_path / "private" / "readiness"
     private.mkdir(parents=True)
     entries = {}
+    payloads: dict[str, bytes] = {}
     for index, name in enumerate(sorted({
         "home", "settings_button", "settings", "more_button", "more",
         "export", "more_close", "settings_close",
@@ -331,11 +195,13 @@ def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path:
         template = _template(index)
         ok, encoded = cv2.imencode(".png", template)
         assert ok
+        payload = encoded.tobytes()
         asset = private / f"{name}.png"
-        asset.write_bytes(encoded.tobytes())
+        asset.write_bytes(payload)
+        payloads[str(asset.resolve(strict=True))] = payload
         entries[name] = {
             "file": asset.name,
-            "file_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+            "file_sha256": hashlib.sha256(payload).hexdigest(),
             "pixel_sha256": hashlib.sha256(template.tobytes()).hexdigest(),
             "threshold_ppm": 990_000,
             "roi_ppm": [0, 0, 1_000_000, 1_000_000],
@@ -346,6 +212,13 @@ def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path:
         "profile_id": "ordinary-card-v1",
         "templates": entries,
     }), encoding="utf-8")
+    payloads[str(manifest.resolve(strict=True))] = manifest.read_bytes()
+    return manifest, payloads
+
+
+def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path: Path) -> None:
+    manifest, _payloads = _visual_profile_packet(tmp_path)
+    private = manifest.parent
 
     profile = load_private_visual_profile(tmp_path, manifest)
 
@@ -359,6 +232,67 @@ def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path:
         assert "digest" in str(exc)
     else:
         raise AssertionError("changed asset must be rejected")
+
+
+@pytest.mark.parametrize("fault", ["final-path", "reparse", "manifest-oversize", "asset-oversize"])
+def test_private_profile_handle_bound_reads_reject_swaps_reparse_and_oversize(
+    tmp_path: Path, fault: str,
+) -> None:
+    manifest, _payloads = _visual_profile_packet(tmp_path)
+    api = PrivateProfileFileApi(manifest.parent)
+    if fault == "final-path":
+        api.final_path_override = str(tmp_path / "outside" / "profile.json")
+    elif fault == "reparse":
+        api.attributes |= FILE_ATTRIBUTE_REPARSE_POINT
+    elif fault == "manifest-oversize":
+        api.files[str(manifest.resolve(strict=True))] = b"x" * 1_000_001
+    else:
+        asset = next(path for path in api.files if path.endswith("home.png"))
+        api.files[asset] = b"x" * 4_000_001
+
+    with pytest.raises(AccountReadinessError):
+        load_private_visual_profile(tmp_path, manifest, file_api=api)
+
+    assert [call[0] for call in api.calls].count("close") == len(api.handles)
+    assert all(
+        call[2:] == (GENERIC_READ, 0, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT)
+        for call in api.calls
+        if call[0] == "open"
+    )
+
+
+def test_private_profile_rejects_oversized_png_header_before_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _payloads = _visual_profile_packet(tmp_path)
+    payload = (
+        b"\x89PNG\r\n\x1a\n"
+        + (13).to_bytes(4, "big")
+        + b"IHDR"
+        + (10_000).to_bytes(4, "big")
+        + (10_000).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+    asset = manifest.parent / "home.png"
+    asset.write_bytes(payload)
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["templates"]["home"]["file_sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+    api = PrivateProfileFileApi(manifest.parent)
+    original_decode = cv2.imdecode
+
+    def guarded_decode(buffer, flags):
+        if bytes(buffer) == payload:
+            raise AssertionError("oversized header must be rejected before decode")
+        return original_decode(buffer, flags)
+
+    monkeypatch.setattr(cv2, "imdecode", guarded_decode)
+
+    with pytest.raises(AccountReadinessError, match="narrow PNG"):
+        load_private_visual_profile(tmp_path, manifest, file_api=api)
+
+    assert [call[0] for call in api.calls].count("close") == len(api.handles)
 
 
 def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
@@ -376,154 +310,42 @@ def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
     ), templates
 
 
-def _launcher_controller(
-    frames: list[np.ndarray], locator: PrivateBootstrapLocator
-) -> tuple[AccountReadinessController, Input]:
-    profile, _templates = _profile()
-    inputs = Input()
-    subject = AccountReadinessController(
-        binding=BINDING,
-        run_nonce="2" * 32,
-        capture=iter(frames).__next__,
-        profile=profile,
-        startup_input=StartupInput(),
-        export_input=inputs,
-        find_continue=lambda _frame: None,
-        locate_bootstrap=locator,
-        live_gate=lambda: True,
-        clipboard_read=lambda: "",
-        clipboard_clear=lambda: None,
-        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
-        wall_clock=lambda: NOW,
-        monotonic=lambda: 1.0,
-        wait=lambda _seconds: None,
-    )
-    return subject, inputs
-
-
-def test_three_fresh_stable_launcher_frames_plus_last_check_click_once_then_reach_home(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("include_profile_home", "diagnostic", "accepted"),
+    [
+        (True, HomeDiagnosticResult.HOME, True),
+        (False, HomeDiagnosticResult.HOME, False),
+        (True, HomeDiagnosticResult.BUILDER, False),
+        (True, HomeDiagnosticResult.UNKNOWN, False),
+    ],
+)
+def test_manual_home_frame_requires_both_sealed_and_diagnostic_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    include_profile_home: bool,
+    diagnostic: HomeDiagnosticResult,
+    accepted: bool,
 ) -> None:
     profile, templates = _profile()
-    launcher = _template(92)
-    locator = _bootstrap_locator(tmp_path, launcher)
-    launcher_frame = _frame((launcher, 120, 80))
-    subject, inputs = _launcher_controller(
-        [launcher_frame.copy() for _ in range(4)]
-        + [_frame(), _frame((templates["home"], 4, 4))],
-        locator,
+    frame = (
+        _frame((templates["home"], 4, 4))
+        if include_profile_home
+        else _frame()
     )
-    subject._profile = profile
-
-    subject._reach_home(10.0)
-
-    assert [event[-1] for event in inputs.events] == [
-        InputAction.STARTUP_LAUNCH_GAME
-    ]
-
-
-def test_launcher_stability_accepts_same_center_with_confidence_drift(
-    tmp_path: Path,
-) -> None:
-    profile, templates = _profile()
-    launcher = _template(96)
-    real_locator = _bootstrap_locator(tmp_path, launcher)
-    confidences = iter((0.991, 0.997, 0.993, 0.999))
-
-    def locator(frame: np.ndarray, name: str) -> _Match | None:
-        match = real_locator(frame, name)
-        return None if match is None else _Match(match.x, match.y, next(confidences))
-
-    launcher_frame = _frame((launcher, 120, 80))
-    subject, inputs = _launcher_controller(
-        [launcher_frame.copy() for _ in range(4)]
-        + [_frame(), _frame((templates["home"], 4, 4))],
-        locator,
-    )
-    subject._profile = profile
-
-    subject._reach_home(10.0)
-
-    assert [event[-1] for event in inputs.events] == [InputAction.STARTUP_LAUNCH_GAME]
-
-
-def test_launcher_stability_ignores_unrelated_frame_animation(tmp_path: Path) -> None:
-    profile, templates = _profile()
-    launcher = _template(97)
-    locator = _bootstrap_locator(tmp_path, launcher)
-    frames = []
-    for value in (0, 255, 32, 192):
-        frame = _frame((launcher, 120, 80))
-        frame[:, 320:] = value
-        frames.append(frame)
-    subject, inputs = _launcher_controller(
-        frames + [_frame(), _frame((templates["home"], 4, 4))], locator
-    )
-    subject._profile = profile
-
-    subject._reach_home(10.0)
-
-    assert [event[-1] for event in inputs.events] == [InputAction.STARTUP_LAUNCH_GAME]
-
-
-def test_launcher_movement_after_three_positive_captures_emits_no_click(
-    tmp_path: Path,
-) -> None:
-    launcher = _template(98)
-    locator = _bootstrap_locator(tmp_path, launcher)
-    stable = _frame((launcher, 120, 80))
-    moved = _frame((launcher, 130, 80))
-    subject, inputs = _launcher_controller(
-        [stable.copy(), stable.copy(), stable.copy(), moved], locator
+    monkeypatch.setattr(
+        NoInputHomeDiagnosticController,
+        "detect_frame",
+        classmethod(lambda _cls, _frame: diagnostic),
     )
 
-    with pytest.raises(AccountReadinessError, match="launcher input failed"):
-        subject._reach_home(10.0)
-
-    assert inputs.events == []
-
-
-@pytest.mark.parametrize("mode", ["unstable", "no-match"])
-def test_unstable_or_unmatched_launcher_emits_no_click(
-    tmp_path: Path, mode: str,
-) -> None:
-    launcher = _template(93)
-    locator = _bootstrap_locator(tmp_path, launcher)
-    first = _frame((launcher, 120, 80))
-    second = first.copy()
-    if mode == "unstable":
-        second[:, :20] = 255
+    if accepted:
+        require_manual_home_frame(frame, profile)
     else:
-        first.fill(0)
-    subject, inputs = _launcher_controller([first, second], locator)
-
-    with pytest.raises(AccountReadinessError):
-        subject._reach_home(10.0)
-
-    assert inputs.events == []
-
-
-def test_repeated_launcher_after_one_click_fails_without_second_click(
-    tmp_path: Path,
-) -> None:
-    launcher = _template(94)
-    locator = _bootstrap_locator(tmp_path, launcher)
-    launcher_frame = _frame((launcher, 120, 80))
-    subject, inputs = _launcher_controller(
-        [launcher_frame.copy() for _ in range(5)], locator
-    )
-
-    with pytest.raises(AccountReadinessError, match="launcher cap exhausted"):
-        subject._reach_home(10.0)
-
-    assert [event[-1] for event in inputs.events] == [
-        InputAction.STARTUP_LAUNCH_GAME
-    ]
+        with pytest.raises(AccountReadinessError, match="first frame"):
+            require_manual_home_frame(frame, profile)
 
 
 def _successful_frames(templates: dict[str, np.ndarray]):
     return [
-        _frame((templates["home"], 4, 4)),
         _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
         _frame((templates["settings"], 4, 4), (templates["more_button"], 40, 70)),
         _frame((templates["more"], 4, 4)),
@@ -539,7 +361,6 @@ def _successful_frames(templates: dict[str, np.ndarray]):
 def _controller(frames, *, clear=lambda: None, monotonic=lambda: 1.0):
     profile, templates = _profile()
     inputs = Input()
-    startup = StartupInput()
     reads = iter(["old", json.dumps({
         "tag": TAG, "timestamp": 1_788_894_243, "buildings": [],
     })])
@@ -548,9 +369,7 @@ def _controller(frames, *, clear=lambda: None, monotonic=lambda: 1.0):
         run_nonce="2" * 32,
         capture=iter(frames).__next__,
         profile=profile,
-        startup_input=startup,
         export_input=inputs,
-        find_continue=lambda _frame: None,
         live_gate=lambda: True,
         clipboard_read=reads.__next__,
         clipboard_clear=clear,
@@ -559,13 +378,12 @@ def _controller(frames, *, clear=lambda: None, monotonic=lambda: 1.0):
         monotonic=monotonic,
         wait=lambda _seconds: None,
     )
-    return subject, inputs, startup, templates
+    return subject, inputs, None, templates
 
 
 def test_missing_settings_destination_denies_every_later_gesture() -> None:
     profile, templates = _profile()
     frames = [
-        _frame((templates["home"], 4, 4)),
         _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
         _frame((templates["home"], 4, 4), (templates["more_button"], 40, 70)),
     ]
@@ -633,35 +451,6 @@ def test_stale_or_future_export_never_returns_account_ready(timestamp_offset: in
         subject.run(deadline=10.0)
 
 
-def test_startup_continue_cap_exhaustion_never_retries_the_click() -> None:
-    profile, templates = _profile()
-    startup = StartupInput()
-    subject = AccountReadinessController(
-        binding=BINDING,
-        run_nonce="2" * 32,
-        capture=iter([_frame(), _frame()]).__next__,
-        profile=profile,
-        startup_input=startup,
-        export_input=Input(),
-        find_continue=lambda _frame: SimpleNamespace(x=0.5, y=0.5),
-        live_gate=lambda: True,
-        clipboard_read=lambda: "",
-        clipboard_clear=lambda: None,
-        expected_tag_sha256=hashlib.sha256(TAG.encode()).hexdigest(),
-        wall_clock=lambda: NOW,
-        monotonic=lambda: 1.0,
-        wait=lambda _seconds: None,
-    )
-
-    try:
-        subject.run(deadline=10.0)
-    except AccountReadinessError as exc:
-        assert "cap exhausted" in str(exc)
-    else:
-        raise AssertionError("second Continue evidence must fail")
-    assert startup.events == [(0.5, 0.5)]
-
-
 def test_deadline_crossing_during_capture_discards_the_frame() -> None:
     profile, _templates = _profile()
     calls = iter([9.0, 10.0])
@@ -671,9 +460,7 @@ def test_deadline_crossing_during_capture_discards_the_frame() -> None:
         run_nonce="2" * 32,
         capture=lambda: private_frame,
         profile=profile,
-        startup_input=StartupInput(),
         export_input=Input(),
-        find_continue=lambda _frame: None,
         live_gate=lambda: True,
         clipboard_read=lambda: "",
         clipboard_clear=lambda: None,
@@ -700,9 +487,7 @@ def test_malformed_capture_is_zeroed_in_traceback_before_failure() -> None:
         run_nonce="2" * 32,
         capture=lambda: private_frame,
         profile=profile,
-        startup_input=StartupInput(),
         export_input=Input(),
-        find_continue=lambda _frame: None,
         live_gate=lambda: True,
         clipboard_read=lambda: "",
         clipboard_clear=lambda: None,
@@ -752,18 +537,3 @@ def test_deadline_crossing_at_native_gate_emits_no_input() -> None:
     else:
         raise AssertionError("native gate deadline crossing must fail")
     assert inputs.events == []
-
-
-@pytest.mark.parametrize("color", [(0, 0, 255), (0, 255, 0)])
-def test_plain_red_or_green_wrong_screen_never_authorizes_a_control(color) -> None:
-    profile, _templates = _profile()
-    decoy = np.zeros((360, 640, 3), dtype=np.uint8)
-    decoy[:] = color
-    calls = iter([1.0] * 8 + [10.0])
-    subject, inputs, startup, _ = _controller([decoy], monotonic=calls.__next__)
-    subject._profile = profile
-
-    with pytest.raises(AccountReadinessError, match="deadline"):
-        subject.run(deadline=10.0)
-    assert inputs.events == []
-    assert startup.events == []

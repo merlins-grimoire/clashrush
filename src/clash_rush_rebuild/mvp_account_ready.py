@@ -1,10 +1,10 @@
-"""Bounded startup-to-account-ready sequence for the local MVP.
+"""Manual-Home account-readiness sequence for the local MVP.
 
-The startup polling order is adapted from CoC_Bot ``start_coc`` at pinned commit
-``a5c943afed0ed3b9abedbbc228b0889145ecaf24``.  Positive Home evidence follows
-the BasePilot-derived local recognizer contract.  All visual assets are supplied
-from an operator-owned private profile; this module bundles no font or profile
-image and persists no captured frame.
+The operator opens Clash of Clans before this sequence begins, matching BasePilot's
+``Bot.start`` precondition at pinned commit ``4ede1efd220ffc79a5b490cfd3788b44d2584da4``.
+An owned frame must satisfy both the sealed private Home template and the
+BasePilot-derived local recognizer contract before any input adapter exists. All
+visual assets are operator-owned and private; captured frames are transient.
 """
 
 from __future__ import annotations
@@ -25,6 +25,10 @@ import numpy as np
 from .input_authorization import InputAction
 from .lifecycle import PlayerBinding
 from .mvp_local_world_export import ExportCaptureError, summarize_world_export
+from .no_input_home_diagnostic import (
+    HomeDiagnosticResult,
+    NoInputHomeDiagnosticController,
+)
 from .win32_state_io import (
     FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_OPEN_REPARSE_POINT,
@@ -146,9 +150,6 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-_BOOTSTRAP_NAMES = frozenset({"launcher"})
-
-
 def _read_handle_bound(
     path: Path, limit: int, api: StateFileApi,
 ) -> bytes:
@@ -192,11 +193,11 @@ def _decode_narrow_png(payload: bytes) -> np.ndarray:
         or int.from_bytes(payload[8:12], "big") != 13
         or payload[12:16] != b"IHDR"
     ):
-        raise AccountReadinessError("bootstrap asset is not a narrow PNG")
+        raise AccountReadinessError("private visual asset is not a narrow PNG")
     width = int.from_bytes(payload[16:20], "big")
     height = int.from_bytes(payload[20:24], "big")
     if not (1 <= width <= 320 and 1 <= height <= 320):
-        raise AccountReadinessError("bootstrap asset is not a narrow PNG")
+        raise AccountReadinessError("private visual asset is not a narrow PNG")
     pixels = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
     if (
         type(pixels) is not np.ndarray
@@ -205,145 +206,37 @@ def _decode_narrow_png(payload: bytes) -> np.ndarray:
         or pixels.shape[:2] != (height, width)
         or pixels.shape[2] != 3
     ):
-        raise AccountReadinessError("bootstrap asset is not a narrow PNG")
+        raise AccountReadinessError("private visual asset is not a narrow PNG")
     return pixels
 
 
-class PrivateBootstrapLocator:
-    """Strict digest-sealed locator adapted from the reverted S003 calibrator."""
-
-    def __init__(
-        self, project_root: str | Path, *, file_api: StateFileApi | None = None
-    ) -> None:
-        api = NativeWin32StateApi() if file_api is None else file_api
-        try:
-            project = Path(project_root).resolve(strict=True)
-            private = (project / "private").resolve(strict=True)
-            root = (private / "readiness" / "bootstrap").resolve(strict=True)
-            manifest = (root / "profile.json").resolve(strict=True)
-            if (
-                not _inside(private, project)
-                or not _inside(root, private)
-                or not _inside(manifest, root)
-                or root.is_symlink()
-                or manifest.is_symlink()
-                or manifest.parent != root
-            ):
-                raise AccountReadinessError("bootstrap path escaped")
-            if not manifest.is_file():
-                raise OSError
-            raw_bytes = _read_handle_bound(manifest, 64_000, api)
-            raw = json.loads(raw_bytes.decode("utf-8"), object_pairs_hook=_unique_object)
-        except AccountReadinessError:
-            raise
-        except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError) as exc:
-            raise AccountReadinessError("bootstrap manifest is unavailable") from exc
-        controls = raw.get("controls") if type(raw) is dict else None
-        if (
-            type(raw) is not dict
-            or set(raw) != {"schema", "controls"}
-            or type(raw.get("schema")) is not int
-            or raw["schema"] != 1
-            or type(controls) is not dict
-            or set(controls) != _BOOTSTRAP_NAMES
-        ):
-            raise AccountReadinessError("bootstrap manifest is malformed")
-        loaded: dict[str, tuple[np.ndarray, tuple[int, int, int, int], float]] = {}
-        for name, entry in controls.items():
-            if (
-                type(entry) is not dict
-                or set(entry) != {
-                    "file", "file_sha256", "pixel_sha256", "roi_ppm", "threshold_ppm"
-                }
-                or type(entry.get("file")) is not str
-                or Path(entry["file"]).name != entry["file"]
-                or type(entry.get("file_sha256")) is not str
-                or type(entry.get("pixel_sha256")) is not str
-                or type(entry.get("roi_ppm")) is not list
-                or len(entry["roi_ppm"]) != 4
-                or any(type(value) is not int for value in entry["roi_ppm"])
-                or not (0 <= entry["roi_ppm"][0] < entry["roi_ppm"][2] <= 1_000_000)
-                or not (0 <= entry["roi_ppm"][1] < entry["roi_ppm"][3] <= 1_000_000)
-                or type(entry.get("threshold_ppm")) is not int
-                or not 800_000 <= entry["threshold_ppm"] <= 1_000_000
-            ):
-                raise AccountReadinessError("bootstrap manifest is malformed")
-            try:
-                asset = (root / entry["file"]).resolve(strict=True)
-                if not _inside(asset, root) or asset.parent != root or asset.is_symlink():
-                    raise AccountReadinessError("bootstrap path escaped")
-                payload = _read_handle_bound(asset, 4_000_000, api)
-            except AccountReadinessError:
-                raise
-            except (OSError, RuntimeError) as exc:
-                raise AccountReadinessError(
-                    f"{name} bootstrap evidence unavailable"
-                ) from exc
-            if hashlib.sha256(payload).hexdigest() != entry["file_sha256"]:
-                raise AccountReadinessError(f"{name} bootstrap evidence unavailable")
-            pixels = _decode_narrow_png(payload)
-            if hashlib.sha256(pixels.tobytes()).hexdigest() != entry["pixel_sha256"]:
-                raise AccountReadinessError(f"{name} bootstrap evidence unavailable")
-            pixels.flags.writeable = False
-            loaded[name] = (
-                pixels,
-                tuple(entry["roi_ppm"]),
-                entry["threshold_ppm"] / 1_000_000,
-            )
-        self._controls = loaded
-
-    def __call__(self, frame: np.ndarray, name: str) -> _Match | None:
-        if type(name) is not str or name not in self._controls:
-            raise AccountReadinessError("control bootstrap evidence unavailable")
-        if type(frame) is not np.ndarray or frame.dtype != np.uint8 or frame.ndim != 3:
-            raise AccountReadinessError(f"{name} bootstrap evidence unavailable")
-        template, roi, threshold = self._controls[name]
-        height, width = frame.shape[:2]
-        left, top, right, bottom = (
-            width * roi[0] // 1_000_000,
-            height * roi[1] // 1_000_000,
-            width * roi[2] // 1_000_000,
-            height * roi[3] // 1_000_000,
-        )
-        region = frame[top:bottom, left:right]
-        if width < 2 or height < 2:
-            raise AccountReadinessError(f"{name} bootstrap evidence unavailable")
-        if template.shape[0] > region.shape[0] or template.shape[1] > region.shape[1]:
-            return None
-        try:
-            response = cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED)
-            _minimum, score, _minimum_point, point = cv2.minMaxLoc(response)
-        except cv2.error as exc:
-            raise AccountReadinessError(f"{name} bootstrap evidence unavailable") from exc
-        if not math.isfinite(float(score)) or float(score) < threshold:
-            return None
-        return _Match(
-            (left + point[0] + (template.shape[1] - 1) / 2) / (width - 1),
-            (top + point[1] + (template.shape[0] - 1) / 2) / (height - 1),
-            float(score),
-        )
-
-
 def load_private_visual_profile(
-    project_root: str | Path, manifest_path: str | Path
+    project_root: str | Path,
+    manifest_path: str | Path,
+    *,
+    file_api: StateFileApi | None = None,
 ) -> ReadinessVisualProfile:
-    """Load one exact, digest-sealed profile exclusively beneath ``private``."""
+    """Load one exact, handle-bound digest-sealed profile beneath ``private``."""
+    api = NativeWin32StateApi() if file_api is None else file_api
     try:
         project = Path(project_root).resolve(strict=True)
-        private = (project / "private").resolve(strict=True)
-        manifest = Path(manifest_path).resolve(strict=True)
+        expected_private = project / "private"
+        private = expected_private.resolve(strict=True)
+        manifest = Path(os.path.abspath(os.fspath(manifest_path)))
     except (OSError, RuntimeError) as exc:
         raise AccountReadinessError("private visual profile is unavailable") from exc
-    if not _inside(manifest, private) or not manifest.is_file():
+    if (
+        private != expected_private.absolute()
+        or not _inside(private, project)
+        or not _inside(manifest, private)
+    ):
         raise AccountReadinessError("private visual profile path escaped")
     try:
-        raw_bytes = manifest.read_bytes()
-        if len(raw_bytes) > 1_000_000:
-            raise AccountReadinessError("private visual profile is oversized")
+        raw_bytes = _read_handle_bound(manifest, 1_000_000, api)
         raw = json.loads(raw_bytes.decode("utf-8"), object_pairs_hook=_unique_object)
     except AccountReadinessError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError) as exc:
         raise AccountReadinessError("private visual profile is malformed") from exc
     if (
         type(raw) is not dict
@@ -376,22 +269,16 @@ def load_private_visual_profile(
             or any(type(value) is not int or type(value) is bool for value in entry["roi_ppm"])
         ):
             raise AccountReadinessError("private visual profile is malformed")
-        try:
-            asset = (manifest.parent / entry["file"]).resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise AccountReadinessError("private visual asset is unavailable") from exc
-        if not _inside(asset, private) or not asset.is_file():
+        asset = manifest.parent / entry["file"]
+        if not _inside(asset, private):
             raise AccountReadinessError("private visual asset path escaped")
         try:
-            encoded = asset.read_bytes()
-        except OSError as exc:
+            encoded = _read_handle_bound(asset, 4_000_000, api)
+        except (OSError, RuntimeError) as exc:
             raise AccountReadinessError("private visual asset is unavailable") from exc
-        if (
-            len(encoded) > 4_000_000
-            or hashlib.sha256(encoded).hexdigest() != entry["file_sha256"]
-        ):
+        if hashlib.sha256(encoded).hexdigest() != entry["file_sha256"]:
             raise AccountReadinessError("private visual asset digest mismatch")
-        pixels = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        pixels = _decode_narrow_png(encoded)
         if (
             type(pixels) is not np.ndarray
             or pixels.size == 0
@@ -441,12 +328,6 @@ class ExportInputPort(Protocol):
     ) -> bool: ...
 
 
-class StartupInputPort(Protocol):
-    def click_continue(
-        self, binding: PlayerBinding, x: float, y: float
-    ) -> bool: ...
-
-
 def _match_template(frame: np.ndarray, spec: TemplateSpec) -> _Match | None:
     if type(frame) is not np.ndarray or frame.dtype != np.uint8 or frame.ndim not in (2, 3):
         raise AccountReadinessError("captured frame is malformed")
@@ -482,6 +363,33 @@ def _match_template(frame: np.ndarray, spec: TemplateSpec) -> _Match | None:
     )
 
 
+def manual_home_frame_verified(
+    frame: np.ndarray, profile: ReadinessVisualProfile
+) -> bool:
+    """Return exact positive sealed-profile and donor-derived HOME proof."""
+    if type(profile) is not ReadinessVisualProfile:
+        raise AccountReadinessError("manual Home profile is malformed")
+    try:
+        profile_home = _match_template(frame, profile.spec("home")) is not None
+        diagnostic_home = (
+            NoInputHomeDiagnosticController.detect_frame(frame)
+            is HomeDiagnosticResult.HOME
+        )
+    except AccountReadinessError:
+        raise
+    except BaseException as exc:
+        raise AccountReadinessError("manual Home classification failed") from exc
+    return bool(profile_home and diagnostic_home)
+
+
+def require_manual_home_frame(
+    frame: np.ndarray, profile: ReadinessVisualProfile
+) -> None:
+    """Require both sealed-profile and donor-derived HOME proof on one frame."""
+    if not manual_home_frame_verified(frame, profile):
+        raise AccountReadinessError("manual Home first frame was not verified")
+
+
 class AccountReadinessController:
     """One absolute-deadline, source/destination-gated readiness chain."""
 
@@ -494,10 +402,7 @@ class AccountReadinessController:
         run_nonce: str,
         capture: Callable[[], np.ndarray],
         profile: ReadinessVisualProfile,
-        startup_input: StartupInputPort,
         export_input: ExportInputPort,
-        find_continue: Callable[[np.ndarray], object | None],
-        home_ready: Callable[[np.ndarray], bool] | None = None,
         live_gate: Callable[[], bool],
         clipboard_read: Callable[[], str],
         clipboard_clear: Callable[[], None],
@@ -505,7 +410,6 @@ class AccountReadinessController:
         wall_clock: Callable[[], object],
         monotonic: Callable[[], float],
         wait: Callable[[float], None],
-        locate_bootstrap: Callable[[np.ndarray, str], _Match | None] | None = None,
     ) -> None:
         if (
             type(binding) is not PlayerBinding
@@ -517,7 +421,6 @@ class AccountReadinessController:
                 callable(value)
                 for value in (
                     capture,
-                    find_continue,
                     live_gate,
                     clipboard_read,
                     clipboard_clear,
@@ -526,21 +429,15 @@ class AccountReadinessController:
                     wait,
                 )
             )
-            or not callable(getattr(startup_input, "click_continue", None))
             or not callable(getattr(export_input, "click", None))
             or not callable(getattr(export_input, "drag", None))
-            or (home_ready is not None and not callable(home_ready))
-            or (locate_bootstrap is not None and not callable(locate_bootstrap))
         ):
             raise AccountReadinessError("readiness boundary is malformed")
         self._binding = binding
         self._run_nonce = run_nonce
         self._capture = capture
         self._profile = profile
-        self._startup_input = startup_input
         self._export_input = export_input
-        self._find_continue = find_continue
-        self._home_ready = home_ready
         self._live_gate = live_gate
         self._clipboard_read = clipboard_read
         self._clipboard_clear = clipboard_clear
@@ -548,7 +445,6 @@ class AccountReadinessController:
         self._wall_clock = wall_clock
         self._monotonic = monotonic
         self._wait = wait
-        self._locate_bootstrap = locate_bootstrap
 
     def _time(self, deadline: float) -> float:
         try:
@@ -654,134 +550,11 @@ class AccountReadinessController:
             raise AccountReadinessError("readiness input failed")
         self._settle(0.15, deadline)
 
-    def _same_launcher_center(self, first: _Match, second: _Match) -> bool:
-        return bool(
-            type(first) is _Match
-            and type(second) is _Match
-            and abs((first.x - second.x) * (self._binding.width - 1)) <= 2.0
-            and abs((first.y - second.y) * (self._binding.height - 1)) <= 2.0
-        )
-
-    def _launch_game(self, match: _Match, deadline: float) -> None:
-        self._enabled(deadline)
-
-        def launcher_still_present() -> bool:
-            if self._locate_bootstrap is None:
-                return False
-            with self._transient_frame(deadline) as fresh:
-                located = self._locate_bootstrap(fresh, "launcher")
-                return self._same_launcher_center(match, located)
-
-        try:
-            sent = self._export_input.click(
-                self._binding,
-                match.x,
-                match.y,
-                action=InputAction.STARTUP_LAUNCH_GAME,
-                pre_input_check=launcher_still_present,
-            )
-        except BaseException as exc:
-            raise AccountReadinessError("startup launcher input unavailable") from exc
-        if sent is not True:
-            raise AccountReadinessError("startup launcher input failed")
-
-    def _stable_launcher(
-        self, frame: np.ndarray, target: _Match, deadline: float
-    ) -> _Match:
-        if self._locate_bootstrap is None:
-            raise AccountReadinessError("launcher bootstrap evidence unavailable")
-        for _ in range(2):
-            self._settle(0.05, deadline)
-            with self._transient_frame(deadline) as fresh:
-                try:
-                    located = self._locate_bootstrap(fresh, "launcher")
-                except AccountReadinessError:
-                    raise
-                except BaseException as exc:
-                    raise AccountReadinessError(
-                        "launcher bootstrap evidence unavailable"
-                    ) from exc
-                if not self._same_launcher_center(target, located):
-                    raise AccountReadinessError("launcher stability unavailable")
-        return target
-
     def _clear_clipboard(self) -> None:
         try:
             self._clipboard_clear()
         except BaseException as exc:
             raise AccountReadinessError("clipboard cleanup failed") from exc
-
-    def _reach_home(self, deadline: float) -> None:
-        continue_used = False
-        launcher_used = False
-        while True:
-            with self._transient_frame(deadline) as frame:
-                profile_home = self._match(frame, "home", deadline) is not None
-                try:
-                    classified_home = (
-                        profile_home
-                        if self._home_ready is None
-                        else self._home_ready(frame) is True
-                    )
-                except BaseException as exc:
-                    raise AccountReadinessError("Home classification failed") from exc
-                self._time(deadline)
-                if profile_home and classified_home:
-                    return
-                self._time(deadline)
-                try:
-                    match = self._find_continue(frame)
-                except BaseException as exc:
-                    raise AccountReadinessError("startup classification failed") from exc
-                self._time(deadline)
-                if match is not None:
-                    if continue_used:
-                        raise AccountReadinessError("startup Continue cap exhausted")
-                    try:
-                        x, y = match.x, match.y
-                    except BaseException as exc:
-                        raise AccountReadinessError("startup Continue target malformed") from exc
-                    if any(
-                        type(value) not in (int, float)
-                        or type(value) is bool
-                        or not math.isfinite(float(value))
-                        or not 0.0 <= float(value) <= 1.0
-                        for value in (x, y)
-                    ):
-                        raise AccountReadinessError("startup Continue target malformed")
-                    self._enabled(deadline)
-                    try:
-                        sent = self._startup_input.click_continue(
-                            self._binding, float(x), float(y)
-                        )
-                    except BaseException as exc:
-                        raise AccountReadinessError("startup Continue input unavailable") from exc
-                    if sent is not True:
-                        raise AccountReadinessError("startup Continue input failed")
-                    continue_used = True
-                    self._time(deadline)
-                elif self._locate_bootstrap is not None:
-                    try:
-                        launcher = self._locate_bootstrap(frame, "launcher")
-                    except AccountReadinessError:
-                        raise
-                    except BaseException as exc:
-                        raise AccountReadinessError(
-                            "launcher bootstrap evidence unavailable"
-                        ) from exc
-                    if launcher is not None and type(launcher) is not _Match:
-                        raise AccountReadinessError(
-                            "launcher bootstrap evidence unavailable"
-                        )
-                    if launcher_used and launcher is not None:
-                        raise AccountReadinessError("startup launcher cap exhausted")
-                    if launcher is not None:
-                        launcher = self._stable_launcher(frame, launcher, deadline)
-                        self._launch_game(launcher, deadline)
-                        launcher_used = True
-                        self._time(deadline)
-            remaining = deadline - self._time(deadline)
-            self._wait(min(0.25, remaining))
 
     def run(self, *, deadline: float) -> AccountReady:
         if (
@@ -791,7 +564,6 @@ class AccountReadinessController:
         ):
             raise AccountReadinessError("readiness deadline is malformed")
         deadline = float(deadline)
-        self._reach_home(deadline)
         previous = ""
         exported = ""
         result: AccountReady | None = None
@@ -882,4 +654,6 @@ __all__ = [
     "ReadinessVisualProfile",
     "TemplateSpec",
     "load_private_visual_profile",
+    "manual_home_frame_verified",
+    "require_manual_home_frame",
 ]
