@@ -638,8 +638,11 @@ class AccountReadinessController:
             try:
                 self._clear_clipboard()
             except BaseException as exc:
-                failure = AccountReadinessError("clipboard cleanup failed")
-                failure.__cause__ = exc
+                if failure is None:
+                    failure = AccountReadinessError("clipboard cleanup failed")
+                    failure.__cause__ = exc
+                else:
+                    failure.add_note("clipboard cleanup also failed")
         if failure is not None:
             raise failure
         if type(result) is not AccountReady:

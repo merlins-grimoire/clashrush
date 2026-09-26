@@ -432,6 +432,26 @@ def test_clipboard_cleanup_fault_overrides_an_otherwise_complete_proof() -> None
         raise AssertionError("cleanup fault must fail")
 
 
+def test_clipboard_cleanup_failure_preserves_primary_readiness_error() -> None:
+    primary = RuntimeError("synthetic primary readiness failure")
+    clears = 0
+
+    def clear() -> None:
+        nonlocal clears
+        clears += 1
+        if clears == 2:
+            raise OSError("synthetic clipboard cleanup failure")
+
+    subject, _inputs, _startup, _templates = _controller([], clear=clear)
+    subject._capture_frame = lambda _deadline: (_ for _ in ()).throw(primary)
+
+    with pytest.raises(RuntimeError) as caught:
+        subject.run(deadline=10.0)
+
+    assert caught.value is primary
+    assert caught.value.__notes__ == ["clipboard cleanup also failed"]
+
+
 @pytest.mark.parametrize("timestamp_offset", [-121, 31])
 def test_stale_or_future_export_never_returns_account_ready(timestamp_offset: int) -> None:
     profile, templates = _profile()
