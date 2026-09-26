@@ -312,6 +312,11 @@ class LifecycleSupervisor:
                     self._readiness_wait(500)
             if not exact_player_seen:
                 raise LifecycleError("exact post-launch player did not become ready")
+            if direct_clash:
+                # ClashAutomation waits after direct launch before inspecting
+                # the game. Bind only after that transition so the retained
+                # render geometry belongs to Clash rather than the launcher.
+                self._readiness_wait(20_000)
             readiness_complete = False
             for attempt in range(self._readiness_attempts):
                 candidate_members: MemberSnapshot | None = None
@@ -349,11 +354,7 @@ class LifecycleSupervisor:
                     self._readiness_wait(500)
             if not readiness_complete:
                 raise LifecycleError("exact window and capture did not become ready")
-            if direct_clash:
-                # ClashAutomation waits after direct launch before inspecting
-                # the game. The owned render can transiently turn near-black
-                # while Clash replaces the launcher.
-                self._readiness_wait(20_000)
+
         except BaseException as exc:
             self._rollback_start(
                 active=active,

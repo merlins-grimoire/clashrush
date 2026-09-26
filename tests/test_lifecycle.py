@@ -328,7 +328,10 @@ def test_start_clash_keeps_active_job_assignment_and_resume_order() -> None:
         "job:assign"
     )
     assert events.index("job:assign") < events.index("thread:resume")
-    assert events[-1] == "wait:20000"
+    assert events.index("players:close") < events.index("wait:20000")
+    assert events.index("wait:20000") < events.index("job:members")
+    assert events.index("wait:20000") < events.index("window:bind")
+    assert events.index("wait:20000") < events.index("capture:ready")
 
 
 def test_owned_capture_revalidates_exact_binding_and_job_before_pixels() -> None:
