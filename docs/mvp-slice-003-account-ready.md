@@ -70,10 +70,10 @@ DOC GAP: neither platform documentation nor donor source establishes the meaning
 
 Automated calibration navigation is intentionally outside this narrowed MVP.
 `docs/manual-readiness-profile.md` defines the offline donor-adapted import path
-for exactly nine owner-reviewed narrow crops. Building that profile sends no
+for exactly eight owner-reviewed narrow crops. Building that profile sends no
 input and grants no runtime authority; the readiness transaction remains the
 separate live proof.
 
 ## Verification contract
 
-Synthetic tests cover the full real `cv2.matchTemplate` adapter trace, exact moved-target centers, wrong destination denial, missing card denial, private manifest/digest sealing, clipboard cleanup failure, one-click Continue cap exhaustion, deadline crossing during capture, separate startup/readiness capabilities, and the owned native readiness-only composition. Existing world-export tests cover wrong-account and clipboard replacement failures. Canonical test counts and exact tree identity belong in the task handoff, not this source-controlled document.
+Synthetic tests cover the full real `cv2.matchTemplate` adapter trace, exact moved-target centers, wrong destination denial, final Home proof, private manifest/digest sealing, clipboard cleanup failure, one-click Continue cap exhaustion, deadline crossing during capture, separate startup/readiness capabilities, and the owned native readiness-only composition. Existing world-export tests cover wrong-account and clipboard replacement failures. Canonical test counts and exact tree identity belong in the task handoff, not this source-controlled document.
