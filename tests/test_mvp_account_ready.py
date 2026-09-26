@@ -76,7 +76,7 @@ class StartupInput:
 def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests() -> None:
     templates = {name: _template(index) for index, name in enumerate((
         "home", "settings_button", "settings", "more_button", "more",
-        "export", "more_close", "settings_close", "ordinary_card",
+        "export", "more_close", "settings_close",
     ), start=1)}
     profile = ReadinessVisualProfile(
         profile_id="ordinary-card-v1",
@@ -95,7 +95,7 @@ def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests
         _frame((templates["more"], 4, 4), (templates["export"], 60, 55)),
         _frame((templates["more"], 4, 4), (templates["more_close"], 75, 5)),
         _frame((templates["settings"], 4, 4), (templates["settings_close"], 75, 5)),
-        _frame((templates["home"], 4, 4), (templates["ordinary_card"], 15, 80)),
+        _frame((templates["home"], 4, 4)),
     ])
     input_port = Input()
     startup_input = StartupInput()
@@ -151,7 +151,7 @@ def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path:
     entries = {}
     for index, name in enumerate(sorted({
         "home", "settings_button", "settings", "more_button", "more",
-        "export", "more_close", "settings_close", "ordinary_card",
+        "export", "more_close", "settings_close",
     }), start=1):
         template = _template(index)
         ok, encoded = cv2.imencode(".png", template)
@@ -175,7 +175,7 @@ def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path:
     profile = load_private_visual_profile(tmp_path, manifest)
 
     assert profile.profile_id == "ordinary-card-v1"
-    assert profile.spec("ordinary_card").template.flags.writeable is False
+    assert profile.spec("home").template.flags.writeable is False
 
     (private / "home.png").write_bytes(b"changed")
     try:
@@ -189,7 +189,7 @@ def test_private_profile_loader_freezes_exact_manifest_and_asset_bytes(tmp_path:
 def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
     names = (
         "home", "settings_button", "settings", "more_button", "more",
-        "export", "more_close", "settings_close", "ordinary_card",
+        "export", "more_close", "settings_close",
     )
     templates = {name: _template(index + 20) for index, name in enumerate(names)}
     return ReadinessVisualProfile(
@@ -201,10 +201,7 @@ def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
     ), templates
 
 
-def _successful_frames(templates: dict[str, np.ndarray], *, card: bool = True):
-    final = [(templates["home"], 4, 4)]
-    if card:
-        final.append((templates["ordinary_card"], 15, 80))
+def _successful_frames(templates: dict[str, np.ndarray]):
     return [
         _frame((templates["home"], 4, 4)),
         _frame((templates["home"], 4, 4), (templates["settings_button"], 80, 70)),
@@ -215,7 +212,7 @@ def _successful_frames(templates: dict[str, np.ndarray], *, card: bool = True):
         _frame((templates["more"], 4, 4), (templates["export"], 60, 55)),
         _frame((templates["more"], 4, 4), (templates["more_close"], 75, 5)),
         _frame((templates["settings"], 4, 4), (templates["settings_close"], 75, 5)),
-        _frame(*final),
+        _frame((templates["home"], 4, 4)),
     ]
 
 
@@ -264,17 +261,14 @@ def test_missing_settings_destination_denies_every_later_gesture() -> None:
     assert len(inputs.events) == 1
 
 
-def test_missing_ordinary_card_denies_account_ready_after_same_home() -> None:
+def test_final_positive_home_is_sufficient_after_identity_bound_export() -> None:
     profile, templates = _profile()
-    subject, inputs, _startup, _ = _controller(_successful_frames(templates, card=False))
+    subject, inputs, _startup, _ = _controller(_successful_frames(templates))
     subject._profile = profile
 
-    try:
-        subject.run(deadline=10.0)
-    except AccountReadinessError as exc:
-        assert "ordinary-card" in str(exc)
-    else:
-        raise AssertionError("missing card must fail")
+    result = subject.run(deadline=10.0)
+
+    assert type(result) is AccountReady
     assert all(event[-1] is InputAction.ACCOUNT_EXPORT_NAVIGATION for event in inputs.events)
 
 

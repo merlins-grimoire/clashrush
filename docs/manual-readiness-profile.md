@@ -3,7 +3,7 @@
 ## Purpose
 
 `build-readiness-profile` replaces automated calibration navigation with an
-offline import step. It reads exactly nine owner-reviewed **narrow PNG crops**,
+offline import step. It reads exactly eight owner-reviewed **narrow PNG crops**,
 validates a strict review manifest, canonicalizes and seals the images, and
 publishes the existing runtime `private/readiness/profile.json` last with an
 atomic create-if-absent hard link. It never overwrites a profile, including one
@@ -22,7 +22,7 @@ The read → validate → extract narrow template → save-template flow is adap
 from ClashAutomation's MIT-licensed
 `dev_tools/harness.py::cmd_extract_template` at pinned commit
 `c41fe12a6df051e241c695b71b6859286e24c612`. Its broad debug persistence and
-live automation are not copied. Local adaptations add the exact nine-name
+live automation are not copied. Local adaptations add the exact eight-name
 vocabulary, strict private path containment, narrow-image limits, digest sealing,
 DACL protection, fail-closed validation, and manifest-last publication.
 
@@ -38,7 +38,7 @@ Those values require owner review and a separate bounded runtime readiness proof
 
 ## Review packet
 
-Create an ignored directory such as `private/manual-readiness/`. Put these nine
+Create an ignored directory such as `private/manual-readiness/`. Put these eight
 narrow PNG files in it:
 
 | Name | Reviewed content |
@@ -51,7 +51,7 @@ narrow PNG files in it:
 | `export` | Export control after the documented three scrolls |
 | `more_close` | Close control on More Settings |
 | `settings_close` | Close control on Settings |
-| `ordinary_card` | Configured ordinary-account identity card cue |
+
 
 Each crop must be at least 8 pixels on each side and no more than 320 pixels on
 its largest side. Every input must be an actual PNG with a lowercase `.png`
@@ -73,7 +73,7 @@ Beside them, create `review.json` with this exact schema:
 }
 ```
 
-The displayed `home` entry is structural only; `templates` must contain all nine
+The displayed `home` entry is structural only; `templates` must contain all eight
 names exactly. Each entry has only `file`, `threshold_ppm`, and `roi_ppm`.
 `threshold_ppm` is an integer from 500000 through 1000000. `roi_ppm` is the
 reviewed runtime search region `[x0,y0,x1,y1]`, normalized to one million. Do not
@@ -96,5 +96,5 @@ an existing profile manually only after reviewing it.
 
 Building the profile is offline preparation, not readiness proof and not gameplay
 authorization. The separately authorized `mvp-account-ready-one` run must still
-prove every state transition, the exported account identity, the ordinary-card
-cue, Home return, and owned-player cleanup.
+prove every state transition, the exported account identity, Home return, and
+owned-player cleanup.

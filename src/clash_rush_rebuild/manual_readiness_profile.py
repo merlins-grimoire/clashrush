@@ -175,7 +175,7 @@ def build_manual_readiness_profile(
     permission_sealer: Callable[[Path, bool], None] = _seal_private_path,
     nonce_factory: Callable[[], str] = lambda: secrets.token_hex(16),
 ) -> str:
-    """Seal exactly nine reviewed narrow crops into the runtime profile schema."""
+    """Seal exactly eight reviewed narrow crops into the runtime profile schema."""
     private, target, manifest, raw = _load_review_packet(project_root, review_manifest)
     if target.exists():
         try:

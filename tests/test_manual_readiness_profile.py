@@ -27,7 +27,6 @@ NAMES = {
     "export",
     "more_close",
     "settings_close",
-    "ordinary_card",
 }
 
 

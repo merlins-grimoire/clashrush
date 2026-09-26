@@ -15,7 +15,7 @@ The complete bounded sequence is authorized with `mvp-run-readiness` and execute
 7. before each of three bounded scroll drags, require fresh More Settings evidence;
 8. locate the moved Export target on a fresh More Settings frame and click its detected center;
 9. parse a newly replaced clipboard value, require the expected tag hash and a timestamp no more than 120 seconds old or 30 seconds in the future, and clear the clipboard;
-10. positively locate both close controls on their source screens, return to fresh Home, require the same account proof already bound by the export, and match the configured visible ordinary-card profile;
+10. positively locate both close controls on their source screens, return to fresh Home, and retain the same identity proof already bound by the fresh export;
 11. emit `AccountReady(run_nonce, profile_id)`, stop the owned player, prove cleanup, and release the mutex.
 
 Every capture, matcher, live gate, and native-input seam rechecks the same absolute monotonic deadline. A missing destination or target denies the next gesture. Continue is capped at one click; repeated Continue evidence fails instead of retrying. Captured arrays are zeroed after each observation. The implementation contains no frame writer or network client.
@@ -47,7 +47,7 @@ Schema 1 has exact top-level keys `schema`, `profile_id`, and `templates`. `temp
 - `export`
 - `more_close`
 - `settings_close`
-- `ordinary_card`
+
 
 Each entry has exact keys `file`, `file_sha256`, `pixel_sha256`, `threshold_ppm`, and `roi_ppm`. `file` is one leaf filename beside the manifest. SHA-256 values bind encoded bytes and decoded BGR pixels independently. `threshold_ppm` is an integer from 1 through 1,000,000. `roi_ppm` is four integer normalized coordinates `[x0, y0, x1, y1]` on a one-million scale. The loader converts these to an immutable in-memory template; no raw path, digest, profile image, account label, or tag is emitted to console.
 

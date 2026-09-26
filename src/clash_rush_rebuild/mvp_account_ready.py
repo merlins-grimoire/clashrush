@@ -91,7 +91,6 @@ _REQUIRED_TEMPLATES = frozenset(
         "export",
         "more_close",
         "settings_close",
-        "ordinary_card",
     }
 )
 
@@ -594,8 +593,6 @@ class AccountReadinessController:
 
             with self._transient_frame(deadline) as frame:
                 self._require_state(frame, "home", deadline)
-                if self._match(frame, "ordinary_card", deadline) is None:
-                    raise AccountReadinessError("prepared ordinary-card profile unavailable")
                 result = AccountReady(self._run_nonce, self._profile.profile_id)
         except BaseException as exc:
             failure = exc
