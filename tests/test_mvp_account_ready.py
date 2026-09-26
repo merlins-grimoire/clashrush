@@ -21,7 +21,16 @@ from clash_rush_rebuild.mvp_account_ready import (
     PrivateBootstrapLocator,
     ReadinessVisualProfile,
     TemplateSpec,
+    _Match,
+    _decode_narrow_png,
     load_private_visual_profile,
+)
+from clash_rush_rebuild.win32_state_io import (
+    FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_OPEN_REPARSE_POINT,
+    GENERIC_READ,
+    OPEN_EXISTING,
 )
 
 
@@ -55,8 +64,10 @@ class Input:
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []
 
-    def click(self, binding, x, y, *, action):
+    def click(self, binding, x, y, *, action, pre_input_check=None):
         assert binding == BINDING
+        if pre_input_check is not None and pre_input_check() is not True:
+            return False
         self.events.append(("click", round(x, 3), round(y, 3), action))
         return True
 
@@ -76,7 +87,9 @@ class StartupInput:
         return True
 
 
-def _bootstrap_locator(tmp_path: Path, template: np.ndarray) -> PrivateBootstrapLocator:
+def _bootstrap_locator(
+    tmp_path: Path, template: np.ndarray, *, file_api=None
+) -> PrivateBootstrapLocator:
     root = tmp_path / "private" / "readiness" / "bootstrap"
     root.mkdir(parents=True)
     ok, encoded = cv2.imencode(".png", template)
@@ -95,7 +108,50 @@ def _bootstrap_locator(tmp_path: Path, template: np.ndarray) -> PrivateBootstrap
             }
         },
     }), encoding="utf-8")
-    return PrivateBootstrapLocator(tmp_path)
+    return (
+        PrivateBootstrapLocator(tmp_path)
+        if file_api is None
+        else PrivateBootstrapLocator(tmp_path, file_api=file_api)
+    )
+
+
+class BootstrapFileApi:
+    def __init__(self, root: Path) -> None:
+        self.files = {
+            str(path.resolve(strict=True)): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        self.handles: dict[int, str] = {}
+        self.offsets: dict[int, int] = {}
+        self.calls: list[tuple[object, ...]] = []
+        self.final_path_override: str | None = None
+        self.attributes = FILE_ATTRIBUTE_NORMAL
+
+    def create_file(self, path, access, share, creation, flags):
+        self.calls.append(("open", path, access, share, creation, flags))
+        handle = len(self.handles) + 1
+        self.handles[handle] = path
+        self.offsets[handle] = 0
+        return handle
+
+    def final_path(self, handle):
+        return self.final_path_override or self.handles[handle]
+
+    def handle_attributes(self, _handle):
+        return self.attributes
+
+    def read_file(self, handle, size):
+        path = self.handles[handle]
+        offset = self.offsets[handle]
+        chunk = self.files[path][offset : offset + size]
+        self.offsets[handle] += len(chunk)
+        self.calls.append(("read", handle, size))
+        return chunk
+
+    def close_handle(self, handle):
+        self.calls.append(("close", handle))
+        return True
 
 
 def test_private_bootstrap_locator_loads_and_locates_digest_sealed_launcher(
@@ -139,6 +195,57 @@ def test_private_bootstrap_locator_rejects_a_junction_escape(tmp_path: Path) -> 
 
     with pytest.raises(AccountReadinessError, match="path escaped"):
         PrivateBootstrapLocator(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "fault", ["final-path", "reparse", "manifest-oversize", "asset-oversize"]
+)
+def test_private_bootstrap_handle_bound_reads_reject_swaps_reparse_and_oversize(
+    tmp_path: Path, fault: str,
+) -> None:
+    _bootstrap_locator(tmp_path, _template(99))
+    root = tmp_path / "private" / "readiness" / "bootstrap"
+    api = BootstrapFileApi(root)
+    if fault == "final-path":
+        api.final_path_override = str(tmp_path / "outside" / "profile.json")
+    elif fault == "reparse":
+        api.attributes |= FILE_ATTRIBUTE_REPARSE_POINT
+    elif fault == "manifest-oversize":
+        manifest = str((root / "profile.json").resolve(strict=True))
+        api.files[manifest] = b"x" * 64_001
+    else:
+        asset = str((root / "launcher.png").resolve(strict=True))
+        api.files[asset] = b"x" * 4_000_001
+
+    with pytest.raises(AccountReadinessError):
+        PrivateBootstrapLocator(tmp_path, file_api=api)
+
+    assert [call[0] for call in api.calls].count("close") == len(api.handles)
+    assert all(
+        call[2:] == (GENERIC_READ, 0, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT)
+        for call in api.calls
+        if call[0] == "open"
+    )
+
+
+def test_bootstrap_rejects_oversized_png_header_before_decode(monkeypatch) -> None:
+    payload = (
+        b"\x89PNG\r\n\x1a\n"
+        + (13).to_bytes(4, "big")
+        + b"IHDR"
+        + (10_000).to_bytes(4, "big")
+        + (10_000).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+    monkeypatch.setattr(
+        cv2,
+        "imdecode",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("decode must not run")),
+    )
+
+    with pytest.raises(AccountReadinessError, match="narrow PNG"):
+        _decode_narrow_png(payload)
 
 
 def test_complete_real_matcher_trace_emits_account_ready_without_attack_requests() -> None:
@@ -294,7 +401,7 @@ def _launcher_controller(
     return subject, inputs
 
 
-def test_three_fresh_stable_launcher_frames_click_once_then_reach_home(
+def test_three_fresh_stable_launcher_frames_plus_last_check_click_once_then_reach_home(
     tmp_path: Path,
 ) -> None:
     profile, templates = _profile()
@@ -302,7 +409,7 @@ def test_three_fresh_stable_launcher_frames_click_once_then_reach_home(
     locator = _bootstrap_locator(tmp_path, launcher)
     launcher_frame = _frame((launcher, 120, 80))
     subject, inputs = _launcher_controller(
-        [launcher_frame.copy() for _ in range(3)]
+        [launcher_frame.copy() for _ in range(4)]
         + [_frame(), _frame((templates["home"], 4, 4))],
         locator,
     )
@@ -313,6 +420,67 @@ def test_three_fresh_stable_launcher_frames_click_once_then_reach_home(
     assert [event[-1] for event in inputs.events] == [
         InputAction.STARTUP_LAUNCH_GAME
     ]
+
+
+def test_launcher_stability_accepts_same_center_with_confidence_drift(
+    tmp_path: Path,
+) -> None:
+    profile, templates = _profile()
+    launcher = _template(96)
+    real_locator = _bootstrap_locator(tmp_path, launcher)
+    confidences = iter((0.991, 0.997, 0.993, 0.999))
+
+    def locator(frame: np.ndarray, name: str) -> _Match | None:
+        match = real_locator(frame, name)
+        return None if match is None else _Match(match.x, match.y, next(confidences))
+
+    launcher_frame = _frame((launcher, 120, 80))
+    subject, inputs = _launcher_controller(
+        [launcher_frame.copy() for _ in range(4)]
+        + [_frame(), _frame((templates["home"], 4, 4))],
+        locator,
+    )
+    subject._profile = profile
+
+    subject._reach_home(10.0)
+
+    assert [event[-1] for event in inputs.events] == [InputAction.STARTUP_LAUNCH_GAME]
+
+
+def test_launcher_stability_ignores_unrelated_frame_animation(tmp_path: Path) -> None:
+    profile, templates = _profile()
+    launcher = _template(97)
+    locator = _bootstrap_locator(tmp_path, launcher)
+    frames = []
+    for value in (0, 255, 32, 192):
+        frame = _frame((launcher, 120, 80))
+        frame[:, 320:] = value
+        frames.append(frame)
+    subject, inputs = _launcher_controller(
+        frames + [_frame(), _frame((templates["home"], 4, 4))], locator
+    )
+    subject._profile = profile
+
+    subject._reach_home(10.0)
+
+    assert [event[-1] for event in inputs.events] == [InputAction.STARTUP_LAUNCH_GAME]
+
+
+def test_launcher_movement_after_three_positive_captures_emits_no_click(
+    tmp_path: Path,
+) -> None:
+    launcher = _template(98)
+    locator = _bootstrap_locator(tmp_path, launcher)
+    stable = _frame((launcher, 120, 80))
+    moved = _frame((launcher, 130, 80))
+    subject, inputs = _launcher_controller(
+        [stable.copy(), stable.copy(), stable.copy(), moved], locator
+    )
+
+    with pytest.raises(AccountReadinessError, match="launcher input failed"):
+        subject._reach_home(10.0)
+
+    assert inputs.events == []
 
 
 @pytest.mark.parametrize("mode", ["unstable", "no-match"])
@@ -342,7 +510,7 @@ def test_repeated_launcher_after_one_click_fails_without_second_click(
     locator = _bootstrap_locator(tmp_path, launcher)
     launcher_frame = _frame((launcher, 120, 80))
     subject, inputs = _launcher_controller(
-        [launcher_frame.copy() for _ in range(4)], locator
+        [launcher_frame.copy() for _ in range(5)], locator
     )
 
     with pytest.raises(AccountReadinessError, match="launcher cap exhausted"):

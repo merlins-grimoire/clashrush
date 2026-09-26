@@ -218,6 +218,49 @@ def test_bound_input_deadline_expiry_immediately_before_down_emits_no_input(
     assert events == []
 
 
+@pytest.mark.parametrize("outcome", [False, RuntimeError("synthetic pre-input failure")])
+def test_bound_input_pre_input_check_fails_closed_before_mouse_down(
+    monkeypatch: pytest.MonkeyPatch, outcome: object,
+) -> None:
+    events: list[object] = []
+
+    class User32:
+        def ClientToScreen(self, _hwnd, _point):
+            events.append("mapped")
+            return True
+
+        def SetCursorPos(self, _x, _y):
+            events.append("cursor")
+            return True
+
+        def mouse_event(self, flag, *_args):
+            events.append(flag)
+
+    monkeypatch.setattr(mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32())
+    monkeypatch.setattr(mvp_local_native, "_configure_input_signatures", lambda _user32: None)
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    def check() -> bool:
+        events.append("check")
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    assert subject.click(
+        BINDING,
+        0.5,
+        0.5,
+        action=InputAction.STARTUP_LAUNCH_GAME,
+        pre_input_check=check,
+    ) is False
+    assert events == ["mapped", "cursor", "check"]
+
+
 def _private_registry(tmp_path):
     project = tmp_path / "project"
     private = project / "private"
@@ -524,10 +567,17 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
     monkeypatch.setattr(mvp_local_native, "load_private_registry", lambda *_args: tuple(range(5)))
     monkeypatch.setattr(mvp_local_native, "_select_configured_slot", lambda *_args: 2)
     monkeypatch.setattr(mvp_local_native, "LifecycleSupervisor", lambda *_args, **_kwargs: supervisor)
-    monkeypatch.setattr(mvp_local_native, "load_private_visual_profile", lambda *_args: object())
+    visual_profile = object()
+    monkeypatch.setattr(
+        mvp_local_native,
+        "load_private_visual_profile",
+        lambda *_args: events.append("profile") or visual_profile,
+    )
     bootstrap_locator = object()
     monkeypatch.setattr(
-        mvp_local_native, "PrivateBootstrapLocator", lambda *_args: bootstrap_locator
+        mvp_local_native,
+        "PrivateBootstrapLocator",
+        lambda *_args: events.append("bootstrap") or bootstrap_locator,
     )
 
     readiness_input = object()
@@ -567,6 +617,11 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
             return AccountReady("1" * 32, "ordinary-card-v1")
 
     monkeypatch.setattr(mvp_local_native, "AccountReadinessController", Readiness)
+    monkeypatch.setattr(
+        mvp_local_native.time,
+        "monotonic",
+        lambda: events.append("deadline") or 1.0,
+    )
 
     result = mvp_local_native.run_native_mvp_account_ready(
         str(tmp_path), "synthetic-slots", "synthetic-transaction"
@@ -574,9 +629,12 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
 
     assert result == AccountReady("1" * 32, "ordinary-card-v1")
     assert events == [
+        "bootstrap",
+        "profile",
         "admit",
         "snapshot-close",
         "start",
+        "deadline",
         "input:ACCOUNT_READINESS",
         "startup:STARTUP_CONTINUE_ONLY",
         "readiness:constructed",
@@ -587,7 +645,7 @@ def test_native_visit_runs_separate_account_readiness_before_attack_capability(
     ]
 
 
-def test_native_readiness_exception_records_pre_input_failure_before_clean_retirement(
+def test_private_loader_failure_has_no_admission_start_or_input(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -666,9 +724,98 @@ def test_native_readiness_exception_records_pre_input_failure_before_clean_retir
             str(tmp_path), "synthetic-slots", "synthetic-transaction"
         )
 
+    assert events == ["release"]
+
+
+def test_bookkeeping_failure_preserves_readiness_error_and_owned_cleanup_order(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    original = RuntimeError("original readiness failure")
+    status = SimpleNamespace(
+        mode=ControlMode.RUNNING,
+        run_nonce="1" * 32,
+        configuration_revision=1,
+        control_revision=2,
+    )
+
+    def transition(*_args, **_kwargs):
+        events.append("bookkeeping")
+        raise RuntimeError("synthetic bookkeeping failure")
+
+    authority = SimpleNamespace(
+        status=lambda: status,
+        configuration=lambda: MvpConfiguration(
+            "synthetic-team", "synthetic-account", "slot-2", TAG_HASH
+        ),
+        admit=lambda **_kwargs: events.append("admit"),
+        transaction=lambda _ref: SimpleNamespace(phase=ActionPhase.PLANNED),
+        transition_action=transition,
+        record_retirement=lambda *_args, **_kwargs: events.append("retire"),
+    )
+    lease = SimpleNamespace(
+        abandoned=False,
+        require_usable=lambda: None,
+        release=lambda: events.append("release"),
+    )
+    supervisor = SimpleNamespace(
+        start=lambda _slot: events.append("start") or BINDING,
+        capture_owned=lambda _binding: (_ for _ in ()).throw(AssertionError),
+        stop=lambda *_args: events.append("stop"),
+    )
+    monkeypatch.setattr(mvp_local_native, "DurableSessionAuthority", lambda _path: authority)
+    monkeypatch.setattr(mvp_local_native, "NativeLifecycleApi", lambda: None)
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32Runtime",
+        lambda _api: SimpleNamespace(acquire_mutex=lambda: lease),
+    )
+    monkeypatch.setattr(
+        mvp_local_native,
+        "Win32LifecycleHost",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            complete_player_snapshot=lambda: SimpleNamespace(
+                identities=(), close=lambda: None
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_state_store", lambda _project: SimpleNamespace(load=lambda: Ready(2))
+    )
+    monkeypatch.setattr(mvp_local_native, "_candidate_tree", lambda _project: "a" * 40)
+    monkeypatch.setattr(mvp_local_native, "load_private_registry", lambda *_args: tuple(range(5)))
+    monkeypatch.setattr(mvp_local_native, "_select_configured_slot", lambda *_args: 2)
+    monkeypatch.setattr(mvp_local_native, "PrivateBootstrapLocator", lambda *_args: object())
+    monkeypatch.setattr(mvp_local_native, "load_private_visual_profile", lambda *_args: object())
+    monkeypatch.setattr(mvp_local_native, "LifecycleSupervisor", lambda *_args, **_kwargs: supervisor)
+    monkeypatch.setattr(mvp_local_native, "Win32BoundInput", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mvp_local_native, "Win32StartupContinueInput", lambda *_args, **_kwargs: object()
+    )
+
+    class Readiness:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, *, deadline):
+            assert type(deadline) is float
+            events.append("readiness")
+            raise original
+
+    monkeypatch.setattr(mvp_local_native, "AccountReadinessController", Readiness)
+
+    with pytest.raises(RuntimeError) as caught:
+        mvp_local_native.run_native_mvp_account_ready(
+            str(tmp_path), "synthetic-slots", "synthetic-transaction"
+        )
+
+    assert caught.value is original
+    assert caught.value.__notes__ == ["pre-input failure bookkeeping was unavailable"]
     assert events == [
         "admit",
-        "transition:PLANNED:FAILED:PRE_INPUT_FAILURE",
+        "start",
+        "readiness",
+        "bookkeeping",
         "stop",
         "release",
         "retire",

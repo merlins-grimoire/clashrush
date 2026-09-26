@@ -295,6 +295,7 @@ class Win32BoundInput:
         y: float,
         *,
         action: InputAction,
+        pre_input_check: Callable[[], bool] | None = None,
     ) -> bool:
         self._require_binding(binding)
         if (
@@ -302,6 +303,7 @@ class Win32BoundInput:
             or type(y) not in (int, float)
             or not 0.0 <= x <= 1.0
             or not 0.0 <= y <= 1.0
+            or (pre_input_check is not None and not callable(pre_input_check))
             or not self._foreground()
         ):
             return False
@@ -314,6 +316,12 @@ class Win32BoundInput:
             return False
         if not self._authorized(action) or not self._user32.SetCursorPos(point.x, point.y):
             return False
+        if pre_input_check is not None:
+            try:
+                if pre_input_check() is not True:
+                    return False
+            except BaseException:
+                return False
         if not self._authorized(action) or not self._deadline_open():
             return False
         try:
@@ -704,6 +712,10 @@ def run_native_mvp_visit(
         slot = _select_configured_slot(
             slots, lifecycle, configured.instance_ref
         )
+        bootstrap_locator = PrivateBootstrapLocator(project)
+        visual_profile = load_private_visual_profile(
+            project, project / "private" / "readiness" / "profile.json"
+        )
         authority.admit(
             run_nonce=status.run_nonce,
             transaction_ref=transaction_ref,
@@ -759,7 +771,6 @@ def run_native_mvp_visit(
             )
 
         readiness_deadline = time.monotonic() + 120.0
-        bootstrap_locator = PrivateBootstrapLocator(project)
         input_authorization = InputAuthorization.account_readiness(enabled)
         input_port = Win32BoundInput(
             binding,
@@ -793,9 +804,7 @@ def run_native_mvp_visit(
             binding=binding,
             run_nonce=status.run_nonce,
             capture=capture_bgr,
-            profile=load_private_visual_profile(
-                project, project / "private" / "readiness" / "profile.json"
-            ),
+            profile=visual_profile,
             startup_input=startup_input,
             export_input=input_port,
             find_continue=lambda frame: find_continue(

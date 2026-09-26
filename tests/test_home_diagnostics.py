@@ -235,6 +235,7 @@ def test_native_initial_home_diagnostic_precedes_input_and_preserves_owned_clean
     monkeypatch.setattr(native, "load_private_registry", lambda *_args: tuple(range(5)))
     monkeypatch.setattr(native, "_select_configured_slot", lambda *_args: 2)
     monkeypatch.setattr(native, "PrivateBootstrapLocator", lambda *_args: object())
+    monkeypatch.setattr(native, "load_private_visual_profile", lambda *_args: object())
     def capture(_binding):
         events.append("capture")
         return frame(count=3200 if positive else 960)

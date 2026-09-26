@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +25,15 @@ import numpy as np
 from .input_authorization import InputAction
 from .lifecycle import PlayerBinding
 from .mvp_local_world_export import ExportCaptureError, summarize_world_export
+from .win32_state_io import (
+    FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_OPEN_REPARSE_POINT,
+    GENERIC_READ,
+    OPEN_EXISTING,
+    NativeWin32StateApi,
+    StateFileApi,
+    Win32StateIoError,
+)
 
 
 class AccountReadinessError(RuntimeError):
@@ -139,10 +149,73 @@ def _inside(path: Path, root: Path) -> bool:
 _BOOTSTRAP_NAMES = frozenset({"launcher"})
 
 
+def _read_handle_bound(
+    path: Path, limit: int, api: StateFileApi,
+) -> bytes:
+    handle = api.create_file(
+        str(path), GENERIC_READ, 0, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+    )
+    if handle is None or handle == 0:
+        raise Win32StateIoError("exclusive private-file open failed")
+    failure: BaseException | None = None
+    try:
+        if api.handle_attributes(handle) & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise Win32StateIoError("opened private path is a reparse point")
+        actual = os.path.normcase(os.path.abspath(api.final_path(handle)))
+        expected = os.path.normcase(os.path.abspath(path))
+        if actual != expected:
+            raise Win32StateIoError("opened private path changed")
+        result = bytearray()
+        while True:
+            remaining = limit + 1 - len(result)
+            chunk = api.read_file(handle, remaining)
+            if type(chunk) is not bytes or len(chunk) > remaining:
+                raise Win32StateIoError("private-file read returned invalid data")
+            result.extend(chunk)
+            if len(result) > limit:
+                raise Win32StateIoError("private file exceeds read bound")
+            if not chunk:
+                return bytes(result)
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        if api.close_handle(handle) is not True and failure is None:
+            raise Win32StateIoError("private-file handle close failed")
+
+
+def _decode_narrow_png(payload: bytes) -> np.ndarray:
+    if (
+        type(payload) is not bytes
+        or len(payload) < 33
+        or payload[:8] != b"\x89PNG\r\n\x1a\n"
+        or int.from_bytes(payload[8:12], "big") != 13
+        or payload[12:16] != b"IHDR"
+    ):
+        raise AccountReadinessError("bootstrap asset is not a narrow PNG")
+    width = int.from_bytes(payload[16:20], "big")
+    height = int.from_bytes(payload[20:24], "big")
+    if not (1 <= width <= 320 and 1 <= height <= 320):
+        raise AccountReadinessError("bootstrap asset is not a narrow PNG")
+    pixels = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
+    if (
+        type(pixels) is not np.ndarray
+        or pixels.dtype != np.uint8
+        or pixels.ndim != 3
+        or pixels.shape[:2] != (height, width)
+        or pixels.shape[2] != 3
+    ):
+        raise AccountReadinessError("bootstrap asset is not a narrow PNG")
+    return pixels
+
+
 class PrivateBootstrapLocator:
     """Strict digest-sealed locator adapted from the reverted S003 calibrator."""
 
-    def __init__(self, project_root: str | Path) -> None:
+    def __init__(
+        self, project_root: str | Path, *, file_api: StateFileApi | None = None
+    ) -> None:
+        api = NativeWin32StateApi() if file_api is None else file_api
         try:
             project = Path(project_root).resolve(strict=True)
             private = (project / "private").resolve(strict=True)
@@ -159,9 +232,7 @@ class PrivateBootstrapLocator:
                 raise AccountReadinessError("bootstrap path escaped")
             if not manifest.is_file():
                 raise OSError
-            raw_bytes = manifest.read_bytes()
-            if len(raw_bytes) > 64_000:
-                raise OSError
+            raw_bytes = _read_handle_bound(manifest, 64_000, api)
             raw = json.loads(raw_bytes.decode("utf-8"), object_pairs_hook=_unique_object)
         except AccountReadinessError:
             raise
@@ -201,22 +272,17 @@ class PrivateBootstrapLocator:
                 asset = (root / entry["file"]).resolve(strict=True)
                 if not _inside(asset, root) or asset.parent != root or asset.is_symlink():
                     raise AccountReadinessError("bootstrap path escaped")
-                payload = asset.read_bytes()
+                payload = _read_handle_bound(asset, 4_000_000, api)
             except AccountReadinessError:
                 raise
             except (OSError, RuntimeError) as exc:
                 raise AccountReadinessError(
                     f"{name} bootstrap evidence unavailable"
                 ) from exc
-            pixels = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
-            if (
-                len(payload) > 4_000_000
-                or hashlib.sha256(payload).hexdigest() != entry["file_sha256"]
-                or type(pixels) is not np.ndarray
-                or pixels.size == 0
-                or max(pixels.shape[:2]) > 320
-                or hashlib.sha256(pixels.tobytes()).hexdigest() != entry["pixel_sha256"]
-            ):
+            if hashlib.sha256(payload).hexdigest() != entry["file_sha256"]:
+                raise AccountReadinessError(f"{name} bootstrap evidence unavailable")
+            pixels = _decode_narrow_png(payload)
+            if hashlib.sha256(pixels.tobytes()).hexdigest() != entry["pixel_sha256"]:
                 raise AccountReadinessError(f"{name} bootstrap evidence unavailable")
             pixels.flags.writeable = False
             loaded[name] = (
@@ -360,6 +426,7 @@ class ExportInputPort(Protocol):
         y: float,
         *,
         action: InputAction,
+        pre_input_check: Callable[[], bool] | None = None,
     ) -> bool: ...
 
     def drag(
@@ -587,14 +654,31 @@ class AccountReadinessController:
             raise AccountReadinessError("readiness input failed")
         self._settle(0.15, deadline)
 
+    def _same_launcher_center(self, first: _Match, second: _Match) -> bool:
+        return bool(
+            type(first) is _Match
+            and type(second) is _Match
+            and abs((first.x - second.x) * (self._binding.width - 1)) <= 2.0
+            and abs((first.y - second.y) * (self._binding.height - 1)) <= 2.0
+        )
+
     def _launch_game(self, match: _Match, deadline: float) -> None:
         self._enabled(deadline)
+
+        def launcher_still_present() -> bool:
+            if self._locate_bootstrap is None:
+                return False
+            with self._transient_frame(deadline) as fresh:
+                located = self._locate_bootstrap(fresh, "launcher")
+                return self._same_launcher_center(match, located)
+
         try:
             sent = self._export_input.click(
                 self._binding,
                 match.x,
                 match.y,
                 action=InputAction.STARTUP_LAUNCH_GAME,
+                pre_input_check=launcher_still_present,
             )
         except BaseException as exc:
             raise AccountReadinessError("startup launcher input unavailable") from exc
@@ -606,33 +690,20 @@ class AccountReadinessController:
     ) -> _Match:
         if self._locate_bootstrap is None:
             raise AccountReadinessError("launcher bootstrap evidence unavailable")
-        previous = frame.copy()
-        try:
-            for _ in range(2):
-                self._settle(0.05, deadline)
-                with self._transient_frame(deadline) as fresh:
-                    try:
-                        located = self._locate_bootstrap(fresh, "launcher")
-                    except AccountReadinessError:
-                        raise
-                    except BaseException as exc:
-                        raise AccountReadinessError(
-                            "launcher bootstrap evidence unavailable"
-                        ) from exc
-                    if (
-                        type(located) is not _Match
-                        or located != target
-                        or fresh.shape != previous.shape
-                        or float(
-                            np.abs(fresh.astype(np.int16) - previous.astype(np.int16)).mean()
-                        ) > 0.35
-                    ):
-                        raise AccountReadinessError("launcher stability unavailable")
-                    previous.fill(0)
-                    previous = fresh.copy()
-            return target
-        finally:
-            previous.fill(0)
+        for _ in range(2):
+            self._settle(0.05, deadline)
+            with self._transient_frame(deadline) as fresh:
+                try:
+                    located = self._locate_bootstrap(fresh, "launcher")
+                except AccountReadinessError:
+                    raise
+                except BaseException as exc:
+                    raise AccountReadinessError(
+                        "launcher bootstrap evidence unavailable"
+                    ) from exc
+                if not self._same_launcher_center(target, located):
+                    raise AccountReadinessError("launcher stability unavailable")
+        return target
 
     def _clear_clipboard(self) -> None:
         try:
