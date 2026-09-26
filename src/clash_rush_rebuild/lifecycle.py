@@ -349,6 +349,11 @@ class LifecycleSupervisor:
                     self._readiness_wait(500)
             if not readiness_complete:
                 raise LifecycleError("exact window and capture did not become ready")
+            if direct_clash:
+                # ClashAutomation waits after direct launch before inspecting
+                # the game. The owned render can transiently turn near-black
+                # while Clash replaces the launcher.
+                self._readiness_wait(20_000)
         except BaseException as exc:
             self._rollback_start(
                 active=active,

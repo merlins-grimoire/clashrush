@@ -314,6 +314,7 @@ def test_start_clash_keeps_active_job_assignment_and_resume_order() -> None:
         FakeStateStore(Ready(0), events),
         AcquiredMutexLease("Global\\ClashRushRebuildLifecycle-v1"),
         nonce_factory=lambda: "0123456789abcdef0123456789abcdef",
+        readiness_wait=lambda milliseconds: events.append(f"wait:{milliseconds}"),
     )
 
     supervisor.start_clash(
@@ -327,6 +328,7 @@ def test_start_clash_keeps_active_job_assignment_and_resume_order() -> None:
         "job:assign"
     )
     assert events.index("job:assign") < events.index("thread:resume")
+    assert events[-1] == "wait:20000"
 
 
 def test_owned_capture_revalidates_exact_binding_and_job_before_pixels() -> None:
