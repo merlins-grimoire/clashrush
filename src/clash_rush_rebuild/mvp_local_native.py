@@ -910,6 +910,24 @@ def _startup_failure_reason(
     return "PRE_INPUT_FAILURE"
 
 
+def _run_optional_account_readiness(
+    *,
+    readiness_only: bool,
+    controller_factory: Callable[[], object],
+    deadline: float,
+) -> AccountReady | None:
+    """Keep export navigation out of attack visits after exact slot/Home proof."""
+    if type(readiness_only) is not bool or not callable(controller_factory):
+        raise RuntimeSafetyError("readiness mode is malformed")
+    if not readiness_only:
+        return None
+    controller = controller_factory()
+    result = controller.run(deadline=deadline)
+    if type(result) is not AccountReady:
+        raise RuntimeSafetyError("account readiness result is malformed")
+    return result
+
+
 def run_native_mvp_visit(
     project_root: str,
     slots_path: str,
@@ -1030,31 +1048,36 @@ def run_native_mvp_visit(
             wait=time.sleep,
         )
 
-        input_authorization = InputAuthorization.account_readiness(enabled)
-        input_port = Win32BoundInput(
-            binding,
-            supervisor.capture_owned,
-            input_authorization,
+        def make_readiness_controller() -> AccountReadinessController:
+            return AccountReadinessController(
+                binding=binding,
+                run_nonce=status.run_nonce,
+                capture=capture_bgr,
+                profile=visual_profile,
+                export_input=Win32BoundInput(
+                    binding,
+                    supervisor.capture_owned,
+                    InputAuthorization.account_readiness(enabled),
+                    deadline=readiness_deadline,
+                    monotonic=time.monotonic,
+                ),
+                live_gate=enabled,
+                clipboard_read=read_windows_clipboard,
+                clipboard_clear=clear_windows_clipboard,
+                expected_tag_sha256=configured.player_tag_sha256,
+                wall_clock=lambda: datetime.now(UTC),
+                monotonic=time.monotonic,
+                wait=time.sleep,
+            )
+
+        readiness = _run_optional_account_readiness(
+            readiness_only=readiness_only,
+            controller_factory=make_readiness_controller,
             deadline=readiness_deadline,
-            monotonic=time.monotonic,
         )
-        readiness = AccountReadinessController(
-            binding=binding,
-            run_nonce=status.run_nonce,
-            capture=capture_bgr,
-            profile=visual_profile,
-            export_input=input_port,
-            live_gate=enabled,
-            clipboard_read=read_windows_clipboard,
-            clipboard_clear=clear_windows_clipboard,
-            expected_tag_sha256=configured.player_tag_sha256,
-            wall_clock=lambda: datetime.now(UTC),
-            monotonic=time.monotonic,
-            wait=time.sleep,
-        ).run(deadline=readiness_deadline)
-        if readiness.run_nonce != status.run_nonce:
-            raise RuntimeSafetyError("ACCOUNT_MISMATCH")
-        if readiness_only:
+        if readiness is not None:
+            if readiness.run_nonce != status.run_nonce:
+                raise RuntimeSafetyError("ACCOUNT_MISMATCH")
             return readiness
         recognizer = BgraGameplayRecognizer(
             binding, supervisor.capture_owned, account_verified=True

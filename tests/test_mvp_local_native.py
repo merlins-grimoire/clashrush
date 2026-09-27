@@ -726,6 +726,33 @@ def test_startup_gesture_phase_selects_truthful_failure_reason(
     ) == expected_reason
 
 
+def test_attack_path_skips_export_readiness_after_exact_slot_home_proof() -> None:
+    events: list[str] = []
+
+    class Controller:
+        def run(self, *, deadline: float) -> AccountReady:
+            events.append(f"run:{deadline}")
+            return AccountReady("1" * 32, "ordinary-card-v1")
+
+    def factory() -> Controller:
+        events.append("construct")
+        return Controller()
+
+    assert mvp_local_native._run_optional_account_readiness(
+        readiness_only=False,
+        controller_factory=factory,
+        deadline=121.0,
+    ) is None
+    assert events == []
+
+    assert mvp_local_native._run_optional_account_readiness(
+        readiness_only=True,
+        controller_factory=factory,
+        deadline=121.0,
+    ) == AccountReady("1" * 32, "ordinary-card-v1")
+    assert events == ["construct", "run:121.0"]
+
+
 @pytest.mark.parametrize("readiness_fails", [False, True])
 def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
     tmp_path, monkeypatch: pytest.MonkeyPatch, readiness_fails: bool,
