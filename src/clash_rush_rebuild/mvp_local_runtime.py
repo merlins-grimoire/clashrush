@@ -698,7 +698,12 @@ class BoundedAttackExecutor:
             return False, "INPUT_UNAVAILABLE"
         return (True, "INPUT_SENT") if sent is True else (False, "INPUT_FAILED")
 
-    def _deploy_slot(self, slot: tuple[float, float]) -> tuple[bool, str]:
+    def _deploy_slot(
+        self,
+        slot: tuple[float, float],
+        *,
+        window_deadline: float | None = None,
+    ) -> tuple[bool, str]:
         sent, reason = self._click(slot, InputAction.TROOP_DEPLOYMENT)
         if not sent:
             return False, reason if reason == "KILL_SWITCH" else "DEPLOY_SELECT_FAILED"
@@ -716,10 +721,27 @@ class BoundedAttackExecutor:
             if self._slot_is_grey is None:
                 self._sleep(0.5)
             else:
+                hold_deadline = None
+                if self._monotonic is not None:
+                    hold_deadline = self._monotonic() + 25.0
+                    if window_deadline is not None:
+                        hold_deadline = min(hold_deadline, window_deadline)
                 for _ in range(50):
-                    self._sleep(0.5)
+                    if hold_deadline is None:
+                        delay = 0.5
+                    else:
+                        remaining = hold_deadline - self._monotonic()
+                        if remaining <= 0:
+                            break
+                        delay = min(0.5, remaining)
+                    self._sleep(delay)
                     if not self._authorized():
                         return False, "KILL_SWITCH"
+                    if (
+                        hold_deadline is not None
+                        and self._monotonic() >= hold_deadline
+                    ):
+                        break
                     try:
                         grey = self._slot_is_grey(slot)
                     except BaseException:
@@ -762,6 +784,8 @@ class BoundedAttackExecutor:
         while first_pass or self._monotonic() < deadline:
             for slot in DEPLOY_SLOTS:
                 if not first_pass:
+                    if self._monotonic() >= deadline:
+                        break
                     try:
                         grey = self._slot_is_grey(slot)
                     except BaseException:
@@ -770,7 +794,12 @@ class BoundedAttackExecutor:
                         return False, "DEPLOY_STATE_UNKNOWN"
                     if grey:
                         continue
-                deployed, reason = self._deploy_slot(slot)
+                    if self._monotonic() >= deadline:
+                        break
+                deployed, reason = self._deploy_slot(
+                    slot,
+                    window_deadline=None if first_pass else deadline,
+                )
                 if not deployed:
                     return False, reason
             first_pass = False

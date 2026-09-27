@@ -337,6 +337,36 @@ def test_executor_drains_every_slot_and_rechecks_for_spawned_units() -> None:
     assert selected.count(DEPLOY_SLOTS[1]) == 2
     assert sum(event[0] == "down" for event in input_port.events) == 6
     assert sum(event[0] == "up" for event in input_port.events) == 6
+    # The executor adds its existing 2.5-second post-Return-Home settle after
+    # the five-second deployment window.
+    assert elapsed[0] <= 7.6
+
+
+def test_executor_bounds_slot_hold_by_monotonic_time_not_poll_count() -> None:
+    input_port = FakeInput()
+    elapsed = [0.0]
+
+    def sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    def slow_not_grey(_slot: tuple[float, float]) -> bool:
+        elapsed[0] += 1.0
+        return False
+
+    executor = BoundedAttackExecutor(
+        BINDING,
+        input_port,
+        army_ready=lambda: True,
+        slot_is_grey=slow_not_grey,
+        return_home_visible=lambda: True,
+        kill_switch_enabled=lambda: True,
+        monotonic=lambda: elapsed[0],
+        sleep=sleep,
+    )
+
+    assert executor._deploy_slot(DEPLOY_SLOTS[0]) == (True, "DEPLOYED_SLOT")
+    assert elapsed[0] <= 26.0
+    assert [event[0] for event in input_port.events] == ["click", "down", "up"]
 
 
 def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postcondition(
