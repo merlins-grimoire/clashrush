@@ -36,4 +36,9 @@ def test_production_source_confines_attack_input_and_exposes_no_prohibited_trans
         text = path.read_text(encoding="utf-8").casefold()
         if any(token in text for token in native_input):
             carriers.append(path.name)
-    assert sorted(carriers) == ["mvp_local_native.py", "startup_debug_native.py"]
+    assert sorted(carriers) == [
+        "mvp_deployment_input.py",
+        "mvp_deployment_worker.py",
+        "mvp_local_native.py",
+        "startup_debug_native.py",
+    ]

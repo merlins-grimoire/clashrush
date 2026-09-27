@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "clash-rush-rebuild"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["numpy>=2.2", "opencv-python>=4.12", "Pillow>=11"]
+dependencies = ["numpy>=2.2", "opencv-python>=4.12", "Pillow>=11", "scipy==1.17.0"]
 license-files = ["THIRD_PARTY_NOTICES.md"]
 
 [project.scripts]

@@ -181,3 +181,17 @@ Job, retained-handle retirement proof, and bounded pipe draining.
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
+
+
+## Deployment repair candidate
+
+`mvp_deployment.py`, `mvp_deployment_vision.py`, and the private-profile
+composition adapt the CoC_Bot card discovery/traversal/type-dispatch sequence,
+ClashAutomation edge-density/ray candidate geometry, and BasePilot's restricted
+battle-exit sequence at the exact pins and MIT notices above. Android transport,
+rewards, random/fallback placements, forced app restart, and screenshot persistence
+are excluded. Local typed proof, monotonic scheduling, input ownership, and
+receipt logic are new. See `docs/deployment-repair-contract.md`. No donor font or
+new game artwork is distributed by this code patch. The optional offline importer
+locates sealed reference candidates; it neither grants artwork rights nor admits
+a live detector.

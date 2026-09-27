@@ -106,6 +106,9 @@ class DurableSessionAudit:
     def outcome(self, transaction_ref: str, confirmed: bool) -> None:
         if transaction_ref != self._transaction_ref or type(confirmed) is not bool:
             raise SessionAuthorityError("transaction outcome binding mismatch")
+        if confirmed:
+            from .mvp_deployment_receipt import require_complete
+            require_complete(self._authority, transaction_ref)
         current = self._authority.transaction(transaction_ref)
         if current.phase is ActionPhase.UNCERTAIN and confirmed is False:
             return
@@ -401,7 +404,7 @@ class Win32BoundInput:
             return False
         self._require_binding(binding)
         for key in keys:
-            if not self._authorized(action):
+            if not self._authorized(action) or not self._deadline_open():
                 return False
             self._user32.keybd_event(key, 0, 0, None)
             self._held_keys.add(key)
@@ -939,6 +942,14 @@ def run_native_mvp_visit(
     if type(readiness_only) is not bool:
         raise RuntimeSafetyError("readiness mode is malformed")
     project = Path(project_root).resolve(strict=True)
+    deployment_profile = None
+    deployment_lease = None
+    if not readiness_only:
+        from .mvp_deployment_worker import require_worker_context
+        from .mvp_deployment_profile import load_profile
+        deployment_lease = require_worker_context()
+        deployment_profile = load_profile(project, candidate_tree=_candidate_tree(project))
+
     authority = DurableSessionAuthority(project / "var" / "mvp-session.sqlite3")
     native = NativeLifecycleApi()
     runtime = Win32Runtime(native)
@@ -957,6 +968,9 @@ def run_native_mvp_visit(
         configured = authority.configuration()
         if status.mode is not ControlMode.RUNNING or status.run_nonce is None:
             raise RuntimeSafetyError("persistent control mode is not RUNNING")
+        if not readiness_only:
+            from .mvp_deployment_receipt import require_profile
+            require_profile(authority, status.run_nonce, deployment_profile.digest)
         store = _state_store(project)
         lifecycle = store.load()
         if type(lifecycle) is not Ready:
@@ -1027,6 +1041,8 @@ def run_native_mvp_visit(
             )
 
         readiness_deadline = time.monotonic() + 120.0
+        if deployment_lease is not None:
+            readiness_deadline = min(readiness_deadline, deployment_lease.deadline - 30.0)
         startup_font = project / "private" / "assets" / "CCBackBeat.ttf"
         startup_input_phase = await_account_home(
             capture=capture_bgr,
@@ -1086,23 +1102,17 @@ def run_native_mvp_visit(
             binding,
             supervisor.capture_owned,
             InputAuthorization.monitored_attack(enabled),
+            deadline=deployment_lease.deadline - 30.0,
+            monotonic=time.monotonic,
         )
-        executor = DurableInputPhaseExecutor(
-            authority,
-            transaction_ref,
-            BoundedAttackExecutor(
-                binding,
-                input_port,
-                army_ready=recognizer.army_ready,
-                begin_scout_transition=recognizer.capture_scout_source,
-                scout_ready=recognizer.scout_ready,
-                slot_is_grey=recognizer.slot_is_grey,
-                return_home_visible=recognizer.return_home_visible,
-                kill_switch_enabled=enabled,
-                monotonic=time.monotonic,
-                sleep=time.sleep,
-            ),
+        from .mvp_deployment_integration import build_native_executor
+        deployment_executor = build_native_executor(
+            binding=binding, bound_input=input_port, capture_bgr=capture_bgr,
+            home_verified=lambda frame: manual_home_frame_verified(frame, visual_profile),
+            enabled=enabled, authority=authority, transaction_ref=transaction_ref,
+            profile=deployment_profile, lease=deployment_lease,
         )
+        executor = DurableInputPhaseExecutor(authority, transaction_ref, deployment_executor)
         ports = ConcreteAttackVisitPorts(
             binding=binding,
             account_ref=configured.account_ref,
@@ -1110,13 +1120,7 @@ def run_native_mvp_visit(
             executor=executor,
             kill_switch_enabled=enabled,
             audit=DurableSessionAudit(authority, transaction_ref),
-            cleanup=lambda: input_port.key_up(
-                binding,
-                0x52,
-                0x4A,
-                0x56,
-                action=InputAction.CLEANUP_RELEASE,
-            ),
+            cleanup=deployment_executor.cleanup,
         )
         bot = LocalMvpBot(ports)
         bot.setup(configured)

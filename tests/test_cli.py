@@ -9,6 +9,7 @@ import pytest
 
 import clash_rush_rebuild.cli as cli_module
 import clash_rush_rebuild.cycle as cycle_module
+import clash_rush_rebuild.mvp_deployment_profile as deployment_profile_module
 from clash_rush_rebuild.cli import build_native_state_store, main
 from clash_rush_rebuild.diagnostic_child_job import (
     DiagnosticChildOutcome,
@@ -408,6 +409,13 @@ def test_local_mvp_controls_persist_across_cli_processes_and_redact_output(
     tmp_path: Path, capsys, monkeypatch,
 ) -> None:
     monkeypatch.setattr(cli_module, "_candidate_tree", lambda _project: "b" * 40)
+    monkeypatch.setattr(
+        deployment_profile_module,
+        "load_profile",
+        lambda _project, *, candidate_tree: type(
+            "Profile", (), {"digest": "c" * 64}
+        )(),
+    )
     monkeypatch.setattr(
         cli_module,
         "build_native_state_store",

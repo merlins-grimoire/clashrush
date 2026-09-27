@@ -249,215 +249,22 @@ def test_control_store_rejects_booleans_and_malformed_types(
         store.load()
 
 
-def test_executor_rechecks_kill_switch_immediately_before_every_input() -> None:
-    input_port = FakeInput()
-    checks = iter([True, True, False])
-    executor = BoundedAttackExecutor(
-        BINDING,
-        input_port,
-        army_ready=lambda: True,
-        return_home_visible=lambda: True,
-        kill_switch_enabled=lambda: next(checks),
-        sleep=lambda _seconds: None,
-    )
-
-    assert executor.run() == (False, "KILL_SWITCH")
-    assert input_port.events == [
-        ("click", *ATTACK_BTN, InputAction.ATTACK_NAVIGATION),
-        ("click", *FIND_MATCH_BTN, InputAction.ATTACK_NAVIGATION),
-    ]
 
 
-def test_executor_adapts_bounded_attack_deploy_and_return_home_sequence() -> None:
-    input_port = FakeInput()
-    executor = BoundedAttackExecutor(
-        BINDING,
-        input_port,
-        army_ready=lambda: True,
-        return_home_visible=lambda: True,
-        kill_switch_enabled=lambda: True,
-        sleep=lambda _seconds: None,
-    )
-
-    assert executor.run() == (True, "ATTACK_COMPLETED")
-    assert input_port.events[:3] == [
-        ("click", *ATTACK_BTN, InputAction.ATTACK_NAVIGATION),
-        ("click", *FIND_MATCH_BTN, InputAction.ATTACK_NAVIGATION),
-        ("click", *ARMY_ATTACK_BTN, InputAction.ATTACK_NAVIGATION),
-    ]
-    selected = [event[1:3] for event in input_port.events if event[0] == "click"]
-    assert tuple(selected[3:-1]) == DEPLOY_SLOTS
-    assert input_port.events[-1] == (
-        "click", *RETURN_HOME_BTN, InputAction.RETURN_HOME
-    )
-    assert sum(
-        event == ("down", DEPLOY_KEYS, InputAction.TROOP_DEPLOYMENT)
-        for event in input_port.events
-    ) == 5
-    assert sum(
-        event == ("up", DEPLOY_KEYS, InputAction.CLEANUP_RELEASE)
-        for event in input_port.events
-    ) == 5
 
 
-def test_executor_drains_every_slot_and_rechecks_for_spawned_units() -> None:
-    input_port = FakeInput()
-    elapsed = [0.0]
-    checks = {slot: 0 for slot in DEPLOY_SLOTS}
-
-    def sleep(seconds: float) -> None:
-        elapsed[0] += seconds
-
-    def slot_is_grey(slot: tuple[float, float]) -> bool:
-        checks[slot] += 1
-        if slot == DEPLOY_SLOTS[1]:
-            return checks[slot] not in {2}
-        return True
-
-    executor = BoundedAttackExecutor(
-        BINDING,
-        input_port,
-        army_ready=lambda: True,
-        scout_ready=lambda: True,
-        slot_is_grey=slot_is_grey,
-        return_home_visible=lambda: True,
-        kill_switch_enabled=lambda: True,
-        monotonic=lambda: elapsed[0],
-        deployment_window_seconds=5.0,
-        sleep=sleep,
-    )
-
-    assert executor.run() == (True, "ATTACK_COMPLETED")
-    selected = [
-        event[1:3]
-        for event in input_port.events
-        if event[0] == "click" and event[3] is InputAction.TROOP_DEPLOYMENT
-    ]
-    assert tuple(selected[:5]) == DEPLOY_SLOTS
-    assert selected.count(DEPLOY_SLOTS[1]) == 2
-    assert sum(event[0] == "down" for event in input_port.events) == 6
-    assert sum(event[0] == "up" for event in input_port.events) == 6
-    # The executor adds its existing 2.5-second post-Return-Home settle after
-    # the five-second deployment window.
-    assert elapsed[0] <= 7.6
 
 
-def test_executor_bounds_slot_hold_by_monotonic_time_not_poll_count() -> None:
-    input_port = FakeInput()
-    elapsed = [0.0]
-
-    def sleep(seconds: float) -> None:
-        elapsed[0] += seconds
-
-    def slow_not_grey(_slot: tuple[float, float]) -> bool:
-        elapsed[0] += 1.0
-        return False
-
-    executor = BoundedAttackExecutor(
-        BINDING,
-        input_port,
-        army_ready=lambda: True,
-        slot_is_grey=slow_not_grey,
-        return_home_visible=lambda: True,
-        kill_switch_enabled=lambda: True,
-        monotonic=lambda: elapsed[0],
-        sleep=sleep,
-    )
-
-    assert executor._deploy_slot(DEPLOY_SLOTS[0]) == (True, "DEPLOYED_SLOT")
-    assert elapsed[0] <= 26.0
-    assert [event[0] for event in input_port.events] == ["click", "down", "up"]
 
 
-def test_executor_caps_inter_pass_sleep_to_deployment_deadline() -> None:
-    input_port = FakeInput()
-    elapsed = [0.0]
-
-    def sleep(seconds: float) -> None:
-        elapsed[0] += seconds
-
-    executor = BoundedAttackExecutor(
-        BINDING,
-        input_port,
-        army_ready=lambda: True,
-        slot_is_grey=lambda _slot: True,
-        return_home_visible=lambda: True,
-        kill_switch_enabled=lambda: True,
-        monotonic=lambda: elapsed[0],
-        deployment_window_seconds=3.0,
-        sleep=sleep,
-    )
-
-    assert executor._deploy_all_slots() == (True, "DEPLOYED_ALL_SLOTS")
-    assert elapsed[0] == 3.0
 
 
-def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postcondition(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
-) -> None:
-    store = LocalControlStore(tmp_path / "control.json")
-    store.setup(CONFIG)
-    store.transition(LocalBotMode.RUNNING)
-    capture = FakeCapture(
-        [
-            Recognition(home=True, army_ready=True, account_matches=True),
-            Recognition(home=True, army_ready=None, account_matches=True),
-        ]
-    )
-    input_port = FakeInput()
-    audit = FakeAudit()
-    cleanup_events: list[str] = []
-    ports = ConcreteAttackVisitPorts(
-        binding=BINDING,
-        account_ref=ACCOUNT,
-        recognizer=capture,
-        executor=BoundedAttackExecutor(
-            BINDING,
-            input_port,
-            army_ready=lambda: True,
-            return_home_visible=lambda: True,
-            kill_switch_enabled=lambda: True,
-            sleep=lambda _seconds: None,
-        ),
-        kill_switch_enabled=lambda: True,
-        audit=audit,
-        cleanup=lambda: cleanup_events.append("cleanup"),
-    )
-    composition = LocalMvpComposition(store, ports)
 
-    result_holder: list[object] = []
 
-    def run(_root: str, _slots: str, transaction_ref: str):
-        result = composition.visit_once(transaction_ref)
-        result_holder.append(result)
-        return result
 
-    monkeypatch.setattr(cli_module, "run_native_mvp_visit", run)
 
-    status = cli_main(
-        [
-            "mvp-visit-one",
-            "--project-root", str(tmp_path),
-            "--slots", "synthetic-slots",
-            "--transaction-ref", "tx-synthetic-e2e",
-        ],
-    )
-    result = result_holder[0]
 
-    assert status == 0
-    assert (result.status, result.reason_code, result.confirmed) == (
-        "completed",
-        "RETURNED_HOME",
-        True,
-    )
-    assert capture.calls == 2
-    assert audit.events == [
-        ("intent", "tx-synthetic-e2e"),
-        ("outcome", "tx-synthetic-e2e", True),
-    ]
-    assert cleanup_events == ["cleanup"]
-    assert input_port.events
-    assert "account-synthetic-one" not in capsys.readouterr().out
+
 
 
 def test_non_running_persistent_mode_emits_no_capture_or_input(tmp_path: Path) -> None:
@@ -658,3 +465,15 @@ def test_scout_requires_fresh_material_transition_and_target_signature() -> None
     recognizer.capture_scout_source()
     assert recognizer.scout_ready() is False
     assert recognizer.scout_ready() is True
+
+
+def test_legacy_fixed_slot_executor_is_retired_without_input():
+    input_port = FakeInput()
+    executor = BoundedAttackExecutor(
+        BINDING, input_port, army_ready=lambda: True,
+        return_home_visible=lambda: True, kill_switch_enabled=lambda: True,
+        sleep=lambda _: None,
+    )
+    with pytest.raises(RuntimeSafetyError, match="LEGACY_DEPLOYMENT_RETIRED"):
+        executor.run()
+    assert input_port.events == []

@@ -172,7 +172,7 @@ class DurableSessionAuthority:
         manifest = connection.execute(
             "SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         ).fetchall()
-        if type(version) is not int or version not in (0, 1):
+        if type(version) is not int or version not in (0, 1, 2):
             raise SessionAuthorityError("session database version is unsupported")
         if version == 0:
             if manifest:
@@ -185,11 +185,16 @@ class DurableSessionAuthority:
             ("table", "runs", "runs"),
             ("table", "transactions", "transactions"),
         ]
+        if version == 2:
+            expected.insert(3, ("table", "deployment_receipts", "deployment_receipts"))
         actual = connection.execute(
             "SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         ).fetchall()
         if [tuple(row) for row in actual] != expected:
             raise SessionAuthorityError("session database schema is noncanonical")
+
+        from .mvp_deployment_receipt import validate_schema
+        validate_schema(connection, _SCHEMA)
 
     @staticmethod
     def _configuration(configuration: object) -> MvpConfiguration:
@@ -323,6 +328,7 @@ class DurableSessionAuthority:
         deadline: int,
         now: int,
         nonce: str | None = None,
+        deployment_sha256: str | None = None,
     ) -> SessionGrant:
         purpose, tree, ready_digest, deadline, _ = self._binding(
             purpose, candidate_tree, ready_bytes, deadline, now
@@ -331,6 +337,8 @@ class DurableSessionAuthority:
         if type(run_nonce) is not str or _HEX_32.fullmatch(run_nonce) is None:
             raise SessionAuthorityError("run nonce is malformed")
         connection = self._open()
+        from .mvp_deployment_receipt import upgrade_schema
+        upgrade_schema(connection, _SCHEMA)
         try:
             connection.execute("BEGIN IMMEDIATE")
             control = connection.execute("SELECT * FROM control WHERE singleton=1").fetchone()
@@ -351,6 +359,8 @@ class DurableSessionAuthority:
                 "INSERT INTO runs (run_nonce,purpose,candidate_tree,ready_sha256,configuration_revision,control_revision,deadline) VALUES (?,?,?,?,?,?,?)",
                 (run_nonce, purpose, tree, ready_digest, configuration["revision"], revision, deadline),
             )
+            from .mvp_deployment_receipt import bind_profile
+            bind_profile(connection, run_nonce, purpose, deployment_sha256)
             connection.execute(
                 "UPDATE control SET mode='RUNNING',revision=?,current_run_nonce=? WHERE singleton=1",
                 (revision, run_nonce),

@@ -522,13 +522,20 @@ def _start_mvp_session(
         raise RuntimeSafetyError("MVP run requires exact READY lifecycle state")
     store = _mvp_session_store(project)
     operation = store.resume if resume else store.run
+    tree = _candidate_tree(project)
+    deployment_options = {}
+    if purpose == "MVP_SINGLE_ACCOUNT_ATTACK":
+        from .mvp_deployment_profile import load_profile
+        profile = load_profile(project, candidate_tree=tree)
+        deployment_options["deployment_sha256"] = profile.digest
     now = int(time.time())
     return operation(
         purpose=purpose,
-        candidate_tree=_candidate_tree(project),
+        candidate_tree=tree,
         ready_bytes=encode_state(lifecycle),
         deadline=now + 300,
         now=now,
+        **deployment_options,
     )
 
 
@@ -560,7 +567,7 @@ def run_native_mvp_visit(
     project_root: str, slots_path: str, transaction_ref: str
 ) -> VisitResult:
     """Late-bind the native implementation so ordinary controls stay inert."""
-    from .mvp_local_native import run_native_mvp_visit as run
+    from .mvp_deployment_worker import run_supervised_attack as run
 
     return run(project_root, slots_path, transaction_ref)
 
@@ -984,12 +991,18 @@ def main(
             return 0
         if args.command == "mvp-status":
             state = _mvp_session_store(args.project_root).status()
+            from .mvp_deployment_receipt import autonomy_status
+            proof_store = _mvp_session_store(args.project_root)
+            try:
+                autonomy = autonomy_status(proof_store)
+            finally:
+                proof_store.close()
             receipt = "complete" if state.final_acknowledged else "pending"
             game = state.game_outcome or "PENDING"
             retirement = state.retirement_outcome or "PENDING"
             print(
                 f"local MVP mode={state.mode.value} configured=yes "
-                f"game={game} retirement={retirement} receipt={receipt}"
+                f"game={game} retirement={retirement} receipt={receipt} autonomy={autonomy}"
             )
             return 0
         if args.command == "mvp-visit-one":

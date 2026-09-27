@@ -31,6 +31,7 @@ def authority(tmp_path: Path) -> DurableSessionAuthority:
 
 def start(store: DurableSessionAuthority, *, nonce: str | None = None):
     return store.run(
+        deployment_sha256="c" * 64,
         purpose=PURPOSE,
         candidate_tree=TREE,
         ready_bytes=READY,
@@ -174,6 +175,7 @@ def test_pause_is_irreversible_for_nonce_and_resume_creates_new_identity(tmp_pat
         )
 
     resumed = store.resume(
+        deployment_sha256="c" * 64,
         purpose=PURPOSE,
         candidate_tree=TREE,
         ready_bytes=READY,
@@ -239,6 +241,7 @@ def test_exception_after_input_started_is_durably_uncertain(tmp_path: Path) -> N
     assert store.transaction("tx-one").phase is ActionPhase.UNCERTAIN
     with pytest.raises(SessionAuthorityError, match="unresolved"):
         store.run(
+            deployment_sha256="c" * 64,
             purpose=PURPOSE,
             candidate_tree=TREE,
             ready_bytes=READY,
@@ -347,6 +350,7 @@ def test_every_preterminal_crash_cut_reopens_truthfully_and_blocks_replay(
     reopened.command(ControlMode.STOPPED, command_id="stop-after-crash")
     with pytest.raises(SessionAuthorityError, match="unresolved"):
         reopened.run(
+            deployment_sha256="c" * 64,
             purpose=PURPOSE,
             candidate_tree=TREE,
             ready_bytes=READY,
@@ -441,6 +445,7 @@ def test_missing_retirement_outcome_blocks_new_run(tmp_path: Path) -> None:
     store.command(ControlMode.STOPPED, command_id="stop-one")
     with pytest.raises(SessionAuthorityError, match="unresolved"):
         store.run(
+            deployment_sha256="c" * 64,
             purpose=PURPOSE,
             candidate_tree=TREE,
             ready_bytes=READY,
