@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from clash_rush_rebuild import mvp_local_native
+from clash_rush_rebuild.capture import NearBlackCaptureError
 from clash_rush_rebuild.input_authorization import InputAction, InputAuthorization
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 from clash_rush_rebuild.mvp_account_startup import (
@@ -99,6 +100,33 @@ def test_normal_home_constructs_no_startup_input_and_zeros_frame() -> None:
         monotonic=lambda: 1.0,
         wait=lambda _seconds: None,
     ) is StartupInputPhase.NO_GESTURE
+    assert not np.any(frame)
+
+
+def test_near_black_transition_retries_without_input_until_home() -> None:
+    frame = _frame(2)
+    captures = 0
+    waits: list[float] = []
+
+    def capture() -> np.ndarray:
+        nonlocal captures
+        captures += 1
+        if captures == 1:
+            raise NearBlackCaptureError("near-black transient render frame")
+        return frame
+
+    assert await_account_home(
+        capture=capture,
+        home_verified=lambda candidate: bool(candidate[0, 0, 0] == 2),
+        popup_detector=lambda *_args: pytest.fail("popup detector must not run on Home"),
+        startup_input_factory=lambda: pytest.fail("startup input must not be constructed"),
+        font_path="private-font",
+        deadline=10.0,
+        monotonic=lambda: 1.0,
+        wait=waits.append,
+    ) is StartupInputPhase.NO_GESTURE
+    assert captures == 2
+    assert waits == [0.25]
     assert not np.any(frame)
 
 

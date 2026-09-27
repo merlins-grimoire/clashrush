@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from clash_rush_rebuild.capture import CaptureError, capture_health
+from clash_rush_rebuild.capture import (
+    CaptureError,
+    NearBlackCaptureError,
+    capture_health,
+)
 from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity
 
 
@@ -34,7 +38,7 @@ def test_capture_immediately_reduces_frame_to_nonidentifying_health() -> None:
 
 def test_capture_rejects_near_black_frame() -> None:
     port = FakeCapturePort(bytes([0, 0, 0, 0]) * 4)
-    with pytest.raises(CaptureError, match="near-black"):
+    with pytest.raises(NearBlackCaptureError, match="near-black"):
         capture_health(port, _binding())
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .capture import NearBlackCaptureError
 from .input_authorization import InputAction
 from .mvp_account_ready import AccountReadinessError
 from .startup_debug import popup_position
@@ -88,6 +89,17 @@ def await_account_home(
             raise _tag_startup_error(exc, input_phase)
         try:
             frame = capture()
+        except NearBlackCaptureError:
+            try:
+                _time(monotonic, float(deadline))
+                wait(0.25)
+            except AccountReadinessError as exc:
+                raise _tag_startup_error(exc, input_phase)
+            except BaseException as exc:
+                raise _tag_startup_error(
+                    AccountReadinessError("startup wait failed"), input_phase
+                ) from exc
+            continue
         except BaseException as exc:
             raise _tag_startup_error(
                 AccountReadinessError("startup capture failed"), input_phase

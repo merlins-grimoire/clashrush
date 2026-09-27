@@ -12,6 +12,10 @@ class CaptureError(RuntimeError):
     """Transient capture is malformed or unsafe."""
 
 
+class NearBlackCaptureError(CaptureError):
+    """The owned render is temporarily between visible game frames."""
+
+
 @dataclass(frozen=True, slots=True)
 class CaptureHealth:
     width: int
@@ -52,5 +56,5 @@ def capture_health(port: CapturePort, binding: PlayerBinding) -> CaptureHealth:
     near_black = dark * 100 > count * 97
     del pixels
     if near_black:
-        _fail("near-black transient render frame")
+        raise NearBlackCaptureError("near-black transient render frame")
     return CaptureHealth(width, height, "PRINTWINDOW", dark_percent)
