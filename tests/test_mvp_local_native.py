@@ -250,7 +250,11 @@ def test_bound_drag_releases_mouse_after_post_down_failure(
     monkeypatch.setattr(
         mvp_local_native.time,
         "sleep",
-        lambda _seconds: (_ for _ in ()).throw(RuntimeError("synthetic post-down failure")),
+        lambda seconds: (
+            None
+            if seconds == 0.15
+            else (_ for _ in ()).throw(RuntimeError("synthetic post-down failure"))
+        ),
     )
     subject = mvp_local_native.Win32BoundInput(
         BINDING,
@@ -269,6 +273,55 @@ def test_bound_drag_releases_mouse_after_post_down_failure(
             action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
         )
     assert events == [0x0002, 0x0004]
+
+
+def test_bound_drag_uses_donor_settle_and_gradual_intermediate_motion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor: list[tuple[int, int]] = []
+    mouse: list[int] = []
+    sleeps: list[float] = []
+
+    class User32:
+        def ClientToScreen(self, _hwnd, _point):
+            return True
+
+        def SetCursorPos(self, x, y):
+            cursor.append((x, y))
+            return True
+
+        def mouse_event(self, flag, *_args):
+            mouse.append(flag)
+
+    monkeypatch.setattr(
+        mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32()
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_configure_input_signatures", lambda _user32: None
+    )
+    monkeypatch.setattr(mvp_local_native.time, "sleep", sleeps.append)
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    assert subject.drag(
+        BINDING,
+        0.5,
+        0.7,
+        0.5,
+        0.3,
+        action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+    ) is True
+
+    assert len(cursor) == 15
+    assert cursor[0] == (round(0.5 * 1279), round(0.7 * 719))
+    assert cursor[-1] == (round(0.5 * 1279), round(0.3 * 719))
+    assert len(set(cursor[1:-1])) == 13
+    assert mouse == [0x0002, 0x0004]
+    assert sleeps == [0.15] + [0.045] * 14
 
 
 def test_bound_input_deadline_expiry_immediately_before_down_emits_no_input(

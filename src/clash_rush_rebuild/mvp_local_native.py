@@ -369,17 +369,22 @@ class Win32BoundInput:
                 return False
         if not self._authorized(action) or not self._user32.SetCursorPos(start.x, start.y):
             return False
+        time.sleep(0.15)
         if not self._authorized(action) or not self._deadline_open():
             return False
-        moved = False
+        moved = True
         try:
             self._user32.mouse_event(0x0002, 0, 0, 0, None)
-            time.sleep(0.05)
-            moved = (
-                self._authorized(action)
-                and self._deadline_open()
-                and self._user32.SetCursorPos(end.x, end.y)
-            )
+            for step in range(1, 15):
+                if not self._authorized(action) or not self._deadline_open():
+                    moved = False
+                    break
+                x = round(start.x + (end.x - start.x) * step / 14)
+                y = round(start.y + (end.y - start.y) * step / 14)
+                if not self._user32.SetCursorPos(x, y):
+                    moved = False
+                    break
+                time.sleep(0.045)
         finally:
             self._user32.mouse_event(0x0004, 0, 0, 0, None)
         return bool(moved)
