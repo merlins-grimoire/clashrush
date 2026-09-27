@@ -23,6 +23,7 @@ from clash_rush_rebuild.win32_lifecycle_host import (
     Win32LifecycleHost,
     Win32LifecycleHostError,
     configure_lifecycle_host_signatures,
+    enable_process_dpi_awareness,
 )
 from clash_rush_rebuild.win32_primitives import (
     ERROR_NO_MORE_FILES,
@@ -654,6 +655,55 @@ def test_native_lifecycle_signatures_cover_every_process_window_and_capture_call
     ]
     assert user32.GetDC.restype is ctypes.wintypes.HDC
     assert gdi32.CreateCompatibleBitmap.restype is ctypes.wintypes.HANDLE
+
+
+def test_process_dpi_awareness_uses_donor_per_monitor_mode() -> None:
+    calls: list[tuple[str, int | None]] = []
+
+    class Shcore:
+        def SetProcessDpiAwareness(self, mode: int) -> int:
+            calls.append(("per-monitor", mode))
+            return 0
+
+    class User32:
+        def SetProcessDPIAware(self) -> bool:
+            calls.append(("system", None))
+            return True
+
+    enable_process_dpi_awareness(Shcore(), User32())
+
+    assert calls == [("per-monitor", 2)]
+
+
+def test_process_dpi_awareness_falls_back_to_system_mode() -> None:
+    calls: list[tuple[str, int | None]] = []
+
+    class Shcore:
+        def SetProcessDpiAwareness(self, mode: int) -> int:
+            calls.append(("per-monitor", mode))
+            raise OSError("unavailable")
+
+    class User32:
+        def SetProcessDPIAware(self) -> bool:
+            calls.append(("system", None))
+            return True
+
+    enable_process_dpi_awareness(Shcore(), User32())
+
+    assert calls == [("per-monitor", 2), ("system", None)]
+
+
+def test_process_dpi_awareness_fails_closed_when_both_modes_fail() -> None:
+    class Shcore:
+        def SetProcessDpiAwareness(self, _mode: int) -> int:
+            raise OSError("unavailable")
+
+    class User32:
+        def SetProcessDPIAware(self) -> bool:
+            return False
+
+    with pytest.raises(Win32LifecycleHostError, match="DPI awareness"):
+        enable_process_dpi_awareness(Shcore(), User32())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Win32 smoke test")

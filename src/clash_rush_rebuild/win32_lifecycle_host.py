@@ -156,12 +156,34 @@ def configure_lifecycle_host_signatures(
     gdi32.GetDIBits.restype = ctypes.c_int
 
 
+def enable_process_dpi_awareness(shcore: object | None, user32: object) -> None:
+    """Preserve the BasePilot physical-pixel capture contract on scaled displays."""
+    try:
+        if shcore is None:
+            raise OSError("per-monitor DPI API unavailable")
+        getattr(shcore, "SetProcessDpiAwareness")(2)
+        return
+    except BaseException:
+        try:
+            enabled = getattr(user32, "SetProcessDPIAware")()
+        except BaseException:
+            enabled = False
+        if bool(enabled):
+            return
+    raise Win32LifecycleHostError("process DPI awareness unavailable") from None
+
+
 class NativeLifecycleApi(NativeWin32Api):
     """Native Toolhelp foundation for the integrated lifecycle host."""
 
     def __init__(self) -> None:
         super().__init__()
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        try:
+            self._shcore: object | None = ctypes.WinDLL("shcore", use_last_error=True)
+        except OSError:
+            self._shcore = None
+        enable_process_dpi_awareness(self._shcore, self._user32)
         self._gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
         configure_lifecycle_host_signatures(self._kernel32, self._user32, self._gdi32)
 
