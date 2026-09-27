@@ -1096,8 +1096,10 @@ def run_native_mvp_visit(
                 army_ready=recognizer.army_ready,
                 begin_scout_transition=recognizer.capture_scout_source,
                 scout_ready=recognizer.scout_ready,
+                slot_is_grey=recognizer.slot_is_grey,
                 return_home_visible=recognizer.return_home_visible,
                 kill_switch_enabled=enabled,
+                monotonic=time.monotonic,
                 sleep=time.sleep,
             ),
         )

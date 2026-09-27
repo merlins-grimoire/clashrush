@@ -428,6 +428,30 @@ class BgraGameplayRecognizer:
             > 0.25
         )
 
+    def slot_is_grey(self, slot: tuple[float, float]) -> bool:
+        """Adapt the donor's tight icon-crop saturation depletion signal."""
+        if type(slot) is not tuple or slot not in DEPLOY_SLOTS:
+            raise RuntimeSafetyError("deploy slot is not reviewed")
+        frame = self._frame()
+        try:
+            width, height, pixels = frame
+            x, y = slot
+            left, right = int(width * (x - 0.02)), int(width * (x + 0.02))
+            top, bottom = int(height * (y - 0.02)), int(height * (y + 0.02))
+            count = max(0, right - left) * max(0, bottom - top)
+            if count <= 0:
+                raise RuntimeSafetyError("deploy slot crop is empty")
+            saturation = 0
+            for row in range(top, bottom):
+                for column in range(left, right):
+                    offset = (row * width + column) * 4
+                    saturation += self._hsv(
+                        pixels[offset], pixels[offset + 1], pixels[offset + 2]
+                    )[1]
+            return saturation / count < 80.0
+        finally:
+            frame = pixels = width = height = None
+
     def return_home_visible(self) -> bool:
         return self._fraction(self._frame(), self._RETURN_REGION, self._green) > 0.20
 
@@ -634,8 +658,11 @@ class BoundedAttackExecutor:
         army_ready: Callable[[], bool | None],
         begin_scout_transition: Callable[[], None] = lambda: None,
         scout_ready: Callable[[], bool] = lambda: True,
+        slot_is_grey: Callable[[tuple[float, float]], bool] | None = None,
         return_home_visible: Callable[[], bool],
         kill_switch_enabled: Callable[[], bool],
+        monotonic: Callable[[], float] | None = None,
+        deployment_window_seconds: float = 60.0,
         sleep: Callable[[float], None],
     ) -> None:
         if type(binding) is not PlayerBinding:
@@ -645,8 +672,11 @@ class BoundedAttackExecutor:
         self._army_ready = army_ready
         self._begin_scout_transition = begin_scout_transition
         self._scout_ready = scout_ready
+        self._slot_is_grey = slot_is_grey
         self._return_home_visible = return_home_visible
         self._kill_switch = kill_switch_enabled
+        self._monotonic = monotonic
+        self._deployment_window_seconds = deployment_window_seconds
         self._sleep = sleep
 
     def _authorized(self) -> bool:
@@ -667,6 +697,87 @@ class BoundedAttackExecutor:
         except BaseException:
             return False, "INPUT_UNAVAILABLE"
         return (True, "INPUT_SENT") if sent is True else (False, "INPUT_FAILED")
+
+    def _deploy_slot(self, slot: tuple[float, float]) -> tuple[bool, str]:
+        sent, reason = self._click(slot, InputAction.TROOP_DEPLOYMENT)
+        if not sent:
+            return False, reason if reason == "KILL_SWITCH" else "DEPLOY_SELECT_FAILED"
+        if not self._authorized():
+            return False, "KILL_SWITCH"
+        released = False
+        try:
+            down = self._input.key_down(
+                self._binding,
+                *DEPLOY_KEYS,
+                action=InputAction.TROOP_DEPLOYMENT,
+            ) is True
+            if not down:
+                return False, "DEPLOY_KEY_DOWN_FAILED"
+            if self._slot_is_grey is None:
+                self._sleep(0.5)
+            else:
+                for _ in range(50):
+                    self._sleep(0.5)
+                    if not self._authorized():
+                        return False, "KILL_SWITCH"
+                    try:
+                        grey = self._slot_is_grey(slot)
+                    except BaseException:
+                        return False, "DEPLOY_STATE_UNKNOWN"
+                    if type(grey) is not bool:
+                        return False, "DEPLOY_STATE_UNKNOWN"
+                    if grey:
+                        break
+        except BaseException:
+            return False, "DEPLOY_KEY_DOWN_FAILED"
+        finally:
+            try:
+                released = self._input.key_up(
+                    self._binding,
+                    *DEPLOY_KEYS,
+                    action=InputAction.CLEANUP_RELEASE,
+                ) is True
+            except BaseException:
+                released = False
+        if not released:
+            return False, "DEPLOY_KEY_UP_FAILED"
+        return True, "DEPLOYED_SLOT"
+
+    def _deploy_all_slots(self) -> tuple[bool, str]:
+        if self._slot_is_grey is None or self._monotonic is None:
+            for slot in DEPLOY_SLOTS:
+                deployed, reason = self._deploy_slot(slot)
+                if not deployed:
+                    return False, reason
+            return True, "DEPLOYED_ALL_SLOTS"
+
+        if (
+            type(self._deployment_window_seconds) not in (int, float)
+            or type(self._deployment_window_seconds) is bool
+            or not 0 < float(self._deployment_window_seconds) <= 60.0
+        ):
+            return False, "DEPLOY_POLICY_INVALID"
+        deadline = self._monotonic() + float(self._deployment_window_seconds)
+        first_pass = True
+        while first_pass or self._monotonic() < deadline:
+            for slot in DEPLOY_SLOTS:
+                if not first_pass:
+                    try:
+                        grey = self._slot_is_grey(slot)
+                    except BaseException:
+                        return False, "DEPLOY_STATE_UNKNOWN"
+                    if type(grey) is not bool:
+                        return False, "DEPLOY_STATE_UNKNOWN"
+                    if grey:
+                        continue
+                deployed, reason = self._deploy_slot(slot)
+                if not deployed:
+                    return False, reason
+            first_pass = False
+            if self._monotonic() >= deadline:
+                break
+            self._sleep(2.0)
+        return True, "DEPLOYED_ALL_SLOTS"
 
     def run(self) -> tuple[bool, str]:
         for point, action, failure in (
@@ -708,35 +819,9 @@ class BoundedAttackExecutor:
         if not scout_ready:
             return False, "BASE_LOAD_TIMEOUT"
 
-        for slot in DEPLOY_SLOTS:
-            sent, reason = self._click(slot, InputAction.TROOP_DEPLOYMENT)
-            if not sent:
-                return False, reason if reason == "KILL_SWITCH" else "DEPLOY_SELECT_FAILED"
-            if not self._authorized():
-                return False, "KILL_SWITCH"
-            down = False
-            try:
-                down = self._input.key_down(
-                    self._binding,
-                    *DEPLOY_KEYS,
-                    action=InputAction.TROOP_DEPLOYMENT,
-                ) is True
-                if not down:
-                    return False, "DEPLOY_KEY_DOWN_FAILED"
-                self._sleep(0.5)
-            except BaseException:
-                return False, "DEPLOY_KEY_DOWN_FAILED"
-            finally:
-                try:
-                    released = self._input.key_up(
-                        self._binding,
-                        *DEPLOY_KEYS,
-                        action=InputAction.CLEANUP_RELEASE,
-                    ) is True
-                except BaseException:
-                    released = False
-            if not released:
-                return False, "DEPLOY_KEY_UP_FAILED"
+        deployed, reason = self._deploy_all_slots()
+        if not deployed:
+            return False, reason
         home_control = False
         for _ in range(120):
             try:

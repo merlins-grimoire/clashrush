@@ -300,6 +300,45 @@ def test_executor_adapts_bounded_attack_deploy_and_return_home_sequence() -> Non
     ) == 5
 
 
+def test_executor_drains_every_slot_and_rechecks_for_spawned_units() -> None:
+    input_port = FakeInput()
+    elapsed = [0.0]
+    checks = {slot: 0 for slot in DEPLOY_SLOTS}
+
+    def sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    def slot_is_grey(slot: tuple[float, float]) -> bool:
+        checks[slot] += 1
+        if slot == DEPLOY_SLOTS[1]:
+            return checks[slot] not in {2}
+        return True
+
+    executor = BoundedAttackExecutor(
+        BINDING,
+        input_port,
+        army_ready=lambda: True,
+        scout_ready=lambda: True,
+        slot_is_grey=slot_is_grey,
+        return_home_visible=lambda: True,
+        kill_switch_enabled=lambda: True,
+        monotonic=lambda: elapsed[0],
+        deployment_window_seconds=5.0,
+        sleep=sleep,
+    )
+
+    assert executor.run() == (True, "ATTACK_COMPLETED")
+    selected = [
+        event[1:3]
+        for event in input_port.events
+        if event[0] == "click" and event[3] is InputAction.TROOP_DEPLOYMENT
+    ]
+    assert tuple(selected[:5]) == DEPLOY_SLOTS
+    assert selected.count(DEPLOY_SLOTS[1]) == 2
+    assert sum(event[0] == "down" for event in input_port.events) == 6
+    assert sum(event[0] == "up" for event in input_port.events) == 6
+
+
 def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postcondition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
 ) -> None:
@@ -403,6 +442,8 @@ def _bgra_frame(
     return_home: bool = False,
     home_color: tuple[int, int, int] = (20, 100, 220),
     army_color: tuple[int, int, int] = (30, 220, 30),
+    slot_index: int | None = None,
+    slot_color: tuple[int, int, int] = (30, 220, 30),
     home_pixels: int | None = None,
 ) -> bytes:
     width, height = BINDING.width, BINDING.height
@@ -429,6 +470,9 @@ def _bgra_frame(
         paint((0.89, 0.84, 0.99, 0.93), army_color)
     if return_home:
         paint((0.40, 0.82, 0.60, 0.90), (30, 220, 30))
+    if slot_index is not None:
+        x, y = DEPLOY_SLOTS[slot_index]
+        paint((x - 0.02, y - 0.02, x + 0.02, y + 0.02), slot_color)
     return bytes(pixels)
 
 
@@ -449,6 +493,23 @@ def test_bgra_recognizer_adapts_donor_home_army_and_return_home_regions() -> Non
     assert recognizer.recognize(BINDING, ACCOUNT) == Recognition(True, True, True)
     assert recognizer.army_ready() is True
     assert recognizer.return_home_visible() is True
+
+
+def test_bgra_recognizer_detects_depleted_slot_by_tight_saturation_crop() -> None:
+    frames = iter(
+        [
+            _bgra_frame(slot_index=1, slot_color=(30, 220, 30)),
+            _bgra_frame(slot_index=1, slot_color=(120, 120, 120)),
+        ]
+    )
+    recognizer = BgraGameplayRecognizer(
+        BINDING,
+        lambda binding: (binding.width, binding.height, next(frames)),
+        account_verified=True,
+    )
+
+    assert recognizer.slot_is_grey(DEPLOY_SLOTS[1]) is False
+    assert recognizer.slot_is_grey(DEPLOY_SLOTS[1]) is True
 
 
 def test_army_ready_accepts_current_pale_green_attack_control() -> None:
