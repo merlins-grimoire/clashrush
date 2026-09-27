@@ -96,6 +96,21 @@ def test_private_control_match_rejects_evidence_below_donor_scale_floor() -> Non
     assert _match_template(frame, spec) is None
 
 
+def test_private_control_match_rejects_degenerate_resized_candidate() -> None:
+    template = np.zeros((3, 3, 3), dtype=np.uint8)
+    template[1, 1] = 255
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    spec = TemplateSpec(
+        "settings_button",
+        template,
+        hashlib.sha256(template.tobytes()).hexdigest(),
+        0.99,
+        (0.0, 0.0, 1.0, 1.0),
+    )
+
+    assert _match_template(frame, spec) is None
+
+
 class Input:
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []

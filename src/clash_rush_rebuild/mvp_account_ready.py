@@ -356,6 +356,8 @@ def _match_template(frame: np.ndarray, spec: TemplateSpec) -> _Match | None:
                 (template_width, template_height),
                 interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC,
             )
+            if not np.any(resized != resized[0, 0]):
+                continue
             response = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
             _minimum, confidence, _minimum_location, location = cv2.minMaxLoc(response)
             if math.isfinite(float(confidence)) and float(confidence) > best_confidence:
