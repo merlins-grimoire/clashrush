@@ -323,6 +323,7 @@ class Win32BoundInput:
             return False
         if not self._authorized(action) or not self._user32.SetCursorPos(point.x, point.y):
             return False
+        time.sleep(0.04)
         if pre_input_check is not None:
             try:
                 if pre_input_check() is not True:

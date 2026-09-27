@@ -211,7 +211,11 @@ def test_bound_input_releases_mouse_after_post_down_failure(
     monkeypatch.setattr(
         mvp_local_native.time,
         "sleep",
-        lambda _seconds: (_ for _ in ()).throw(RuntimeError("synthetic post-down failure")),
+        lambda seconds: (
+            None
+            if seconds == 0.04
+            else (_ for _ in ()).throw(RuntimeError("synthetic post-down failure"))
+        ),
     )
     subject = mvp_local_native.Win32BoundInput(
         BINDING,
@@ -228,6 +232,53 @@ def test_bound_input_releases_mouse_after_post_down_failure(
             action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
         )
     assert events == [0x0002, 0x0004]
+
+
+def test_bound_input_uses_donor_cursor_settle_and_press_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+
+    class User32:
+        def ClientToScreen(self, _hwnd, _point):
+            return True
+
+        def SetCursorPos(self, x, y):
+            events.append(("move", x, y))
+            return True
+
+        def mouse_event(self, flag, *_args):
+            events.append(("mouse", flag))
+
+    monkeypatch.setattr(
+        mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32()
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_configure_input_signatures", lambda _user32: None
+    )
+    monkeypatch.setattr(
+        mvp_local_native.time, "sleep", lambda seconds: events.append(("sleep", seconds))
+    )
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    assert subject.click(
+        BINDING,
+        0.5,
+        0.5,
+        action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+    ) is True
+    assert events == [
+        ("move", 640, 360),
+        ("sleep", 0.04),
+        ("mouse", 0x0002),
+        ("sleep", 0.02),
+        ("mouse", 0x0004),
+    ]
 
 
 def test_bound_drag_releases_mouse_after_post_down_failure(
