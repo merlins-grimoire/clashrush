@@ -89,7 +89,11 @@ def await_account_home(
             raise _tag_startup_error(exc, input_phase)
         try:
             frame = capture()
-        except NearBlackCaptureError:
+        except NearBlackCaptureError as exc:
+            if type(exc) is not NearBlackCaptureError:
+                raise _tag_startup_error(
+                    AccountReadinessError("startup capture failed"), input_phase
+                ) from exc
             try:
                 _time(monotonic, float(deadline))
                 wait(0.25)

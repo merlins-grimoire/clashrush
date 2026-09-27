@@ -130,6 +130,28 @@ def test_near_black_transition_retries_without_input_until_home() -> None:
     assert not np.any(frame)
 
 
+def test_near_black_subclass_fails_immediately_without_input() -> None:
+    class ForgedNearBlack(NearBlackCaptureError):
+        pass
+
+    waits: list[float] = []
+    clock = iter((1.0, 10.0))
+    with pytest.raises(AccountReadinessError, match="capture failed") as raised:
+        await_account_home(
+            capture=lambda: (_ for _ in ()).throw(ForgedNearBlack("forged")),
+            home_verified=lambda _frame: pytest.fail("classification must not run"),
+            popup_detector=lambda *_args: pytest.fail("detector must not run"),
+            startup_input_factory=lambda: pytest.fail("input must not be constructed"),
+            font_path="private-font",
+            deadline=10.0,
+            monotonic=clock.__next__,
+            wait=waits.append,
+        )
+
+    assert raised.value.startup_input_phase == "NO_GESTURE"
+    assert waits == []
+
+
 @pytest.mark.parametrize("screen", ["unknown", "Continue", "launcher", "loading"])
 def test_non_welcome_startup_screen_emits_no_input(screen: str) -> None:
     frame = _frame(1)
