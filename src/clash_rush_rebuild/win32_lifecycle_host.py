@@ -161,15 +161,17 @@ def enable_process_dpi_awareness(shcore: object | None, user32: object) -> None:
     try:
         if shcore is None:
             raise OSError("per-monitor DPI API unavailable")
-        getattr(shcore, "SetProcessDpiAwareness")(2)
-        return
-    except BaseException:
-        try:
-            enabled = getattr(user32, "SetProcessDPIAware")()
-        except BaseException:
-            enabled = False
-        if bool(enabled):
+        result = getattr(shcore, "SetProcessDpiAwareness")(2)
+        if type(result) is int and result == 0:
             return
+    except BaseException:
+        pass
+    try:
+        enabled = getattr(user32, "SetProcessDPIAware")()
+    except BaseException:
+        enabled = False
+    if bool(enabled):
+        return
     raise Win32LifecycleHostError("process DPI awareness unavailable") from None
 
 

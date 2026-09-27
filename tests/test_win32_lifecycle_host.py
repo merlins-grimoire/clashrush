@@ -681,7 +681,7 @@ def test_process_dpi_awareness_falls_back_to_system_mode() -> None:
     class Shcore:
         def SetProcessDpiAwareness(self, mode: int) -> int:
             calls.append(("per-monitor", mode))
-            raise OSError("unavailable")
+            return -2147024891  # E_ACCESSDENIED
 
     class User32:
         def SetProcessDPIAware(self) -> bool:
@@ -696,7 +696,7 @@ def test_process_dpi_awareness_falls_back_to_system_mode() -> None:
 def test_process_dpi_awareness_fails_closed_when_both_modes_fail() -> None:
     class Shcore:
         def SetProcessDpiAwareness(self, _mode: int) -> int:
-            raise OSError("unavailable")
+            return -2147024809  # E_INVALIDARG
 
     class User32:
         def SetProcessDPIAware(self) -> bool:
