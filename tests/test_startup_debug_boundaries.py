@@ -329,6 +329,24 @@ def test_okay_label_is_bound_to_component_and_welcome_context(monkeypatch):
     assert mod.popup_position(frame, Action.STARTUP_OKAY, "generic") is None
 
 
+def test_non_welcome_frame_ignores_multiple_green_loading_components(monkeypatch):
+    import clash_rush_rebuild.startup_debug as mod
+
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame[510:550, 500:550] = (0, 255, 0)
+    frame[510:550, 650:700] = (0, 255, 0)
+    requested: list[str] = []
+
+    def no_context(_frame, text, _font):
+        requested.append(text)
+        return False
+
+    monkeypatch.setattr(mod, "_text_present", no_context)
+
+    assert mod.popup_position(frame, Action.STARTUP_OKAY, "generic") is None
+    assert requested == ["Welcome Back"]
+
+
 def test_after_capture_failure_preserves_completed_input_fact(tmp_path):
     frame = launcher()
     clock = Clock()

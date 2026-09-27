@@ -758,6 +758,7 @@ def test_first_manual_home_negative_has_no_input(
         return False
 
     monkeypatch.setattr(mvp_local_native, "manual_home_frame_verified", reject_first_frame)
+    monkeypatch.setattr(mvp_local_native, "popup_position", lambda *_args: None)
     clock = iter((1.0, 2.0, 121.0))
     monkeypatch.setattr(mvp_local_native.time, "monotonic", clock.__next__)
     monkeypatch.setattr(

@@ -114,6 +114,12 @@ def popup_position(frame, action, font_path=None):
         roi = (0.35, 0.68, 0.65, 0.88)
     else:
         raise StartupDebugError("ACTION_INVALID")
+    if action is InputAction.STARTUP_OKAY and not _text_present(
+        frame[int(h * 0.15) : int(h * 0.55), int(w * 0.15) : int(w * 0.85)],
+        "Welcome Back",
+        font_path,
+    ):
+        return None
     x0, y0, x1, y1 = int(w * roi[0]), int(h * roi[1]), int(w * roi[2]), int(h * roi[3])
     patch = frame[y0:y1, x0:x1]
     hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
@@ -156,13 +162,8 @@ def popup_position(frame, action, font_path=None):
         union = np.count_nonzero(glyph | expected)
         if not union or intersection / union < 0.65:
             return None
-    if action is InputAction.STARTUP_OKAY and not (
-        _text_present(control, "Okay", font_path)
-        and _text_present(
-            frame[int(h * 0.15) : int(h * 0.55), int(w * 0.15) : int(w * 0.85)],
-            "Welcome Back",
-            font_path,
-        )
+    if action is InputAction.STARTUP_OKAY and not _text_present(
+        control, "Okay", font_path
     ):
         return None
     return (float(cx + x0) / (w - 1), float(cy + y0) / (h - 1))
