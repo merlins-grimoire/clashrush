@@ -104,6 +104,7 @@ _REQUIRED_TEMPLATES = frozenset(
         "settings_close",
     }
 )
+_CURRENT_UI_SCALES = (0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,24 +340,40 @@ def _match_template(frame: np.ndarray, spec: TemplateSpec) -> _Match | None:
             region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
         if template.ndim == 3:
             template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-    template_height, template_width = template.shape[:2]
-    if (
-        region.size == 0
-        or template_height > region.shape[0]
-        or template_width > region.shape[1]
-    ):
+    if region.size == 0:
         return None
+    best_confidence = -1.0
+    best_location: tuple[int, int] | None = None
+    best_size: tuple[int, int] | None = None
     try:
-        response = cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED)
-        _minimum, confidence, _minimum_location, location = cv2.minMaxLoc(response)
+        for scale in _CURRENT_UI_SCALES:
+            template_width = max(1, int(round(template.shape[1] * scale)))
+            template_height = max(1, int(round(template.shape[0] * scale)))
+            if template_height > region.shape[0] or template_width > region.shape[1]:
+                continue
+            resized = cv2.resize(
+                template,
+                (template_width, template_height),
+                interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC,
+            )
+            response = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
+            _minimum, confidence, _minimum_location, location = cv2.minMaxLoc(response)
+            if math.isfinite(float(confidence)) and float(confidence) > best_confidence:
+                best_confidence = float(confidence)
+                best_location = location
+                best_size = (template_width, template_height)
     except cv2.error as exc:
         raise AccountReadinessError("visual matcher failed") from exc
-    if not math.isfinite(float(confidence)) or float(confidence) < spec.threshold:
+    if (
+        best_location is None
+        or best_size is None
+        or best_confidence < spec.threshold
+    ):
         return None
     return _Match(
-        (left + location[0] + template_width / 2) / width,
-        (top + location[1] + template_height / 2) / height,
-        float(confidence),
+        (left + best_location[0] + best_size[0] / 2) / width,
+        (top + best_location[1] + best_size[1] / 2) / height,
+        best_confidence,
     )
 
 

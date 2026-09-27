@@ -18,6 +18,7 @@ from clash_rush_rebuild.mvp_account_ready import (
     AccountReadinessError,
     ReadinessVisualProfile,
     TemplateSpec,
+    _match_template,
     load_private_visual_profile,
     require_manual_home_frame,
 )
@@ -58,6 +59,41 @@ def _frame(*entries: tuple[np.ndarray, int, int]) -> np.ndarray:
         height, width = template.shape[:2]
         frame[y : y + height, x : x + width] = template
     return frame
+
+
+def test_private_control_match_adapts_across_donor_current_ui_scale_range() -> None:
+    template = _template(99)
+    scaled = cv2.resize(template, (6, 6), interpolation=cv2.INTER_AREA)
+    frame = _frame((scaled, 80, 70))
+    spec = TemplateSpec(
+        "settings_button",
+        template,
+        hashlib.sha256(template.tobytes()).hexdigest(),
+        0.90,
+        (0.0, 0.0, 1.0, 1.0),
+    )
+
+    match = _match_template(frame, spec)
+
+    assert match is not None
+    assert match.confidence >= 0.90
+    assert match.x == pytest.approx(83 / 640)
+    assert match.y == pytest.approx(73 / 360)
+
+
+def test_private_control_match_rejects_evidence_below_donor_scale_floor() -> None:
+    template = _template(100)
+    scaled = cv2.resize(template, (3, 3), interpolation=cv2.INTER_AREA)
+    frame = _frame((scaled, 80, 70))
+    spec = TemplateSpec(
+        "settings_button",
+        template,
+        hashlib.sha256(template.tobytes()).hexdigest(),
+        0.99,
+        (0.0, 0.0, 1.0, 1.0),
+    )
+
+    assert _match_template(frame, spec) is None
 
 
 class Input:
