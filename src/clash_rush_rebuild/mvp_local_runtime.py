@@ -371,6 +371,11 @@ class BgraGameplayRecognizer:
     def _green(blue: int, green: int, red: int) -> bool:
         return green >= 120 and green >= red * 3 // 2 and green >= blue * 3 // 2
 
+    @staticmethod
+    def _green_control(blue: int, green: int, red: int) -> bool:
+        hue, saturation, value = BgraGameplayRecognizer._hsv(blue, green, red)
+        return 35 <= hue <= 60 and saturation >= 50 and value >= 100
+
     def recognize(
         self, binding: PlayerBinding, account_ref: str, *, require_home: bool = False,
     ) -> Recognition:
@@ -418,7 +423,10 @@ class BgraGameplayRecognizer:
         return Recognition(home, True if home else None, self._account_verified)
 
     def army_ready(self) -> bool | None:
-        return self._fraction(self._frame(), self._ARMY_REGION, self._green) > 0.25
+        return (
+            self._fraction(self._frame(), self._ARMY_REGION, self._green_control)
+            > 0.25
+        )
 
     def return_home_visible(self) -> bool:
         return self._fraction(self._frame(), self._RETURN_REGION, self._green) > 0.20

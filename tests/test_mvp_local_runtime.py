@@ -402,6 +402,7 @@ def _bgra_frame(
     army: bool = False,
     return_home: bool = False,
     home_color: tuple[int, int, int] = (20, 100, 220),
+    army_color: tuple[int, int, int] = (30, 220, 30),
     home_pixels: int | None = None,
 ) -> bytes:
     width, height = BINDING.width, BINDING.height
@@ -425,7 +426,7 @@ def _bgra_frame(
     if home:
         paint((0.035, 0.90, 0.085, 0.97), home_color, home_pixels)
     if army:
-        paint((0.89, 0.84, 0.99, 0.93), (30, 220, 30))
+        paint((0.89, 0.84, 0.99, 0.93), army_color)
     if return_home:
         paint((0.40, 0.82, 0.60, 0.90), (30, 220, 30))
     return bytes(pixels)
@@ -448,6 +449,17 @@ def test_bgra_recognizer_adapts_donor_home_army_and_return_home_regions() -> Non
     assert recognizer.recognize(BINDING, ACCOUNT) == Recognition(True, True, True)
     assert recognizer.army_ready() is True
     assert recognizer.return_home_visible() is True
+
+
+def test_army_ready_accepts_current_pale_green_attack_control() -> None:
+    frame = _bgra_frame(army=True, army_color=(123, 216, 173))
+    recognizer = BgraGameplayRecognizer(
+        BINDING,
+        lambda binding: (binding.width, binding.height, frame),
+        account_verified=True,
+    )
+
+    assert recognizer.army_ready() is True
 
 
 @pytest.mark.parametrize(
