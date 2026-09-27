@@ -803,9 +803,10 @@ class BoundedAttackExecutor:
                 if not deployed:
                     return False, reason
             first_pass = False
-            if self._monotonic() >= deadline:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
                 break
-            self._sleep(2.0)
+            self._sleep(min(2.0, remaining))
         return True, "DEPLOYED_ALL_SLOTS"
 
     def run(self) -> tuple[bool, str]:

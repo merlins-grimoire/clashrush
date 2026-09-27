@@ -369,6 +369,29 @@ def test_executor_bounds_slot_hold_by_monotonic_time_not_poll_count() -> None:
     assert [event[0] for event in input_port.events] == ["click", "down", "up"]
 
 
+def test_executor_caps_inter_pass_sleep_to_deployment_deadline() -> None:
+    input_port = FakeInput()
+    elapsed = [0.0]
+
+    def sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    executor = BoundedAttackExecutor(
+        BINDING,
+        input_port,
+        army_ready=lambda: True,
+        slot_is_grey=lambda _slot: True,
+        return_home_visible=lambda: True,
+        kill_switch_enabled=lambda: True,
+        monotonic=lambda: elapsed[0],
+        deployment_window_seconds=3.0,
+        sleep=sleep,
+    )
+
+    assert executor._deploy_all_slots() == (True, "DEPLOYED_ALL_SLOTS")
+    assert elapsed[0] == 3.0
+
+
 def test_synthetic_cli_composition_runs_recognition_intent_attack_cleanup_postcondition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
 ) -> None:
