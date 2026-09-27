@@ -319,7 +319,7 @@ def _profile() -> tuple[ReadinessVisualProfile, dict[str, np.ndarray]]:
         (True, HomeDiagnosticResult.UNKNOWN, False),
     ],
 )
-def test_manual_home_frame_requires_both_sealed_and_diagnostic_proof(
+def test_manual_home_frame_requires_sealed_profile_and_donor_attack_proof(
     monkeypatch: pytest.MonkeyPatch,
     include_profile_home: bool,
     diagnostic: HomeDiagnosticResult,
@@ -333,8 +333,8 @@ def test_manual_home_frame_requires_both_sealed_and_diagnostic_proof(
     )
     monkeypatch.setattr(
         NoInputHomeDiagnosticController,
-        "detect_frame",
-        classmethod(lambda _cls, _frame: diagnostic),
+        "detect_home_attack",
+        classmethod(lambda _cls, _frame: diagnostic is HomeDiagnosticResult.HOME),
     )
 
     if accepted:

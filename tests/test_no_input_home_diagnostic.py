@@ -98,9 +98,11 @@ def test_copied_donor_assets_and_real_fixture_match_frozen_seals() -> None:
         "16_9/builder.png": "c48653fc4b0dd5f504d41903c4e12b2a31de96f3c1e8da0ba32e9eee9ae7a8b3",
         "16_9/gbuilder.png": "c696f96848e1be2d49710b625d5a77a7c0a3e40db91d25eb9b8be96340861094",
         "16_9/mbuilder.png": "f3317664be20289f8ac8d03feec05a81f7c6b0d04d8a8cbd16604e8025bb9b2d",
+        "16_9/attack.png": "08f218ae58050bb45bc74adc0e599221d85aeec307025cd0c8a49c71a42b535a",
         "16_10/builder.png": "e37551f7c08fde1781ff977adcb0b7cb4041a913a511fc798cbae0cc633fa914",
         "16_10/gbuilder.png": "28a1a648464275e50704275b924904b3e058aa28dc6e9cbde1d57c1e5cd68412",
         "16_10/mbuilder.png": "aafb4af0a51081ba324bc3901a299524fd5020ed8dae60352c72113fd06cefd4",
+        "16_10/attack.png": "f15446a19fbbe76771dd4568b5db370cfbba0ec86c1a73ec5198c0869c64328f",
     }
     assets = root / "src" / "clash_rush_rebuild" / "assets" / "basepilot_templates"
     assert {
@@ -145,7 +147,7 @@ def test_template_resolution_is_closed_and_missing_asset_fails_closed(monkeypatc
     frame = np.zeros((720, 1280, 3), dtype=np.uint8)
     vision = VisionService(BasePilotGeometry.from_frame(frame))
     with pytest.raises(BasePilotRecognitionError, match="allowlisted"):
-        vision.find_template(frame, "attack.png")
+        vision.find_template(frame, "shop.png")
 
     class MissingResource:
         def __truediv__(self, _part):
@@ -157,6 +159,26 @@ def test_template_resolution_is_closed_and_missing_asset_fails_closed(monkeypatc
     monkeypatch.setattr(vision_module, "files", lambda _package: MissingResource())
     with pytest.raises(BasePilotRecognitionError, match="unavailable"):
         vision.find_template(frame, "builder.png")
+
+
+def test_donor_attack_text_survives_current_ui_scale() -> None:
+    root = Path(__file__).parents[1]
+    template = cv2.imread(
+        str(root / "src" / "clash_rush_rebuild" / "assets" / "basepilot_templates" / "16_10" / "attack.png"),
+        cv2.IMREAD_COLOR,
+    )
+    assert template is not None
+    scaled = cv2.resize(template, None, fx=0.8, fy=0.8, interpolation=cv2.INTER_AREA)
+    frame = np.zeros((1050, 1920, 3), dtype=np.uint8)
+    frame[900 : 900 + scaled.shape[0], 30 : 30 + scaled.shape[1]] = scaled
+
+    assert NoInputHomeDiagnosticController.detect_home_attack(frame) is True
+
+
+def test_donor_attack_text_rejects_non_home_frame() -> None:
+    frame = np.zeros((1050, 1920, 3), dtype=np.uint8)
+
+    assert NoInputHomeDiagnosticController.detect_home_attack(frame) is False
 
 
 def test_builder_match_precedes_home_match(monkeypatch) -> None:

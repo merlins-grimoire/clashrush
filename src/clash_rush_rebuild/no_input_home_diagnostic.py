@@ -135,6 +135,20 @@ class NoInputHomeDiagnosticController:
         subject._observation_reasons = []
         return subject._detect_village_type(frame)
 
+    @classmethod
+    def detect_home_attack(cls, frame: np.ndarray) -> bool:
+        """Require BasePilot's Attack text in the donor bottom-half search band."""
+        if type(frame) is not np.ndarray or frame.size == 0:
+            return False
+        geometry = BasePilotGeometry.from_frame(frame)
+        vision = VisionService(geometry)
+        x, _y = vision.find_template_multiscale(
+            frame,
+            "attack.png",
+            region=VisionService.bottom_half_region(frame),
+        )
+        return x is not None
+
     def observe(self) -> HomeDiagnosticResult:
         frame: np.ndarray | None = None
         result: HomeDiagnosticResult | None = None

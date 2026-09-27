@@ -25,10 +25,7 @@ import numpy as np
 from .input_authorization import InputAction
 from .lifecycle import PlayerBinding
 from .mvp_local_world_export import ExportCaptureError, summarize_world_export
-from .no_input_home_diagnostic import (
-    HomeDiagnosticResult,
-    NoInputHomeDiagnosticController,
-)
+from .no_input_home_diagnostic import NoInputHomeDiagnosticController
 from .win32_state_io import (
     FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_OPEN_REPARSE_POINT,
@@ -366,15 +363,12 @@ def _match_template(frame: np.ndarray, spec: TemplateSpec) -> _Match | None:
 def manual_home_frame_verified(
     frame: np.ndarray, profile: ReadinessVisualProfile
 ) -> bool:
-    """Return exact positive sealed-profile and donor-derived HOME proof."""
+    """Require the sealed Home control plus BasePilot's Attack-text proof."""
     if type(profile) is not ReadinessVisualProfile:
         raise AccountReadinessError("manual Home profile is malformed")
     try:
         profile_home = _match_template(frame, profile.spec("home")) is not None
-        diagnostic_home = (
-            NoInputHomeDiagnosticController.detect_frame(frame)
-            is HomeDiagnosticResult.HOME
-        )
+        diagnostic_home = NoInputHomeDiagnosticController.detect_home_attack(frame)
     except AccountReadinessError:
         raise
     except BaseException as exc:
@@ -385,7 +379,7 @@ def manual_home_frame_verified(
 def require_manual_home_frame(
     frame: np.ndarray, profile: ReadinessVisualProfile
 ) -> None:
-    """Require both sealed-profile and donor-derived HOME proof on one frame."""
+    """Require both sealed-profile and donor Attack proof on one frame."""
     if not manual_home_frame_verified(frame, profile):
         raise AccountReadinessError("manual Home first frame was not verified")
 
