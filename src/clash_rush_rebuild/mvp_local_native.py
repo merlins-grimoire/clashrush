@@ -262,7 +262,9 @@ class Win32BoundInput:
         self._safety_check(binding)
 
     def _foreground(self) -> bool:
-        self._user32.ShowWindow(wintypes.HWND(self._binding.root_hwnd), 9)
+        # ClashAutomation sends input to the already-visible game window without
+        # restoring it. SW_RESTORE can unmaximize BlueStacks and invalidate the
+        # exact render geometry that authorized this input.
         self._user32.BringWindowToTop(wintypes.HWND(self._binding.root_hwnd))
         self._user32.SetForegroundWindow(wintypes.HWND(self._binding.root_hwnd))
         active = self._user32.GetForegroundWindow()
@@ -311,6 +313,7 @@ class Win32BoundInput:
             or not self._foreground()
         ):
             return False
+        self._require_binding(binding)
         point = wintypes.POINT(
             round(x * (binding.width - 1)), round(y * (binding.height - 1))
         )
@@ -352,6 +355,7 @@ class Win32BoundInput:
             for value in coordinates
         ) or not self._foreground():
             return False
+        self._require_binding(binding)
         start = wintypes.POINT(
             round(x0 * (binding.width - 1)), round(y0 * (binding.height - 1))
         )
@@ -389,6 +393,7 @@ class Win32BoundInput:
             or any(type(key) is not int or not 1 <= key <= 255 for key in keys)
         ):
             return False
+        self._require_binding(binding)
         for key in keys:
             if not self._authorized(action):
                 return False

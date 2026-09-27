@@ -55,6 +55,93 @@ def test_native_input_requires_exact_closed_authorization(
     assert subject._binding == BINDING
 
 
+def test_bound_input_foreground_does_not_restore_and_invalidate_capture_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class User32:
+        def ShowWindow(self, *_args):
+            events.append("restore")
+            return True
+
+        def BringWindowToTop(self, *_args):
+            events.append("top")
+            return True
+
+        def SetForegroundWindow(self, *_args):
+            events.append("foreground")
+            return True
+
+        def GetForegroundWindow(self):
+            return BINDING.root_hwnd
+
+        def GetAncestor(self, *_args):
+            return BINDING.root_hwnd
+
+    monkeypatch.setattr(
+        mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32()
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_configure_input_signatures", lambda _user32: None
+    )
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        lambda _binding: None,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+
+    assert subject._foreground() is True
+    assert events == ["top", "foreground"]
+
+
+def test_bound_input_revalidates_binding_after_foreground_before_click(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    safety_checks = 0
+    mouse: list[int] = []
+
+    class User32:
+        def ClientToScreen(self, *_args):
+            raise AssertionError("stale geometry must fail before coordinate mapping")
+
+        def SetCursorPos(self, *_args):
+            raise AssertionError("stale geometry must fail before cursor movement")
+
+        def mouse_event(self, flag, *_args):
+            mouse.append(flag)
+
+    def safety_check(_binding):
+        nonlocal safety_checks
+        safety_checks += 1
+        if safety_checks == 2:
+            raise RuntimeSafetyError("geometry changed during foreground transition")
+
+    monkeypatch.setattr(
+        mvp_local_native.ctypes, "WinDLL", lambda *_args, **_kwargs: User32()
+    )
+    monkeypatch.setattr(
+        mvp_local_native, "_configure_input_signatures", lambda _user32: None
+    )
+    subject = mvp_local_native.Win32BoundInput(
+        BINDING,
+        safety_check,
+        InputAuthorization.account_readiness(lambda: True),
+    )
+    monkeypatch.setattr(subject, "_foreground", lambda: True)
+
+    with pytest.raises(RuntimeSafetyError, match="geometry changed"):
+        subject.click(
+            BINDING,
+            0.5,
+            0.5,
+            action=InputAction.ACCOUNT_EXPORT_NAVIGATION,
+        )
+
+    assert safety_checks == 2
+    assert mouse == []
+
+
 def test_cleanup_release_emits_only_for_keys_proven_held_by_this_input_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
