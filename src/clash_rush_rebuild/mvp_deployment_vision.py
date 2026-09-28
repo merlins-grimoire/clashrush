@@ -110,17 +110,33 @@ def discover_card_boxes(bar: np.ndarray, geometry: CardGeometry=CardGeometry()):
     profile=(profile-profile.min())/spread
     peaks=find_peaks(profile,height=geometry.peak_height,distance=geometry.peak_distance)[0]
     if len(peaks)<2 or len(peaks)>64: raise DeploymentError('BAR_UNPROVED')
-    boxes=[]; used=set()
-    for index,(left,right) in enumerate(zip(peaks,peaks[1:])):
-        if abs((int(right)-int(left))/w-geometry.card_width)<=geometry.width_tolerance:
-            if index in used or index+1 in used: raise DeploymentError('BAR_AMBIGUOUS')
-            boxes.append((int(left),0,int(right),h)); used.update((index,index+1))
-    if not boxes or len(boxes)>24: raise DeploymentError('BAR_UNPROVED')
-    # Unexplained interior strong edges cannot simply be skipped.
-    first,last=min(used),max(used)
-    if any(i not in used for i in range(first,last+1)):
-        raise DeploymentError('BAR_AMBIGUOUS')
-    return tuple(boxes)
+    # CoC_Bot's donor grammar alternates card-width spans with one of two
+    # observed inter-card gap classes. Selecting the longest complete run keeps
+    # a strong translucent-bar/scenery edge outside the card sequence instead
+    # of pairing it as a phantom first card.
+    def near(value,target,tolerance): return abs(value-target)<=tolerance
+    gaps=(.007,.015); gap_tolerance=.01
+    runs=[]
+    for start in range(len(peaks)-1):
+        left,right=int(peaks[start]),int(peaks[start+1])
+        if not near((right-left)/w,geometry.card_width,geometry.width_tolerance):
+            continue
+        boxes=[(left,0,right,h)]; index=start+1
+        while index+2<len(peaks):
+            gap=(int(peaks[index+1])-int(peaks[index]))/w
+            next_left,next_right=int(peaks[index+1]),int(peaks[index+2])
+            if (not any(near(gap,expected,gap_tolerance) for expected in gaps)
+                    or not near((next_right-next_left)/w,geometry.card_width,geometry.width_tolerance)):
+                break
+            boxes.append((next_left,0,next_right,h)); index+=2
+        runs.append(tuple(boxes))
+    if not runs: raise DeploymentError('BAR_UNPROVED')
+    longest=max(map(len,runs))
+    winners={run for run in runs if len(run)==longest}
+    if len(winners)!=1: raise DeploymentError('BAR_AMBIGUOUS')
+    boxes=winners.pop()
+    if len(boxes)>24: raise DeploymentError('BAR_UNPROVED')
+    return boxes
 
 
 def classify_icon(crop, catalog: Mapping[str,tuple[np.ndarray,...]], threshold=.93, margin=.04):

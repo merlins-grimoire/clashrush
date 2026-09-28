@@ -48,6 +48,26 @@ def test_coc_edge_spine_discovers_five_cards_without_fixed_slot_coordinates():
 def test_coc_edge_spine_discovers_more_than_five_visible_cards():
     assert len(discover_card_boxes(bar(9),CardGeometry(.068,.008,.7,5)))==9
 
+def test_coc_edge_spine_ignores_translucent_bar_outer_edge_and_busy_background():
+    """A scenery-bearing bar edge must not be paired as a phantom first card."""
+    width=1000
+    background=np.zeros((120,width,3),np.uint8)
+    # Strong crop/bar edge whose distance to the first real card resembles a
+    # card width, followed by generated scenery behind translucent empty slots.
+    background[:,0:3]=255
+    for index,left in enumerate(range(450,950,50)):
+        background[:,left:left+25]=(30+index*17,80+index*11,140+index*7)
+    starts=(80,155,238,321)
+    for left in starts:
+        right=left+68
+        background[5:115,left:right]=230
+
+    boxes=discover_card_boxes(background,CardGeometry(.068,.012,.7,5))
+
+    assert len(boxes)==4
+    assert all(abs(actual-expected)<=2 for actual,expected in
+               zip((box[0] for box in boxes),starts))
+
 @pytest.mark.parametrize('frame',[np.zeros((120,1000,3),np.uint8),np.full((120,1000,3),255,np.uint8)])
 def test_empty_or_flat_bar_rejected(frame):
     with pytest.raises(DeploymentError): discover_card_boxes(frame,CardGeometry())
