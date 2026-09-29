@@ -169,3 +169,107 @@ def test_plan_replacement_during_arbitrary_callback_fails_before_new_down(bounda
 
     assert not result.complete
     assert not world.events
+
+
+def test_observe_cannot_replace_and_reseal_run_authority():
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    replacement = profile_module.CompiledDeploymentPlan((_entry(1),), viewport_limit=6)
+    world = World([card("card_1", count=1, x=.2)])
+    engine = world.engine(plan=approved)
+    original = engine.observe
+    fired = False
+
+    def observe():
+        nonlocal fired
+        if not fired:
+            fired = True
+            engine._plan = replacement
+            engine._plan_seal = replacement.digest
+            engine._validate_plan = lambda: None
+        return original()
+
+    engine.observe = observe
+    result = engine.run()
+
+    assert not result.complete
+    assert not any(event.card_id == "card_1" for event in world.events)
+
+
+@pytest.mark.parametrize("boundary", [
+    "clock", "live_gate", "observe", "deliver", "proof", "sleep", "release",
+])
+def test_engine_reference_callback_cannot_replace_closed_run_authority(boundary):
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    replacement = profile_module.CompiledDeploymentPlan((_entry(1),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=approved)
+    fired = False
+
+    def attack():
+        nonlocal fired
+        if fired:
+            return
+        fired = True
+        engine._plan = replacement
+        engine._plan_seal = replacement.digest
+        engine._validate_plan = lambda: None
+
+    if boundary == "clock":
+        original = engine.clock
+        engine.clock = lambda: (attack(), original())[1]
+    elif boundary == "live_gate":
+        engine.live_gate = lambda: (attack(), True)[1]
+    elif boundary == "observe":
+        original = engine.observe
+        engine.observe = lambda: (attack(), original())[1]
+    elif boundary == "deliver":
+        original = engine.deliver
+        engine.deliver = lambda intent, proof: (attack(), original(intent, proof))[1]
+    elif boundary == "proof":
+        original = engine.deliver
+        engine.deliver = lambda intent, proof: original(
+            intent, lambda: (attack(), proof())[1])
+    elif boundary == "sleep":
+        original = engine.sleep
+        engine.sleep = lambda seconds: (attack(), original(seconds))[1]
+    else:
+        original = engine.release
+        engine.release = lambda: (attack(), original())[1]
+
+    result = engine.run()
+
+    assert fired
+    assert result.complete
+    assert engine.plan.signatures == approved.signatures
+    assert any(event.card_id == "card_0" for event in world.events)
+    assert not any(event.card_id == "card_1" for event in world.events)
+    assert world.closed
+
+
+def test_engine_plan_property_returns_only_a_detached_copy():
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=approved)
+    exposed = engine.plan
+    object.__setattr__(exposed, "roster", (_entry(1),))
+
+    assert engine.run().complete
+    assert not any(event.card_id == "card_1" for event in world.events)
+
+
+def test_callback_cannot_shadow_failed_release_into_false_completion():
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=approved)
+    original_observe = engine.observe
+    engine.release = lambda: False
+
+    def observe():
+        engine.release = lambda: True
+        return original_observe()
+
+    engine.observe = observe
+    result = engine.run()
+
+    assert not result.complete
+    assert result.reason == "RELEASE_UNPROVED"

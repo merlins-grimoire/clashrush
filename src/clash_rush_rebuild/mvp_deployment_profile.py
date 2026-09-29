@@ -437,15 +437,15 @@ class FrameObserver:
         if not occupied: raise DeploymentError('BAR_UNPROVED')
         if any(a[0][2]>z[0][0] for a,z in zip(occupied,occupied[1:])):
             raise DeploymentError('BAR_AMBIGUOUS')
-        # A width-compatible pair caused by artwork inside one admitted complete
-        # frame is explained by that exact frame. Every other unframed candidate
-        # is structural residue; expected roster size never truncates it away.
+        # An unframed width-compatible hypothesis is interior artwork only when
+        # both boundaries are strictly owned by one admitted complete card.
+        # Touching/equal boundaries, partial overlap, continuation and bridges
+        # remain alternate complete/clipped-card explanations and fail closed.
         for box,identity in candidates:
             if identity is not None: continue
             left,_,right,_=box
             owners=[owner for owner,_ in occupied
-                    if max(left,owner[0])<min(right,owner[2])
-                    and (owner[0]<left<owner[2] or owner[0]<right<owner[2])]
+                    if owner[0] < left < right < owner[2]]
             if len(owners)!=1: raise DeploymentError('BAR_RESIDUE')
         signatures=tuple((identity,CardKind(definitions[identity]['kind']),
                           Spell(definitions[identity]['spell'])) for _,identity in occupied)

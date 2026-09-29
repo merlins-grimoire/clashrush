@@ -1,13 +1,16 @@
 """Generated complete-frame/card recognition matrix; no private pixels."""
+import copy
 import cv2
 import numpy as np
 import pytest
 
+from clash_rush_rebuild import mvp_deployment_profile as profile_module
 from clash_rush_rebuild.mvp_deployment import (
     DeploymentEngine, DeploymentError, Intervention, Observation, Point,
     Screen, Target, TargetKind,
 )
-from clash_rush_rebuild.mvp_deployment_profile import DeploymentProfile, FrameObserver
+from clash_rush_rebuild.mvp_deployment_profile import DeploymentProfile, FrameObserver, roi
+from clash_rush_rebuild.mvp_deployment_vision import CardGeometry, discover_card_boxes
 from test_deployment_profile import profile_data
 
 
@@ -130,6 +133,139 @@ def test_initial_structural_residue_reaches_no_composed_gameplay_input():
     frame = _frame(profile, assets)
     top = round(360 * .82)
     frame[top + 5:round(360 * .98) - 5, 120:197] = 100
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert events == []
+
+
+def test_real_detector_right_partial_overlap_rejects_before_composed_input():
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    top = round(360 * .82)
+    bottom = round(360 * .98)
+    # Generated detector counterexample from the final review: the dark artwork
+    # edge and detached bright edge form [74,154] beside complete card [19,96].
+    frame[top + 5:bottom - 5, 72:75] = 0
+    frame[top + 5:bottom - 5, 152:155] = 100
+    assert discover_card_boxes(
+        roi(frame, profile.data["bar"]["roi"]),
+        CardGeometry(**profile.data["bar"]["geometry"])) == (
+            (19, 0, 96, 57), (74, 0, 154, 57))
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert not any(event.verb in {
+        "select", "hold", "tap", "end_battle", "confirm_end", "return_home"
+    } for event in events)
+
+
+def test_real_detector_left_partial_overlap_rejects_before_composed_input():
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    top = round(360 * .82)
+    bottom = round(360 * .98)
+    frame[top + 5:bottom - 5, 0:3] = 100
+    frame[top + 5:bottom - 5, 76:79] = 0
+    bar = roi(frame, profile.data["bar"]["roi"])
+    assert discover_card_boxes(
+        bar, CardGeometry(**profile.data["bar"]["geometry"])) == (
+            (2, 0, 78, 57), (19, 0, 96, 57))
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert events == []
+
+
+def _two_card_frame():
+    data, assets = profile_data()
+    data["bar"]["geometry"] = dict(
+        card_width=.12, width_tolerance=.006, peak_height=.7, peak_distance=5)
+    assets.update(_glyphs())
+    assets["card2"] = np.random.default_rng(122).integers(
+        0, 255, (9, 9, 3), dtype=np.uint8)
+    data["assets"]["card2"] = {"file": "card2.png", "sha256": "b" * 64}
+    second = copy.deepcopy(data["cards"][0])
+    second["identity"] = "troop2"
+    second["icons"] = ["card2"]
+    data["cards"].append(second)
+    data["plan"]["roster"].append({"identity": "troop2", "initial_quantity": 1})
+    profile = DeploymentProfile(data, assets, "a" * 64)
+    frame = np.zeros((360, 640, 3), np.uint8)
+    _card(frame, assets, 20)
+    _card(frame, assets, 100, icon="card2")
+    _put(frame, np.asarray(assets["left_end"]), 5, 100)
+    _put(frame, np.asarray(assets["right_end"]), 25, 100)
+    return profile, assets, frame
+
+
+def test_real_detector_bridge_between_adjacent_cards_rejects_before_input():
+    profile, _assets, frame = _two_card_frame()
+    top = round(360 * .82)
+    bottom = round(360 * .98)
+    frame[top + 5:bottom - 5, 72:75] = 0
+    frame[top + 5:bottom - 5, 152:155] = 0
+    bar = roi(frame, profile.data["bar"]["roi"])
+    assert (74, 0, 154, 57) in discover_card_boxes(
+        bar, CardGeometry(**profile.data["bar"]["geometry"]))
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert events == []
+
+
+def test_clipped_continuation_rejects_before_composed_input():
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    frame[100:109, 25:34] = 0
+    _put(frame, np.asarray(assets["right_more"]), 25, 100)
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert events == []
+
+
+def test_real_detector_preserves_legitimate_narrow_interior_artwork_edge():
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    top = round(360 * .82)
+    frame[top + 25:top + 35, 25:28] = 200
+
+    page = _page(profile, frame)
+
+    assert tuple(card.identity for card in page.cards) == ("troop",)
+
+
+def test_strictly_contained_unframed_hypothesis_has_one_exact_owner(monkeypatch):
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    original_any = FrameObserver._any
+    monkeypatch.setattr(profile_module, "discover_card_boxes",
+        lambda _crop, _geometry: ((19, 0, 96, 57), (20, 0, 95, 57)))
+    monkeypatch.setattr(FrameObserver, "_any",
+        lambda self, region, keys, box: False if region.shape[1] == 75
+        else original_any(self, region, keys, box))
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "DEADLINE"
+    assert [event.verb for event in events] == ["select"]
+
+
+def test_equal_card_boundary_is_not_interior_ownership(monkeypatch):
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    original_any = FrameObserver._any
+    monkeypatch.setattr(profile_module, "discover_card_boxes",
+        lambda _crop, _geometry: ((19, 0, 96, 57), (19, 0, 95, 57)))
+    monkeypatch.setattr(FrameObserver, "_any",
+        lambda self, region, keys, box: False if region.shape[1] == 76
+        else original_any(self, region, keys, box))
 
     result, events = _run_composed(profile, frame)
 

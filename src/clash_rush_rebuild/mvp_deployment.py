@@ -15,6 +15,7 @@ import math
 import re
 import hashlib
 import json
+import weakref
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable, Iterable
@@ -90,6 +91,77 @@ class CompiledDeploymentPlan:
     def quantities(self):
         self.validated_digest()
         return tuple(entry[3] for entry in self.roster)
+
+
+# Bounded authority boundary: callbacks may hold the engine, but the canonical
+# run plan is not an attribute reachable from that reference. This is not
+# isolation from arbitrary same-process reflection or module mutation.
+@dataclass(frozen=True,slots=True)
+class _RunAuthority:
+    plan: CompiledDeploymentPlan | None
+    ports: tuple | None=None
+    policy: Policy | None=None
+    visit_deadline: float | None=None
+
+
+_RUN_AUTHORITIES = weakref.WeakKeyDictionary()
+
+
+def _copy_plan(plan):
+    if type(plan) is not CompiledDeploymentPlan:
+        raise DeploymentError('PLAN_INVALID')
+    seal=CompiledDeploymentPlan.validated_digest(plan)
+    roster=tuple(tuple(entry) for entry in plan.roster)
+    return CompiledDeploymentPlan(roster,plan.viewport_limit,seal)
+
+
+def _bind_plan_authority(engine,plan):
+    _RUN_AUTHORITIES[engine]=_RunAuthority(None if plan is None else _copy_plan(plan))
+
+
+def _run_authority(engine):
+    try: authority=_RUN_AUTHORITIES[engine]
+    except (KeyError,TypeError): raise DeploymentError('PLAN_REQUIRED') from None
+    if type(authority) is not _RunAuthority:
+        raise DeploymentError('PLAN_DIGEST_MISMATCH')
+    return authority
+
+
+def _canonical_plan(engine):
+    plan=_run_authority(engine).plan
+    if plan is None: raise DeploymentError('PLAN_REQUIRED')
+    if (type(plan) is not CompiledDeploymentPlan
+            or CompiledDeploymentPlan.validated_digest(plan)!=plan.digest):
+        raise DeploymentError('PLAN_DIGEST_MISMATCH')
+    return plan
+
+
+def _detached_plan(engine):
+    return _copy_plan(_canonical_plan(engine))
+
+
+def _freeze_run_authority(engine):
+    authority=_run_authority(engine)
+    ports=(engine.observe,engine.deliver,engine.release,engine.live_gate,
+           engine.clock,engine.sleep)
+    if authority.ports is not None or not all(callable(port) for port in ports):
+        raise DeploymentError('PORT_INVALID')
+    if type(engine.policy) is not Policy:
+        raise DeploymentError('POLICY_INVALID')
+    _RUN_AUTHORITIES[engine]=_RunAuthority(
+        authority.plan,ports,engine.policy,engine.visit_deadline)
+
+
+def _run_port(engine,index):
+    authority=_run_authority(engine)
+    if authority.ports is None: raise DeploymentError('PORT_INVALID')
+    return authority.ports[index]
+
+
+def _run_policy(engine):
+    authority=_run_authority(engine)
+    if type(authority.policy) is not Policy: raise DeploymentError('POLICY_INVALID')
+    return authority.policy
 
 
 class CardState(StrEnum):
@@ -392,13 +464,11 @@ class DeploymentEngine:
     """
     @property
     def plan(self):
-        return self._plan
+        return _detached_plan(self)
 
     @plan.setter
     def plan(self,value):
-        if hasattr(self,'_plan'):
-            raise TypeError('sealed deployment plan')
-        object.__setattr__(self,'_plan',value)
+        raise TypeError('sealed deployment plan')
 
     def __init__(self, *, observe, deliver, release, live_gate, monotonic, sleep,
                  policy: Policy=Policy(), visit_deadline: float | None=None,
@@ -407,15 +477,11 @@ class DeploymentEngine:
             raise DeploymentError('PORT_INVALID')
         if plan is not None and type(plan) is not CompiledDeploymentPlan:
             raise DeploymentError('PLAN_INVALID')
-        seal=None
-        owned_plan=None
-        if plan is not None:
-            seal=plan.validated_digest()
-            owned_roster=tuple(tuple(entry) for entry in plan.roster)
-            owned_plan=CompiledDeploymentPlan(owned_roster,plan.viewport_limit,seal)
+        owned_plan=None if plan is None else _copy_plan(plan)
         self.observe=observe; self.deliver=deliver; self.release=release
         self.live_gate=live_gate; self.clock=monotonic; self.sleep=sleep; self.policy=policy
-        self.visit_deadline=visit_deadline; self.plan=owned_plan; self._plan_seal=seal
+        self.visit_deadline=visit_deadline
+        _bind_plan_authority(self,owned_plan)
         self.used=False; self.sequence=0; self.captured=-1.0; self.view=None
         self.inventory=Inventory(policy.max_cards,policy.max_pages)
         self.cards: dict[str, Card]={}; self.holds: dict[str,float]={}
@@ -424,34 +490,31 @@ class DeploymentEngine:
         self.intervention_free=True; self.proof_fault=None; self.last=None
 
     def _validate_plan(self):
-        if self._plan is None: raise DeploymentError('PLAN_REQUIRED')
-        if (type(self._plan) is not CompiledDeploymentPlan
-                or self._plan.validated_digest()!=self._plan_seal):
-            raise DeploymentError('PLAN_DIGEST_MISMATCH')
+        _canonical_plan(self)
 
     def _clock_callback(self):
-        value=self.clock()
-        self._validate_plan()
+        value=_run_port(self,4)()
+        _canonical_plan(self)
         return value
 
     def _sleep_callback(self,seconds):
-        value=self.sleep(seconds)
-        self._validate_plan()
+        value=_run_port(self,5)(seconds)
+        _canonical_plan(self)
         return value
 
     def _gate(self, deadline):
-        self._validate_plan()
+        _canonical_plan(self)
         self.budget.check(deadline)
-        try: allowed=self.live_gate()
+        try: allowed=_run_port(self,3)()
         except BaseException: allowed=False
-        self._validate_plan()
+        _canonical_plan(self)
         if allowed is not True: raise DeploymentError('AUTHORIZATION_LOST')
 
     def _read(self, deadline) -> Observation:
-        self._gate(deadline)
-        try: o=self.observe()
+        DeploymentEngine._gate(self,deadline)
+        try: o=_run_port(self,0)()
         except BaseException: raise DeploymentError('OBSERVATION_UNAVAILABLE') from None
-        self._validate_plan()
+        _canonical_plan(self)
         now=self.budget.check(deadline)
         if type(o) is not Observation: raise DeploymentError('OBSERVATION_INVALID')
         if o.sequence<=self.sequence or o.captured_at<self.captured or not 0<=now-o.captured_at<=self.policy.observation_age:
@@ -477,7 +540,7 @@ class DeploymentEngine:
         kind={Spell.LIGHTNING:TargetKind.ENEMY_STRUCTURE, Spell.EARTHQUAKE:TargetKind.WALL_CLUSTER,
               Spell.RAGE:TargetKind.FRIENDLY_COHORT, Spell.HEAL:TargetKind.INJURED_COHORT}.get(c.spell)
         if c.kind is not CardKind.SPELL: kind=TargetKind.GROUND
-        candidates=[t for t in o.targets if t.kind is kind and t.confidence>=self.policy.target_confidence]
+        candidates=[t for t in o.targets if t.kind is kind and t.confidence>=_run_policy(self).target_confidence]
         if not candidates: return None
         candidates=sorted(candidates,key=lambda t:(-t.confidence,t.point.x,t.point.y))
         index=self.ground_steps.get(c.identity,0)%len(candidates) if kind is TargetKind.GROUND else 0
@@ -485,13 +548,14 @@ class DeploymentEngine:
 
     def _proof(self, intent, before):
         try:
-            o=self._read(intent.deadline)
+            o=DeploymentEngine._read(self,intent.deadline)
             if o.screen is not before.screen or o.view!=before.view:
                 raise DeploymentError('STATE_CHANGED')
-            if self.plan is not None and o.screen is Screen.BATTLE:
-                self._sync(o)
+            _canonical_plan(self)
+            if o.screen is Screen.BATTLE:
+                DeploymentEngine._sync(self,o)
             if intent.card_id is not None:
-                old=self._visible(before,intent.card_id); c=self._visible(o,intent.card_id)
+                old=DeploymentEngine._visible(before,intent.card_id); c=DeploymentEngine._visible(o,intent.card_id)
                 if c.signature!=old.signature or c.remaining!=old.remaining or c.state is not old.state:
                     raise DeploymentError('CARD_CHANGED')
                 if intent.verb=='select':
@@ -499,12 +563,12 @@ class DeploymentEngine:
                 else:
                     if intent.verb=='hold' and c.kind is not CardKind.TROOP:
                         raise DeploymentError('CARD_KIND_CONFLICT')
-                    target=self._target(o,c)
+                    target=DeploymentEngine._target(self,o,c)
                     if not c.selected or target is None or not target.point.near(intent.point):
                         raise DeploymentError('TARGET_UNPROVED')
             else:
                 if not o.control(intent.verb).near(intent.point): raise DeploymentError('CONTROL_CHANGED')
-            self._gate(intent.deadline)
+            DeploymentEngine._gate(self,intent.deadline)
             return True
         except DeploymentError as e:
             self.proof_fault=e.code
@@ -513,19 +577,19 @@ class DeploymentEngine:
             self.proof_fault='PROOF_UNAVAILABLE'; return False
 
     def _send(self, intent, before):
-        self._gate(intent.deadline)
+        DeploymentEngine._gate(self,intent.deadline)
         self.actions+=1
-        if self.actions>self.policy.max_actions: raise DeploymentError('ACTION_LIMIT')
+        if self.actions>_run_policy(self).max_actions: raise DeploymentError('ACTION_LIMIT')
         self.proof_fault=None
-        try: sent=self.deliver(intent,lambda:self._proof(intent,before))
+        try: sent=_run_port(self,1)(intent,lambda:DeploymentEngine._proof(self,intent,before))
         except BaseException: raise DeploymentError('INPUT_UNCERTAIN') from None
-        self._validate_plan()
+        _canonical_plan(self)
         if sent is not True: raise DeploymentError(self.proof_fault or 'INPUT_UNCERTAIN')
-        self._gate(intent.deadline)
+        DeploymentEngine._gate(self,intent.deadline)
 
     def _await(self, screens, deadline, source=None):
         for _ in range(64):
-            o=self._read(deadline)
+            o=DeploymentEngine._read(self,deadline)
             if o.screen in screens: return o
             if o.screen not in (source, Screen.UNKNOWN): raise DeploymentError('UNEXPECTED_TRANSITION')
             self.budget.wait(.05,deadline)
@@ -536,44 +600,43 @@ class DeploymentEngine:
             if o.screen is source:
                 if source is Screen.HOME and o.home_verified is not True: raise DeploymentError('HOME_UNPROVED')
                 deadline=min(self.budget.deadline,self.budget.check()+10)
-                self._send(Intent(verb,o.control(verb),Action.ATTACK_NAVIGATION,deadline=deadline),o)
-                o=self._await({dest},deadline,source)
+                DeploymentEngine._send(self,Intent(verb,o.control(verb),Action.ATTACK_NAVIGATION,deadline=deadline),o)
+                o=DeploymentEngine._await(self,{dest},deadline,source)
         if o.screen is not Screen.BATTLE: raise DeploymentError('BATTLE_UNPROVED')
         return o
 
     def _scan(self, o, deadline):
-        if self.plan is not None:
-            if not o.page.left_edge or not o.page.right_edge:
-                raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
-            observed=tuple(c.signature for c in o.page.cards)
-            if len(observed)>self.plan.viewport_limit:
-                raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
-            if observed!=self.plan.signatures:
-                if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
-                if any(item not in self.plan.signatures for item in observed):
-                    raise DeploymentError('ROSTER_ADDITIONAL')
-                raise DeploymentError('ROSTER_INCOMPLETE')
-            for current,expected in zip(o.page.cards,self.plan.quantities):
-                current.require_known()
-                if current.remaining!=expected or current.state is not CardState.AVAILABLE:
-                    raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
-            self.inventory.add(o.page)
-            self.cards={c.identity:c for c in o.page.cards}
-            self.holds={key:0.0 for key in self.cards}
-            return o
-        raise DeploymentError('PLAN_REQUIRED')
+        plan=_canonical_plan(self)
+        if not o.page.left_edge or not o.page.right_edge:
+            raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+        observed=tuple(c.signature for c in o.page.cards)
+        if len(observed)>plan.viewport_limit:
+            raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
+        if observed!=plan.signatures:
+            if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
+            if any(item not in plan.signatures for item in observed):
+                raise DeploymentError('ROSTER_ADDITIONAL')
+            raise DeploymentError('ROSTER_INCOMPLETE')
+        for current,expected in zip(o.page.cards,plan.quantities):
+            current.require_known()
+            if current.remaining!=expected or current.state is not CardState.AVAILABLE:
+                raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
+        self.inventory.add(o.page)
+        self.cards={c.identity:c for c in o.page.cards}
+        self.holds={key:0.0 for key in self.cards}
+        return o
 
     def _sync(self,o, permitted=None):
         if o.screen is not Screen.BATTLE or o.page is None: raise DeploymentError('BATTLE_UNPROVED')
-        if self.plan is not None:
-            if not o.page.left_edge or not o.page.right_edge:
-                raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
-            observed=tuple(c.signature for c in o.page.cards)
-            if observed!=self.plan.signatures:
-                if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
-                if any(item not in self.plan.signatures for item in observed):
-                    raise DeploymentError('ROSTER_ADDITIONAL')
-                raise DeploymentError('ROSTER_INCOMPLETE')
+        plan=_canonical_plan(self)
+        if not o.page.left_edge or not o.page.right_edge:
+            raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+        observed=tuple(c.signature for c in o.page.cards)
+        if observed!=plan.signatures:
+            if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
+            if any(item not in plan.signatures for item in observed):
+                raise DeploymentError('ROSTER_ADDITIONAL')
+            raise DeploymentError('ROSTER_INCOMPLETE')
         self.inventory.locate(o.page)
         for c in o.page.cards:
             c.require_known(); old=self.cards[c.identity]
@@ -583,51 +646,51 @@ class DeploymentEngine:
             self.cards[c.identity]=c
 
     def _bring(self, identity, o, deadline):
-        if self.plan is not None:
-            self._sync(o)
-            if not any(c.identity==identity for c in o.page.cards):
-                raise DeploymentError('ROSTER_INCOMPLETE')
-            return o
-        raise DeploymentError('PLAN_REQUIRED')
+        _canonical_plan(self)
+        DeploymentEngine._sync(self,o)
+        if not any(c.identity==identity for c in o.page.cards):
+            raise DeploymentError('ROSTER_INCOMPLETE')
+        return o
 
     def _consume(self,c,o,deadline):
         if not c.selected:
-            self._send(Intent('select',c.point,Action.TROOP_DEPLOYMENT,c.identity,deadline=deadline),o)
+            DeploymentEngine._send(self,Intent('select',c.point,Action.TROOP_DEPLOYMENT,c.identity,deadline=deadline),o)
             select_deadline=min(deadline,self.budget.check()+1)
             for _ in range(24):
-                o=self._read(select_deadline); self._sync(o)
-                c=self._visible(o,c.identity)
+                o=DeploymentEngine._read(self,select_deadline); DeploymentEngine._sync(self,o)
+                c=DeploymentEngine._visible(o,c.identity)
                 if c.selected: break
                 self.budget.wait(.04,select_deadline)
             else: raise DeploymentError('SELECTION_UNPROVED')
-        target=self._target(o,c)
+        target=DeploymentEngine._target(self,o,c)
         if target is None: return o,False
         verb='hold' if c.kind is CardKind.TROOP else 'tap'
         duration=0.0
         if verb=='hold':
-            remaining=self.policy.card_hold_ceiling-self.holds[c.identity]
-            duration=min(self.policy.troop_hold_seconds,remaining,deadline-self.budget.check())
+            policy=_run_policy(self)
+            remaining=policy.card_hold_ceiling-self.holds[c.identity]
+            duration=min(policy.troop_hold_seconds,remaining,deadline-self.budget.check())
             if duration<=0: raise DeploymentError('CARD_HOLD_LIMIT')
         before_count=c.remaining
         delivery_started=self.budget.check(deadline)
-        self._send(Intent(verb,target.point,Action.TROOP_DEPLOYMENT,c.identity,duration,deadline=deadline),o)
+        DeploymentEngine._send(self,Intent(verb,target.point,Action.TROOP_DEPLOYMENT,c.identity,duration,deadline=deadline),o)
         if verb=='hold':
             self.holds[c.identity]+=max(duration,self.budget.check(deadline)-delivery_started)
-        ack_deadline=min(deadline,self.budget.check()+self.policy.acknowledgement_seconds)
+        ack_deadline=min(deadline,self.budget.check()+_run_policy(self).acknowledgement_seconds)
         for _ in range(40):
-            o=self._read(ack_deadline)
+            o=DeploymentEngine._read(self,ack_deadline)
             if o.screen is not Screen.BATTLE: raise DeploymentError('EXTERNAL_OR_EARLY_RESULT')
-            current=self._visible(o,c.identity)
+            current=DeploymentEngine._visible(o,c.identity)
             if current.remaining < before_count:
                 delta=before_count-current.remaining
                 if c.kind is not CardKind.TROOP and delta!=1: raise DeploymentError('COUNT_DELTA_UNCERTAIN')
                 # A transient badge animation is not a durable consumption fact.
                 self.budget.wait(.04,ack_deadline)
-                confirmed=self._read(ack_deadline)
-                check=self._visible(confirmed,c.identity)
+                confirmed=DeploymentEngine._read(self,ack_deadline)
+                check=DeploymentEngine._visible(confirmed,c.identity)
                 if check.remaining!=current.remaining or check.state is not current.state:
                     raise DeploymentError('COUNT_DELTA_UNCERTAIN')
-                self._sync(confirmed,permitted=c.identity)
+                DeploymentEngine._sync(self,confirmed,permitted=c.identity)
                 o=confirmed
                 if c.kind is not CardKind.SPELL:
                     self.ground_steps[c.identity]=self.ground_steps.get(c.identity,0)+1
@@ -641,45 +704,44 @@ class DeploymentEngine:
     def _deploy(self,o,deadline):
         idle_observations=0
         while True:
-            self._gate(deadline); self._sync(o)
+            DeploymentEngine._gate(self,deadline); DeploymentEngine._sync(self,o)
             pending=[c for c in self.cards.values() if not c.exhausted]
             if not pending: break
             # Ready support spells are interleaved before the next troop burst.
             pending.sort(key=lambda c:(0 if c.kind is CardKind.SPELL else 1, self.inventory.identities.index(c.identity)))
             progress=False
             for candidate in pending:
-                o=self._bring(candidate.identity,o,deadline)
-                c=self._visible(o,candidate.identity)
+                o=DeploymentEngine._bring(self,candidate.identity,o,deadline)
+                c=DeploymentEngine._visible(o,candidate.identity)
                 if c.exhausted: continue
-                if c.kind is CardKind.SPELL and self._target(o,c) is None:continue
-                o,progress=self._consume(c,o,deadline)
+                if c.kind is CardKind.SPELL and DeploymentEngine._target(self,o,c) is None:continue
+                o,progress=DeploymentEngine._consume(self,c,o,deadline)
                 if progress: break
             if not progress:
                 idle_observations+=1
                 if idle_observations>20:raise DeploymentError('TARGET_UNPROVED')
                 self.budget.wait(.1,deadline)
             else:idle_observations=0
-            o=self._read(deadline)
+            o=DeploymentEngine._read(self,deadline)
         # Final complete rescan. A sealed single-page plan requires one fresh
         # whole-roster equality proof and never gains scrolling authority.
-        if self.plan is not None:
-            o=self._read(deadline)
-            self._sync(o)
-            if any(not c.exhausted for c in o.page.cards):
-                raise DeploymentError('DEPLETION_UNPROVED')
-            return o
-        raise DeploymentError('PLAN_REQUIRED')
+        _canonical_plan(self)
+        o=DeploymentEngine._read(self,deadline)
+        DeploymentEngine._sync(self,o)
+        if any(not c.exhausted for c in o.page.cards):
+            raise DeploymentError('DEPLETION_UNPROVED')
+        return o
 
     def _exit(self,o):
         deadline=min(self.budget.deadline,self.budget.check()+self.policy.exit_seconds)
-        self._send(Intent('end_battle',o.control('end_battle'),Action.RETURN_HOME,deadline=deadline),o)
+        DeploymentEngine._send(self,Intent('end_battle',o.control('end_battle'),Action.RETURN_HOME,deadline=deadline),o)
         self.own_exit=True
-        o=self._await({Screen.END_CONFIRM,Screen.RESULT},min(deadline,self.budget.check()+5),Screen.BATTLE)
+        o=DeploymentEngine._await(self,{Screen.END_CONFIRM,Screen.RESULT},min(deadline,self.budget.check()+5),Screen.BATTLE)
         if o.screen is Screen.END_CONFIRM:
-            self._send(Intent('confirm_end',o.control('confirm_end'),Action.RETURN_HOME,deadline=deadline),o)
-            o=self._await({Screen.RESULT},min(deadline,self.budget.check()+5),Screen.END_CONFIRM)
-        self._send(Intent('return_home',o.control('return_home'),Action.RETURN_HOME,deadline=deadline),o)
-        o=self._await({Screen.HOME},min(deadline,self.budget.check()+10),Screen.RESULT)
+            DeploymentEngine._send(self,Intent('confirm_end',o.control('confirm_end'),Action.RETURN_HOME,deadline=deadline),o)
+            o=DeploymentEngine._await(self,{Screen.RESULT},min(deadline,self.budget.check()+5),Screen.END_CONFIRM)
+        DeploymentEngine._send(self,Intent('return_home',o.control('return_home'),Action.RETURN_HOME,deadline=deadline),o)
+        o=DeploymentEngine._await(self,{Screen.HOME},min(deadline,self.budget.check()+10),Screen.RESULT)
         if not o.home_verified: raise DeploymentError('HOME_UNPROVED')
         self.home=True
 
@@ -687,23 +749,28 @@ class DeploymentEngine:
         if self.used: raise DeploymentError('EXECUTOR_ALREADY_USED')
         self.used=True; reason='DEPLOYMENT_FAILED'; complete=False
         try:
-            start=finite(self._clock_callback())
-            deadline=start+self.policy.visit_seconds if self.visit_deadline is None else min(finite(self.visit_deadline),start+self.policy.visit_seconds)
-            self.budget=Budget(self._clock_callback,self._sleep_callback,deadline)
-            o=self._navigate(self._read(deadline))
-            deploy_deadline=min(deadline-self.policy.exit_seconds,o.captured_at+self.policy.deployment_seconds)
+            _freeze_run_authority(self)
+            policy=_run_policy(self); authority=_run_authority(self)
+            start=finite(DeploymentEngine._clock_callback(self))
+            deadline=(start+policy.visit_seconds if authority.visit_deadline is None
+                      else min(finite(authority.visit_deadline),start+policy.visit_seconds))
+            self.budget=Budget(
+                lambda:DeploymentEngine._clock_callback(self),
+                lambda seconds:DeploymentEngine._sleep_callback(self,seconds),deadline)
+            o=DeploymentEngine._navigate(self,DeploymentEngine._read(self,deadline))
+            deploy_deadline=min(deadline-policy.exit_seconds,o.captured_at+policy.deployment_seconds)
             self.budget.check(deploy_deadline)
-            o=self._scan(o,deploy_deadline)
+            o=DeploymentEngine._scan(self,o,deploy_deadline)
             if not any(c.remaining for c in self.cards.values()): raise DeploymentError('EMPTY_ARMY')
-            o=self._deploy(o,deploy_deadline)
-            self._exit(o)
+            o=DeploymentEngine._deploy(self,o,deploy_deadline)
+            DeploymentEngine._exit(self,o)
             complete=True; reason='AUTONOMOUS_DEPLOYMENT_COMPLETE'
         except DeploymentError as e: reason=e.code
         except BaseException: reason='DEPLOYMENT_UNAVAILABLE'
         finally:
-            try: released=self.release()
+            try: released=_run_port(self,2)()
             except BaseException: released=False
-            try:self._validate_plan()
+            try:_canonical_plan(self)
             except DeploymentError as error:
                 complete=False; reason=error.code
             if released is not True: complete=False; reason='RELEASE_UNPROVED'
