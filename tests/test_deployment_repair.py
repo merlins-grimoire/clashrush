@@ -4,6 +4,7 @@ import json
 import math
 import pytest
 
+from clash_rush_rebuild import mvp_deployment as deployment_module
 from clash_rush_rebuild.mvp_deployment import (
     Budget, Card, CardKind, CardState, Spell, Page, Observation, Screen,
     Point, Target, TargetKind, Policy, DeploymentError, DeploymentEngine,
@@ -187,6 +188,69 @@ def test_nr02_natural_result_may_arrive_after_deployment_budget_before_visit_res
     assert result.complete and result.home_verified and not result.own_exit
     assert w.clock() > .5
     assert [e.verb for e in w.events if e.verb in {
+        'end_battle', 'confirm_end', 'return_home'}] == ['return_home']
+
+
+@pytest.mark.parametrize('fault,kind,expected_reason', [
+    ('revived', CardKind.TROOP, 'UNEXPLAINED_CARD_CHANGE'),
+    ('state_changed', CardKind.HERO, 'UNEXPLAINED_CARD_CHANGE'),
+    ('stale', CardKind.TROOP, 'OBSERVATION_STALE'),
+    ('malformed', CardKind.TROOP, 'OBSERVATION_INVALID'),
+])
+def test_nr_wait_reconciles_every_battle_observation_atomically(fault, kind, expected_reason):
+    w=World([card(kind=kind, count=1)])
+    original=w.observe
+    injected=[False]
+
+    def observe():
+        observation=original()
+        if (not injected[0] and observation.screen is Screen.BATTLE
+                and w.terminal_reads >= 5):
+            injected[0]=True
+            if fault == 'revived':
+                changed=replace(observation.page.cards[0], remaining=1,
+                                state=CardState.AVAILABLE)
+                observation=replace(observation, page=page([changed]))
+            elif fault == 'state_changed':
+                changed=replace(observation.page.cards[0], state=CardState.DEPLOYED)
+                observation=replace(observation, page=page([changed]))
+            elif fault == 'stale':
+                object.__setattr__(observation, 'sequence', 1)
+            else:
+                object.__setattr__(observation, 'targets', list(observation.targets))
+        return observation
+
+    w.observe=observe
+    result=w.engine().run()
+
+    assert injected[0]
+    assert not result.complete
+    assert result.reason == expected_reason
+    assert result.remaining == 0
+    expected_deploy = 'tap' if kind is CardKind.HERO else 'hold'
+    assert [event.verb for event in w.events] == ['select', expected_deploy]
+    assert not any(event.verb in {'end_battle', 'confirm_end', 'return_home'}
+                   for event in w.events)
+    assert w.closed
+
+
+def test_nr_wait_reconciles_valid_unchanged_terminal_battle(monkeypatch):
+    w=World([card(count=1)])
+    original_sync=deployment_module._sync
+    reconciled_terminal_reads=[]
+
+    def sync(core, observation, permitted=None):
+        if (observation.screen is Screen.BATTLE and w.terminal_reads >= 5
+                and all(item.exhausted for item in observation.page.cards)):
+            reconciled_terminal_reads.append(w.terminal_reads)
+        return original_sync(core, observation, permitted)
+
+    monkeypatch.setattr(deployment_module, '_sync', sync)
+    result=w.engine().run()
+
+    assert result.complete and result.home_verified and not result.own_exit
+    assert 5 in reconciled_terminal_reads
+    assert [event.verb for event in w.events if event.verb in {
         'end_battle', 'confirm_end', 'return_home'}] == ['return_home']
 
 

@@ -1064,6 +1064,7 @@ def _exit(core, observation, result_deadline):
             break
         if observation.screen is not Screen.BATTLE:
             raise DeploymentError('UNEXPECTED_TRANSITION')
+        _sync(core, observation)
         _wait(core, .05, result_deadline)
         observation = _read(core, result_deadline)
     else:
