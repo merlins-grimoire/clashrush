@@ -62,18 +62,32 @@ def test_home_cleanup_alone_cannot_promote_receipt():
     a.c.close()
 
 
+def test_result_supplier_runs_inside_receipt_transaction_and_preserves_payload():
+    a=setup();calls=[]
+    expected=result()
+    def supply():
+        calls.append(a.c.in_transaction)
+        return expected
+
+    assert record_proof(a,'tx',supply,DIGEST) is True
+    assert calls == [True]
+    assert read_proof(a,'tx') == expected
+    assert require_complete(a,'tx') == expected
+    a.c.close()
+
+
 def test_proof_and_retirement_both_required():
-    a=setup();record_proof(a,'tx',result(),DIGEST);require_complete(a,'tx')
+    a=setup();record_proof(a,'tx',lambda:result(),DIGEST);require_complete(a,'tx')
     assert autonomy_status(a,'tx')=='PENDING'
     a.c.execute("UPDATE runs SET game_outcome='CONFIRMED',retirement_outcome='SUCCEEDED',final_acknowledged=1")
     a.c.execute("UPDATE transactions SET phase='CONFIRMED'")
     assert autonomy_status(a,'tx')=='AUTONOMOUS'
-    with pytest.raises(DeploymentError):record_proof(a,'tx',result(),DIGEST)
+    with pytest.raises(DeploymentError):record_proof(a,'tx',lambda:result(),DIGEST)
     a.c.close()
 
 
 def test_manual_outcome_persists_without_becoming_success(tmp_path):
-    path=tmp_path/'proof.sqlite3';a=setup(path);record_proof(a,'tx',result(False),DIGEST)
+    path=tmp_path/'proof.sqlite3';a=setup(path);record_proof(a,'tx',lambda:result(False),DIGEST)
     a.c.execute("UPDATE runs SET game_outcome='UNCERTAIN',retirement_outcome='SUCCEEDED',final_acknowledged=1")
     a.c.execute("UPDATE transactions SET phase='UNCERTAIN'")
     assert autonomy_status(a,'tx')=='INCOMPLETE';a.c.close()
@@ -85,8 +99,37 @@ def test_manual_outcome_persists_without_becoming_success(tmp_path):
 
 def test_lost_run_authority_cannot_record_complete():
     a=setup();a.c.execute("UPDATE control SET mode='STOPPED',revision=3")
-    with pytest.raises(DeploymentError):record_proof(a,'tx',result(),DIGEST)
-    record_proof(a,'tx',result(False),DIGEST);a.c.close()
+    with pytest.raises(DeploymentError):record_proof(a,'tx',lambda:result(),DIGEST)
+    record_proof(a,'tx',lambda:result(False),DIGEST);a.c.close()
+
+
+@pytest.mark.parametrize('supplied',[None,True,SimpleNamespace(complete=True)])
+def test_malformed_supplied_result_rolls_back_without_evidence(supplied):
+    a=setup()
+    with pytest.raises(DeploymentError,match='PROOF_COMMIT_FAILED'):
+        record_proof(a,'tx',lambda:supplied,DIGEST)
+    assert not a.c.in_transaction and read_proof(a,'tx') is None
+    a.c.close()
+
+
+def test_supplier_exception_rolls_back_without_evidence():
+    a=setup()
+    def fail():raise RuntimeError('private supplier failure')
+    with pytest.raises(DeploymentError,match='PROOF_COMMIT_FAILED') as error:
+        record_proof(a,'tx',fail,DIGEST)
+    assert 'private' not in str(error.value)
+    assert not a.c.in_transaction and read_proof(a,'tx') is None
+    a.c.close()
+
+
+def test_update_exception_before_commit_rolls_back_without_evidence():
+    a=setup()
+    a.c.execute("""CREATE TRIGGER reject_deployment_evidence BEFORE UPDATE OF evidence
+        ON deployment_receipts BEGIN SELECT RAISE(ABORT,'rejected'); END""")
+    with pytest.raises(DeploymentError,match='PROOF_COMMIT_FAILED'):
+        record_proof(a,'tx',lambda:result(),DIGEST)
+    assert not a.c.in_transaction and read_proof(a,'tx') is None
+    a.c.close()
 
 
 def test_unknown_or_tampered_schema_is_not_migrated():

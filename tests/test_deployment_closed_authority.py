@@ -11,6 +11,7 @@ from clash_rush_rebuild.mvp_deployment import (
     CardState,
     CompiledDeploymentPlan,
     DeploymentEngine,
+    DeploymentError,
     Intent,
     Intervention,
     Point,
@@ -132,16 +133,27 @@ def test_ra06_release_spell_inflation_cannot_forge_result_count():
     assert result.spells_consumed == 0
 
 
-def test_ra06_rejected_two_card_batch_keeps_all_private_progress_atomic():
+def test_ra06_rejected_two_card_batch_keeps_all_private_progress_atomic(monkeypatch):
     world = World([
         card("first", count=1, x=.15),
         card("second", count=1, x=.30),
     ])
     world.no_progress = True
-    original = world.observe
+    original_observe = world.observe
+    original_sync = deployment_module._sync
+    accepted = None
+    rejected = None
+
+    def snapshot(core):
+        return (
+            core.sequence, core.captured, core.view, core.last_observation,
+            tuple(core.inventory.cards), core.inventory.pages, core.inventory.complete,
+            tuple(core.cards.items()), tuple(core.holds.items()),
+            tuple(core.ground_steps.items()), core.spells,
+        )
 
     def observe():
-        observation = original()
+        observation = original_observe()
         if any(event.verb == "hold" for event in world.events):
             first, second = observation.page.cards
             forged = replace(
@@ -154,11 +166,25 @@ def test_ra06_rejected_two_card_batch_keeps_all_private_progress_atomic():
             return replace(observation, page=forged)
         return observation
 
+    def sync(core, observation, permitted=None):
+        nonlocal accepted, rejected
+        before = snapshot(core)
+        try:
+            result = original_sync(core, observation, permitted)
+        except DeploymentError:
+            rejected = (before, snapshot(core))
+            raise
+        accepted = snapshot(core)
+        return result
+
+    monkeypatch.setattr(deployment_module, "_sync", sync)
     result = _engine(world, observe=observe).run()
 
     assert result.reason == "UNEXPLAINED_CARD_CHANGE"
     assert result.remaining == 2
     assert [item.remaining for item in world.cards] == [1, 1]
+    assert accepted is not None
+    assert rejected is not None and rejected[0] == rejected[1]
 
 
 def test_ra12_possible_held_delay_has_zero_late_down():

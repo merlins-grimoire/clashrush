@@ -86,10 +86,9 @@ def require_profile(authority,run_nonce: str,digest: str) -> None:
     if row is None or row[0]!=digest:raise DeploymentError('PROFILE_BINDING_MISMATCH')
 
 
-def record_proof(authority,transaction_ref: str,result: DeploymentResult,digest: str) -> None:
-    if type(result) is not DeploymentResult:raise DeploymentError('RESULT_INVALID')
+def record_proof(authority,transaction_ref: str,result_supplier,digest: str) -> bool:
+    if not callable(result_supplier):raise DeploymentError('RESULT_INVALID')
     _digest(digest)
-    raw=json.dumps(result.public_payload(),sort_keys=True,separators=(',',':'))
     c=authority._open()
     try:
         c.execute('BEGIN IMMEDIATE')
@@ -100,10 +99,23 @@ def record_proof(authority,transaction_ref: str,result: DeploymentResult,digest:
              JOIN control c ON c.singleton=1 WHERE t.transaction_ref=?''',(transaction_ref,)).fetchone()
         if row is None or row[1]!='INPUT_STARTED' or row[2]!=digest or row[3] is not None:
             raise DeploymentError('PROOF_BINDING_MISMATCH')
+        supplied=result_supplier()
+        if type(supplied) is not DeploymentResult:raise DeploymentError('RESULT_INVALID')
+        result=DeploymentResult(
+            supplied.complete,supplied.reason,supplied.cards_total,
+            supplied.spells_consumed,supplied.own_exit,supplied.home_verified,
+            supplied.intervention_free,supplied.remaining,
+        )
         if result.complete and (row[5]!='RUNNING' or row[6]!=row[0] or row[7]!=row[4]):
             raise DeploymentError('AUTHORIZATION_LOST')
-        c.execute('UPDATE deployment_receipts SET evidence=? WHERE run_nonce=? AND evidence IS NULL',(raw,row[0]))
+        raw=json.dumps(DeploymentResult.public_payload(result),sort_keys=True,separators=(',',':'))
+        updated=c.execute(
+            'UPDATE deployment_receipts SET evidence=? WHERE run_nonce=? AND evidence IS NULL',
+            (raw,row[0]),
+        )
+        if updated.rowcount != 1:raise DeploymentError('PROOF_BINDING_MISMATCH')
         c.execute('COMMIT')
+        return True
     except BaseException:
         if c.in_transaction:c.execute('ROLLBACK')
         raise DeploymentError('PROOF_COMMIT_FAILED') from None

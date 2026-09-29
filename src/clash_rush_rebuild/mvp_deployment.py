@@ -614,16 +614,17 @@ def _read(core, deadline):
             or observation.captured_at < core.captured
             or not 0 <= now - observation.captured_at <= core.policy.observation_age):
         raise DeploymentError('OBSERVATION_STALE')
-    core.sequence = observation.sequence
-    core.captured = observation.captured_at
     if observation.intervention is not Intervention.CLEAR:
         core.intervention_free = False
         raise DeploymentError('INTERVENTION')
     if observation.screen is Screen.BATTLE:
         if core.view is not None and observation.view != core.view:
             raise DeploymentError('VIEW_CHANGED')
-        core.view = observation.view
-    core.last_observation = observation
+        _stage_battle(core, observation, validate_progress=False)
+    else:
+        core.sequence = observation.sequence
+        core.captured = observation.captured_at
+        core.last_observation = observation
     return observation
 
 
@@ -643,6 +644,67 @@ def _signatures(core):
 
 def _quantities(core):
     return tuple(quantity for _identity, _kind, _spell, quantity in core.plan)
+
+
+def _detached_inventory(core):
+    inventory = Inventory(core.inventory.max_cards, core.inventory.max_pages)
+    inventory.cards = list(core.inventory.cards)
+    inventory.complete = core.inventory.complete
+    inventory.pages = core.inventory.pages
+    return inventory
+
+
+def _stage_battle(core, observation, permitted=None, validate_progress=True):
+    if observation.screen is not Screen.BATTLE or observation.page is None:
+        raise DeploymentError('BATTLE_UNPROVED')
+    page = observation.page
+    if not page.left_edge or not page.right_edge:
+        raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+    observed = tuple(item.signature for item in page.cards)
+    expected = _signatures(core)
+    if len(observed) > core.viewport_limit:
+        raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
+    if observed != expected:
+        if len(set(observed)) != len(observed):
+            raise DeploymentError('ROSTER_DUPLICATE')
+        if any(item not in expected for item in observed):
+            raise DeploymentError('ROSTER_ADDITIONAL')
+        raise DeploymentError('ROSTER_INCOMPLETE')
+    for item in page.cards:
+        item.require_known()
+    inventory = _detached_inventory(core)
+    if not inventory.complete:
+        for item, quantity in zip(page.cards, _quantities(core)):
+            if item.remaining != quantity or item.state is not CardState.AVAILABLE:
+                raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
+        inventory.add(page)
+        cards = {item.identity: item for item in page.cards}
+        holds = {identity: 0.0 for identity in cards}
+    else:
+        inventory.locate(page)
+        cards = {}
+        holds = None
+        if validate_progress:
+            for item in page.cards:
+                old = core.cards[item.identity]
+                if item.signature != old.signature:
+                    raise DeploymentError('CARD_CHANGED')
+                if (item.identity != permitted
+                        and (item.remaining != old.remaining or item.state is not old.state)):
+                    raise DeploymentError('UNEXPLAINED_CARD_CHANGE')
+                cards[item.identity] = item
+    return inventory, cards, holds
+
+
+def _commit_battle(core, observation, inventory, cards, holds):
+    core.sequence = observation.sequence
+    core.captured = observation.captured_at
+    core.view = observation.view
+    core.last_observation = observation
+    core.inventory = inventory
+    core.cards = cards
+    if holds is not None:
+        core.holds = holds
 
 
 def _target(core, observation, card_value):
@@ -665,29 +727,8 @@ def _target(core, observation, card_value):
 
 
 def _sync(core, observation, permitted=None):
-    if observation.screen is not Screen.BATTLE or observation.page is None:
-        raise DeploymentError('BATTLE_UNPROVED')
-    if not observation.page.left_edge or not observation.page.right_edge:
-        raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
-    observed = tuple(item.signature for item in observation.page.cards)
-    expected = _signatures(core)
-    if observed != expected:
-        if len(set(observed)) != len(observed):
-            raise DeploymentError('ROSTER_DUPLICATE')
-        if any(item not in expected for item in observed):
-            raise DeploymentError('ROSTER_ADDITIONAL')
-        raise DeploymentError('ROSTER_INCOMPLETE')
-    core.inventory.locate(observation.page)
-    reconciled = {}
-    for item in observation.page.cards:
-        item.require_known()
-        old = core.cards[item.identity]
-        if item.signature != old.signature:
-            raise DeploymentError('CARD_CHANGED')
-        if item.identity != permitted and (item.remaining != old.remaining or item.state is not old.state):
-            raise DeploymentError('UNEXPLAINED_CARD_CHANGE')
-        reconciled[item.identity] = item
-    core.cards = reconciled
+    inventory, cards, holds = _stage_battle(core, observation, permitted)
+    _commit_battle(core, observation, inventory, cards, holds)
 
 
 def _proof_check(core, intent, before):
@@ -800,25 +841,8 @@ def _navigate(core, observation):
 
 
 def _scan(core, observation):
-    if not observation.page.left_edge or not observation.page.right_edge:
-        raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
-    observed = tuple(item.signature for item in observation.page.cards)
-    expected = _signatures(core)
-    if len(observed) > core.viewport_limit:
-        raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
-    if observed != expected:
-        if len(set(observed)) != len(observed):
-            raise DeploymentError('ROSTER_DUPLICATE')
-        if any(item not in expected for item in observed):
-            raise DeploymentError('ROSTER_ADDITIONAL')
-        raise DeploymentError('ROSTER_INCOMPLETE')
-    for current, quantity in zip(observation.page.cards, _quantities(core)):
-        current.require_known()
-        if current.remaining != quantity or current.state is not CardState.AVAILABLE:
-            raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
-    core.inventory.add(observation.page)
-    core.cards = {item.identity: item for item in observation.page.cards}
-    core.holds = {identity: 0.0 for identity in core.cards}
+    inventory, cards, holds = _stage_battle(core, observation)
+    _commit_battle(core, observation, inventory, cards, holds)
     return observation
 
 
@@ -868,6 +892,9 @@ def _consume(core, card_value, observation, deadline):
                 raise DeploymentError('COUNT_DELTA_UNCERTAIN')
             _wait(core, .04, ack_deadline)
             confirmed = _read(core, ack_deadline)
+            if (confirmed.sequence <= observation.sequence
+                    or confirmed.captured_at < observation.captured_at):
+                raise DeploymentError('OBSERVATION_STALE')
             check = _visible(confirmed, card_value.identity)
             if check.remaining != current.remaining or check.state is not current.state:
                 raise DeploymentError('COUNT_DELTA_UNCERTAIN')
@@ -879,6 +906,7 @@ def _consume(core, card_value, observation, deadline):
             return confirmed, True
         if current.remaining != before_count or current.state is not card_value.state:
             raise DeploymentError('COUNT_DELTA_UNCERTAIN')
+        _sync(core, observation)
         _wait(core, .05, ack_deadline)
     raise DeploymentError('CONSUMPTION_UNPROVED')
 

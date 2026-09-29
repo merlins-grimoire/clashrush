@@ -139,6 +139,12 @@ retirement. Legacy CONFIRMED remains legacy. Schema extension DDL and its versio
 are committed atomically by explicit Run/Resume; read-only Status does not
 migrate. A rich proof is required before the attack adapter can report CONFIRMED;
 final autonomy additionally requires the existing successful retirement receipt.
+The deadline-checking detached result supplier runs inside the receipt's existing
+`BEGIN IMMEDIATE` transaction after binding lookup and immediately before exact
+result validation, canonical serialization, update, and COMMIT. Supplier, SQL,
+update, or pre-COMMIT failure rolls the transaction back; only an exact `True`
+acknowledgment represents the successful durable commit, with no post-commit
+deadline callback.
 
 ## Promotion gates
 

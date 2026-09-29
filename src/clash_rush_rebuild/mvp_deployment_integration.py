@@ -73,10 +73,6 @@ class NativeDeploymentExecutor:
             if supplied is not True or acknowledged is not True:
                 raise DeploymentError('PROOF_COMMIT_FAILED')
         except BaseException:raise DeploymentError('PROOF_COMMIT_FAILED') from None
-        try:self._within_deadline()
-        except DeploymentError as error:
-            if result.complete:
-                result=replace(result,complete=False,reason=error.code)
         return result.complete,result.reason
     def cleanup(self):
         if self.release() is not True:raise DeploymentError('RELEASE_UNPROVED')
@@ -108,6 +104,6 @@ def build_native_executor(*,binding,bound_input,capture_bgr,home_verified,enable
     return NativeDeploymentExecutor(observe=observer,deliver=delivery.deliver,
           release=delivery.release,live_gate=active,monotonic=time.monotonic,
           wait=time.sleep,deadline=lease.deadline-STOP_RESERVE,monitor=monitor,
-          record_result=lambda result_for_commit:(
-              record_proof(authority,transaction_ref,result_for_commit(),profile.digest) is None),
+          record_result=lambda result_for_commit:
+              record_proof(authority,transaction_ref,result_for_commit,profile.digest),
           plan=profile.plan)

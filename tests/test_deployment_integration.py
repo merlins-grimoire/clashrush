@@ -3,6 +3,8 @@ import pytest
 from test_deployment_repair import World,card
 from clash_rush_rebuild.mvp_deployment import Intervention, DeploymentError, CompiledDeploymentPlan
 from clash_rush_rebuild.mvp_deployment_integration import NativeDeploymentExecutor
+from clash_rush_rebuild.mvp_deployment_receipt import record_proof, read_proof
+from test_deployment_receipt import setup as receipt_setup, DIGEST
 
 class Monitor:
     def __init__(self):self.started=False;self.closed=False;self.failed=False
@@ -73,6 +75,23 @@ def test_record_delay_before_commit_records_only_non_success():
     assert e.run() == (False,'DEADLINE')
     assert len(records)==1 and records[0].complete is False
     assert w.closed and m.closed
+
+
+def test_sqlite_receipt_acquires_deadline_checked_result_inside_transaction():
+    w=World([card(count=1)]);a=receipt_setup()
+    def record(result_supplier):
+        def delayed_supplier():
+            assert a.c.in_transaction
+            w.clock.now=100.0
+            return result_supplier()
+        return record_proof(a,'tx',delayed_supplier,DIGEST)
+    e,m,_=compose(w,record=record)
+
+    assert e.run() == (False,'DEADLINE')
+    persisted=read_proof(a,'tx')
+    assert persisted is not None and persisted.complete is False and persisted.reason=='DEADLINE'
+    assert w.closed and m.closed
+    a.c.close()
 
 
 def test_non_exact_record_acknowledgment_cannot_publish_success():
