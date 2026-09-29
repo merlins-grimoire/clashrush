@@ -240,17 +240,18 @@ def test_callback_cannot_shadow_failed_release_into_false_completion():
 def test_callback_exit_seconds_shadow_cannot_extend_frozen_exit_deadline():
     approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
     world = World([card("card_0", count=1, x=.2)])
-    policy = Policy(exit_seconds=1.0)
+    policy = Policy(visit_seconds=3.0, exit_seconds=1.0)
     engine_ref = {}
     original_observe = world.observe
     delayed = False
 
     def observe():
         nonlocal delayed
-        if world.screen is profile_module.Screen.END_CONFIRM and not delayed:
+        observation = original_observe()
+        if observation.screen is profile_module.Screen.RESULT and not delayed:
             delayed = True
-            world.clock.now += 2.0
-        return original_observe()
+            world.clock.now += 3.0
+        return observation
 
     world.observe = observe
     def attack():
@@ -265,7 +266,7 @@ def test_callback_exit_seconds_shadow_cannot_extend_frozen_exit_deadline():
     assert result.reason == "DEADLINE"
     assert not result.complete
     assert [event.verb for event in world.events if event.verb in {
-        "end_battle", "confirm_end", "return_home"}] == ["end_battle"]
+        "end_battle", "confirm_end", "return_home"}] == []
     assert world.closed
 
 

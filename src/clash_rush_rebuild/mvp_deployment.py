@@ -1,4 +1,4 @@
-"""Bounded, typed army deployment and explicit battle exit.
+"""Bounded, typed army deployment and natural-result return.
 
 Donor sequence: CoC_Bot a5c943a src/attacker.py (discover all cards, preserve
 an overlap while scrolling, dispatch by card kind). The unsafe transport,
@@ -379,7 +379,8 @@ class DeploymentResult:
             if type(b) is not bool: raise DeploymentError('RESULT_INVALID')
         for n,limit in ((self.cards_total,48),(self.spells_consumed,48000),(self.remaining,48000)):
             if type(n) is not int or not 0<=n<=limit: raise DeploymentError('RESULT_INVALID')
-        if self.complete and not (self.cards_total>0 and self.own_exit and self.home_verified and self.intervention_free and self.remaining==0):
+        if self.complete and not (self.cards_total>0 and self.home_verified
+                                  and self.intervention_free and self.remaining==0):
             raise DeploymentError('RESULT_INVALID')
         if type(self.reason) is not str or re.fullmatch(r'[A-Z][A-Z_]{0,63}',self.reason) is None:
             raise DeploymentError('RESULT_INVALID')
@@ -428,23 +429,130 @@ def _copy_policy(policy):
     return values
 
 
-def _copy_observation(value):
+def _source_point(value):
+    if type(value) is not Point:
+        raise DeploymentError('OBSERVATION_INVALID')
+    x, y = value.x, value.y
+    finite(x, 0, 1)
+    finite(y, 0, 1)
+    return x, y
+
+
+def _detach_observation(value):
+    """Validate the original hostile graph completely, then detach it."""
     if type(value) is not Observation:
         raise DeploymentError('OBSERVATION_INVALID')
+
+    sequence = value.sequence
+    captured_at = value.captured_at
+    view = value.view
+    screen = value.screen
+    intervention = value.intervention
+    home_verified = value.home_verified
+    if (type(sequence) is not int or sequence < 1
+            or type(view) is not str or not 1 <= len(view) <= 128
+            or type(screen) is not Screen
+            or type(intervention) is not Intervention
+            or type(home_verified) is not bool):
+        raise DeploymentError('OBSERVATION_INVALID')
+    finite(captured_at)
+
+    raw_page = value.page
+    page_values = None
+    if raw_page is not None:
+        if type(raw_page) is not Page:
+            raise DeploymentError('PAGE_INVALID')
+        raw_cards = raw_page.cards
+        left_edge = raw_page.left_edge
+        right_edge = raw_page.right_edge
+        if (type(raw_cards) is not tuple or not 1 <= len(raw_cards) <= 24
+                or type(left_edge) is not bool or type(right_edge) is not bool):
+            raise DeploymentError('PAGE_INVALID')
+        card_values = []
+        prior_x = None
+        for item in raw_cards:
+            if type(item) is not Card:
+                raise DeploymentError('CARD_INVALID')
+            identity = item.identity
+            kind = item.kind
+            spell = item.spell
+            remaining = item.remaining
+            state = item.state
+            selected = item.selected
+            if (type(identity) is not str
+                    or re.fullmatch(r'[a-z0-9][a-z0-9_.:-]{0,63}', identity) is None
+                    or type(kind) is not CardKind or type(spell) is not Spell
+                    or type(state) is not CardState or type(selected) is not bool
+                    or (remaining is not None and
+                        (type(remaining) is not int or not 0 <= remaining <= 999))
+                    or (kind not in (CardKind.SPELL, CardKind.UNKNOWN)
+                        and spell is not Spell.NONE)):
+                raise DeploymentError('CARD_INVALID')
+            point = _source_point(item.point)
+            if prior_x is not None and prior_x >= point[0]:
+                raise DeploymentError('PAGE_INVALID')
+            prior_x = point[0]
+            card_values.append((identity, kind, spell, remaining, state, point, selected))
+        if len({item[0] for item in card_values}) != len(card_values):
+            raise DeploymentError('PAGE_INVALID')
+        page_values = (tuple(card_values), left_edge, right_edge)
+    if screen is Screen.BATTLE and page_values is None:
+        raise DeploymentError('PAGE_MISSING')
+
+    raw_targets = value.targets
+    if type(raw_targets) is not tuple or len(raw_targets) > 256:
+        raise DeploymentError('OBSERVATION_INVALID')
+    target_values = []
+    for item in raw_targets:
+        if type(item) is not Target:
+            raise DeploymentError('TARGET_INVALID')
+        kind = item.kind
+        confidence = item.confidence
+        if type(kind) is not TargetKind:
+            raise DeploymentError('TARGET_INVALID')
+        point = _source_point(item.point)
+        finite(confidence, 0, 1)
+        target_values.append((kind, point, confidence))
+
+    raw_controls = value.controls
+    if type(raw_controls) is not tuple or len(raw_controls) > 16:
+        raise DeploymentError('OBSERVATION_INVALID')
+    control_values = []
+    names = []
+    allowed = {'attack', 'find_match', 'army_attack', 'end_battle',
+               'confirm_end', 'return_home'}
+    for item in raw_controls:
+        if type(item) is not tuple or len(item) != 2:
+            raise DeploymentError('CONTROL_INVALID')
+        name = item[0]
+        if type(name) is not str or name not in allowed:
+            raise DeploymentError('CONTROL_INVALID')
+        point = _source_point(item[1])
+        names.append(name)
+        control_values.append((name, point))
+    if len(set(names)) != len(names):
+        raise DeploymentError('CONTROL_AMBIGUOUS')
+
     page = None
-    if value.page is not None:
-        page = Page(tuple(Card(
-            item.identity, CardKind(item.kind.value), Spell(item.spell.value),
-            item.remaining, CardState(item.state.value),
-            Point(item.point.x, item.point.y), item.selected,
-        ) for item in value.page.cards), value.page.left_edge, value.page.right_edge)
-    return Observation(
-        value.sequence, value.captured_at, value.view, Screen(value.screen.value), page,
-        tuple(Target(TargetKind(item.kind.value), Point(item.point.x, item.point.y),
-                     item.confidence) for item in value.targets),
-        tuple((name, Point(point.x, point.y)) for name, point in value.controls),
-        Intervention(value.intervention.value), value.home_verified,
-    )
+    if page_values is not None:
+        cards = tuple(Card(identity, kind, spell, remaining, state, Point(*point), selected)
+                      for identity, kind, spell, remaining, state, point, selected
+                      in page_values[0])
+        page = Page(cards, page_values[1], page_values[2])
+    targets = tuple(Target(kind, Point(*point), confidence)
+                    for kind, point, confidence in target_values)
+    controls = tuple((name, Point(*point)) for name, point in control_values)
+    return Observation(sequence, captured_at, view, screen, page, targets, controls,
+                       intervention, home_verified)
+
+
+def _copy_observation(value):
+    try:
+        return _detach_observation(value)
+    except DeploymentError:
+        raise
+    except BaseException:
+        raise DeploymentError('OBSERVATION_INVALID') from None
 
 
 class _RunCore:
@@ -948,18 +1056,19 @@ def _deploy(core, observation, deadline):
     return observation
 
 
-def _exit(core, observation):
-    deadline = min(core.deadline, _now(core) + core.policy.exit_seconds)
-    _send(core, Intent('end_battle', observation.control('end_battle'),
-                       Action.RETURN_HOME, deadline=deadline), observation)
-    core.own_exit = True
-    observation = _await(core, {Screen.END_CONFIRM, Screen.RESULT},
-                         min(deadline, _now(core) + 5), Screen.BATTLE)
-    if observation.screen is Screen.END_CONFIRM:
-        _send(core, Intent('confirm_end', observation.control('confirm_end'),
-                           Action.RETURN_HOME, deadline=deadline), observation)
-        observation = _await(core, {Screen.RESULT},
-                             min(deadline, _now(core) + 5), Screen.END_CONFIRM)
+def _exit(core, observation, result_deadline):
+    # Deployment is terminal. Battle input is now forbidden: observe until the
+    # game itself presents Result, leaving exit_seconds for proved Return/Home.
+    for _ in range(12000):
+        if observation.screen is Screen.RESULT:
+            break
+        if observation.screen is not Screen.BATTLE:
+            raise DeploymentError('UNEXPECTED_TRANSITION')
+        _wait(core, .05, result_deadline)
+        observation = _read(core, result_deadline)
+    else:
+        raise DeploymentError('OBSERVATION_LIMIT')
+    deadline = core.deadline
     _send(core, Intent('return_home', observation.control('return_home'),
                        Action.RETURN_HOME, deadline=deadline), observation)
     observation = _await(core, {Screen.HOME},
@@ -1006,7 +1115,8 @@ def _execute_registered_run(facade):
         if not any(item.remaining for item in core.cards.values()):
             raise DeploymentError('EMPTY_ARMY')
         observation = _deploy(core, observation, deploy_deadline)
-        _exit(core, observation)
+        result_deadline = core.deadline - core.policy.exit_seconds
+        _exit(core, observation, result_deadline)
         _now(core, core.deadline)
         complete = True
         reason = 'AUTONOMOUS_DEPLOYMENT_COMPLETE'
@@ -1039,7 +1149,7 @@ def _execute_registered_run(facade):
         elif late and complete:
             complete = False
             reason = cleanup_time_fault
-    if complete and not (core.own_exit and core.home and core.intervention_free):
+    if complete and not (core.home and core.intervention_free):
         complete = False
         reason = 'DEPLOYMENT_FAILED'
     result = _snapshot(core, complete, reason)

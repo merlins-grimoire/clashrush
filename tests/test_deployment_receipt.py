@@ -37,7 +37,7 @@ def setup(path=':memory:'):
 
 
 def result(complete=True):
-    return DeploymentResult(complete,'AUTONOMOUS_DEPLOYMENT_COMPLETE' if complete else 'INTERVENTION',2,2,complete,True,complete,0 if complete else 2)
+    return DeploymentResult(complete,'AUTONOMOUS_DEPLOYMENT_COMPLETE' if complete else 'INTERVENTION',2,2,False,True,complete,0 if complete else 2)
 
 
 def test_schema_upgrade_is_repeatable_and_legacy_is_not_autonomous():

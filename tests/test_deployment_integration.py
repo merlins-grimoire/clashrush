@@ -30,7 +30,7 @@ def compose(w,monitor=None,record=None):
 def test_real_engine_result_is_persisted_before_true_return():
     w=World([card(count=1)]);e,m,records=compose(w)
     assert e.run()==(True,'AUTONOMOUS_DEPLOYMENT_COMPLETE')
-    assert len(records)==1 and records[0].complete and m.closed
+    assert len(records)==1 and records[0].complete and not records[0].own_exit and m.closed
 
 
 def test_owner_does_not_consume_shadowable_facade_run(monkeypatch):
@@ -39,7 +39,7 @@ def test_owner_does_not_consume_shadowable_facade_run(monkeypatch):
         AssertionError('facade run must not be owner authority')))
     w=World([card(count=1)]);e,m,records=compose(w)
     assert e.run()==(True,'AUTONOMOUS_DEPLOYMENT_COMPLETE')
-    assert len(records)==1 and records[0].complete and m.closed
+    assert len(records)==1 and records[0].complete and not records[0].own_exit and m.closed
 
 
 def test_monitor_cleanup_failure_never_records_autonomous_success():

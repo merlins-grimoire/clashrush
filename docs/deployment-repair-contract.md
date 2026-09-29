@@ -65,14 +65,28 @@ Python sandbox and does not claim isolation from arbitrary same-process module
 reflection, process-memory access, code-object mutation, or imported-module
 mutation.
 
-Data crossing those trusted ports is not trusted. Profile, configuration and
-template inputs; callback-returned `Observation`, `Page`, `Card`, `Target` and
-container values; timestamps and quantities; native delivery and release return
-values; and durable-record acknowledgments are exact-type validated, copied or
-reconciled, and rejected closed. A whole observation batch is validated against
-temporary exact values before any card progress is committed. Ordinary caller
-alias mutation outside trusted callbacks cannot rewrite the admitted plan or
-policy authority.
+Data crossing trusted observation ports is hostile. Every callback-returned
+`Observation` graph is validated in its original representation before nested
+attribute reads, iteration, enum conversion, tuple conversion, or coercion:
+root and nested dataclasses, enums, points and scalar types must be exact; Page
+cards, targets, controls and each control entry must be exact tuples with the
+existing bounds and semantics. The engine constructs a service-owned detached
+graph only after the entire source graph passes. A whole observation batch is
+validated against temporary exact values before any card progress is committed,
+and ordinary callback aliases cannot rewrite accepted evidence afterward.
+
+The programmatic `DeploymentProfile` constructor is an INTERNAL/PREVALIDATED
+composition API. Runtime hostile configuration enters only through the strict
+canonical-byte `load_profile` path; JSON arrays remain valid schema lists and
+are not observation tuples. `GuardedDeploymentInput` likewise receives an
+INTERNAL/PREVALIDATED `Intent` constructed by this engine; direct external
+`Intent` construction is unsupported. These classifications do not weaken the
+existing exact root/action/point checks at those internal seams and do not
+expand this repair into profile, vision, or input behavior.
+
+Native delivery and release return values and durable-record acknowledgments
+remain exact-type validated and rejected closed. Ordinary caller alias mutation
+outside trusted callbacks cannot rewrite the admitted plan or policy authority.
 
 `DeploymentEngine` remains a one-use façade. Trusted construction copies the
 exact plan and all eleven policy scalars into a service-owned run core. Original
@@ -123,15 +137,24 @@ No type or damage statistic is inferred by a language/vision model at runtime.
 
 CAPTURE_BAR -> DISCOVER_ALL_WHOLE_VIEWPORT_HYPOTHESES -> CLASSIFY ->
 PROVE_SINGLE_PAGE_EXACT_ROSTER -> SELECT -> TYPED_DEPLOY -> VERIFY_DECREMENT ->
-FRESH_WHOLE_ROSTER_RECHECK -> VERIFY_ALL_TERMINAL ->
-END_BATTLE -> OPTIONAL_BATTLE_CONFIRM -> RESULT -> RETURN_HOME -> VERIFY_HOME ->
-OWNED_STOP -> VERIFY_RETIREMENT -> FINAL_AUTONOMOUS_RECEIPT.
+FRESH_WHOLE_ROSTER_RECHECK -> VERIFY_ALL_TERMINAL -> READ_ONLY_NATURAL_WAIT ->
+RESULT -> PROVED_RETURN_HOME -> FRESH_SAME_ACCOUNT_HOME -> OWNED_STOP ->
+VERIFY_RETIREMENT -> FINAL_AUTONOMOUS_RECEIPT.
 
-End begins immediately after complete proof, not after a natural timer. Okay is
-only the explicitly observed End confirmation, never a generic dialog action.
-Unknown/reward/spending controls deny new gameplay input. Manual/foreign input,
-unhealthy intervention observation or an unexplained result cannot satisfy
-S004. Release and owned retirement still occur on failure.
+After terminal deployment proof the engine issues no battle gameplay input. It
+uses the existing observation interval and the absolute visit deadline while
+reserving `exit_seconds` for proved Return/Home. `End Battle`, surrender, and
+battle-confirmation clicks are forbidden both as normal success and as timeout
+fallbacks. Result timeout, stale/malformed/unknown/intervention evidence, or a
+failed Return/Home proof remains incomplete and proceeds to release and owned
+retirement without manufacturing a result.
+
+`DeploymentResult.own_exit` retains its historical, literal meaning: the runner
+deliberately ended the battle. Natural-result success therefore persists
+`own_exit=false`; completion instead requires natural Result, exactly one proved
+Return Home, fresh same-account Home, intervention-free evidence, zero remaining
+units, release, and the unchanged retirement/receipt gates. Unknown/reward/
+spending controls deny new gameplay input.
 
 The versioned receipt stores inventory count, consumed spells, remaining units,
 exit origin, Home proof, and intervention state separately from lifecycle
