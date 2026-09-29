@@ -109,3 +109,13 @@ The monitor must not create a second worker, process, input adapter, lifecycle o
 - compiled profile data and decoded template authority must not be mutable after validation.
 
 Do not weaken or delete these RED cases to obtain a green H0 branch. H1 must make them green through the real composition, then add the complete seven-defect and alternate-N matrix before production promotion.
+
+## H1 static disposition
+
+H1 implements only the bounded schema-2 plan/recognition capability selected above:
+finite one-to-six-card sealed plans, positive single-page endpoints, exhaustive
+whole-viewport complete-frame hypotheses, relative witness ownership, generic
+exact initial quantities, and fresh whole-roster equality before input/exit.
+Scrolling and partial-page authority are absent from the H1 composition. Generated
+3/4/5/6-card and seven-defect regressions are the static evidence; no private
+profile/artwork was calibrated or admitted, and H2/H3 behavior remains unchanged.

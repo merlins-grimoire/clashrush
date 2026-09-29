@@ -18,20 +18,32 @@ admits no new gesture after the earlier of its own 240-second visit bound and
 the parent's deadline minus 30 seconds. Existing runtime cleanup can fail;
 uncertainty never becomes a successful receipt merely because time elapsed.
 The monotonic execution bound is distinct from the existing wall-time admission
-expiry. No first-pass or per-page deadline reset exists.
+expiry. No first-pass deadline reset exists. H1 is single-page only and has no
+page/scroll deadline or active scroll intent.
 
 ## Data and recognition
 
 Full frames and derived live image arrays are transient. The observer clears
-its writable frame and emits only typed scalar observations. Private templates
-are bounded, immutable copies loaded through validated paths and SHA-256 hashes.
+its writable frame and emits only typed scalar observations. Profile schema 2
+stores authority as deeply frozen scalar/tuple mappings and byte-backed template
+values; matching reconstructs non-owned read-only arrays from those bytes.
+Private templates remain bounded and loaded through validated paths and SHA-256 hashes.
 An exact tree and profile digest are bound to the grant. No template is admitted
 by its donor name alone.
 
-A complete card inventory requires explicit left/right edge evidence and unique
-ordered overlaps. Duplicate/ambiguous identity, clipped count, absent card,
-invalid type, or unexplained state change denies deployment. Gap heuristics,
-missing x glyphs, default one, and color-only exhaustion are prohibited.
+A complete card inventory requires mutually exclusive positive END/CONTINUES
+evidence at both viewport boundaries and exact equality with one sealed ordered
+single-page roster. Every complete-frame, identity, state, quantity and endpoint
+witness must have exactly one compatible card-relative owner. Duplicate,
+additional, unknown, partial, ambiguous, clipped or unexplained evidence denies
+deployment. Longest/top-N/subset selection, gap completion, missing-x defaults,
+default one, color-only exhaustion, partial pages and scrolling are prohibited.
+
+The compiled plan supports one to six unique, simultaneously visible cards.
+Overflow rejects; it never truncates. The first separately calibrated policy may
+seal Wall Breaker, Goblin, Barbarian King and Lightning with exact per-entry
+initial quantities, including Lightning 2, but those values are profile data—not
+reusable-engine constants. No profile is admitted by this H1 static checkpoint.
 
 Troop/spell quantities must be exact bounded integers. Zero requires a matching
 terminal-card appearance. Hero/clan terminal state means deployed/depleted—not
@@ -47,7 +59,7 @@ owned up cleanup. Timed waits never imply successful deployment.
 Troops receive short holds with a 25-second cumulative per-card ceiling.
 Hero/clan singletons receive one placement. Spells receive exactly one tap per
 acknowledged decrement, with two observations agreeing before another cast.
-All discovery, matching, scrolling and execution consume the same <=60-second
+All discovery, matching and execution consume the same <=60-second
 deployment budget. Reaching the budget while units remain is incomplete.
 
 ClashAutomation's ray/edge-density result proposes ground. A separately admitted
@@ -63,8 +75,9 @@ No type or damage statistic is inferred by a language/vision model at runtime.
 
 ## Completion
 
-CAPTURE_BAR -> DISCOVER_CARDS -> CLASSIFY -> COMPLETE_COVERAGE -> SELECT ->
-TYPED_DEPLOY -> VERIFY_DECREMENT -> SCROLL_OR_RECHECK -> VERIFY_ALL_TERMINAL ->
+CAPTURE_BAR -> DISCOVER_ALL_WHOLE_VIEWPORT_HYPOTHESES -> CLASSIFY ->
+PROVE_SINGLE_PAGE_EXACT_ROSTER -> SELECT -> TYPED_DEPLOY -> VERIFY_DECREMENT ->
+FRESH_WHOLE_ROSTER_RECHECK -> VERIFY_ALL_TERMINAL ->
 END_BATTLE -> OPTIONAL_BATTLE_CONFIRM -> RESULT -> RETURN_HOME -> VERIFY_HOME ->
 OWNED_STOP -> VERIFY_RETIREMENT -> FINAL_AUTONOMOUS_RECEIPT.
 

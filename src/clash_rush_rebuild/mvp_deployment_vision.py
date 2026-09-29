@@ -109,34 +109,35 @@ def discover_card_boxes(bar: np.ndarray, geometry: CardGeometry=CardGeometry()):
     if not math.isfinite(spread) or spread<=0: raise DeploymentError('BAR_UNPROVED')
     profile=(profile-profile.min())/spread
     peaks=find_peaks(profile,height=geometry.peak_height,distance=geometry.peak_distance)[0]
+    # A complete frame edge must be vertically contained by the declared bar
+    # viewport. Full-height crop/chrome/scenery edges are clipping witnesses,
+    # not candidate card boundaries.
+    peaks=np.asarray([value for value in peaks
+                      if not edges[0,int(value)] and not edges[-1,int(value)]],dtype=np.int64)
     if len(peaks)<2 or len(peaks)>64: raise DeploymentError('BAR_UNPROVED')
-    # CoC_Bot's donor grammar alternates card-width spans with one of two
-    # observed inter-card gap classes. Selecting the longest complete run keeps
-    # a strong translucent-bar/scenery edge outside the card sequence instead
-    # of pairing it as a phantom first card.
-    def near(value,target,tolerance): return abs(value-target)<=tolerance
-    gaps=(.007,.015); gap_tolerance=.01
-    runs=[]
-    for start in range(len(peaks)-1):
-        left,right=int(peaks[start]),int(peaks[start+1])
-        if not near((right-left)/w,geometry.card_width,geometry.width_tolerance):
-            continue
-        boxes=[(left,0,right,h)]; index=start+1
-        while index+2<len(peaks):
-            gap=(int(peaks[index+1])-int(peaks[index]))/w
-            next_left,next_right=int(peaks[index+1]),int(peaks[index+2])
-            if (not any(near(gap,expected,gap_tolerance) for expected in gaps)
-                    or not near((next_right-next_left)/w,geometry.card_width,geometry.width_tolerance)):
-                break
-            boxes.append((next_left,0,next_right,h)); index+=2
-        runs.append(tuple(boxes))
-    if not runs: raise DeploymentError('BAR_UNPROVED')
-    longest=max(map(len,runs))
-    winners={run for run in runs if len(run)==longest}
-    if len(winners)!=1: raise DeploymentError('BAR_AMBIGUOUS')
-    boxes=winners.pop()
-    if len(boxes)>24: raise DeploymentError('BAR_UNPROVED')
-    return boxes
+    minimum=geometry.card_width-geometry.width_tolerance
+    maximum=geometry.card_width+geometry.width_tolerance
+    boxes=[]
+    for index,left in enumerate(peaks):
+        for right in peaks[index+1:]:
+            width=(int(right)-int(left))/w
+            if width>maximum: break
+            if minimum<=width<=maximum:
+                # Paired boundaries may not step across a neighboring frame edge
+                # immediately inside either endpoint. Interior artwork farther
+                # from the endpoints remains a hypothesis witness, not a split.
+                interior=[int(value) for value in peaks if int(left)<int(value)<int(right)]
+                proximity=max(geometry.peak_distance,round(.025*w))
+                if any(value-int(left)<=proximity
+                       or int(right)-value<=proximity for value in interior):
+                    continue
+                boxes.append((int(left),0,int(right),h))
+                if len(boxes)>256: raise DeploymentError('BAR_UNPROVED')
+    if not boxes: raise DeploymentError('BAR_UNPROVED')
+    # Return every width-compatible whole-frame hypothesis. Semantic frame,
+    # identity and witness ownership must reconcile the set; this layer never
+    # selects a longest run or truncates to an expected roster size.
+    return tuple(boxes)
 
 
 def classify_icon(crop, catalog: Mapping[str,tuple[np.ndarray,...]], threshold=.93, margin=.04):
@@ -148,11 +149,19 @@ def classify_icon(crop, catalog: Mapping[str,tuple[np.ndarray,...]], threshold=.
             raise DeploymentError('CATALOG_INVALID')
         best=-1.0
         for template in variants:
-            found=match_unique(crop,template,threshold)
-            if found: best=max(best,found[-1])
-        if best>=threshold: scores.append((best,identity))
+            image(template,gray=True)
+            source,needle=_gray(crop),_gray(template)
+            if needle.shape[0]>source.shape[0] or needle.shape[1]>source.shape[1]:
+                continue
+            if float(needle.std())<1: raise DeploymentError('TEMPLATE_FLAT')
+            matrix=cv2.matchTemplate(source,needle,cv2.TM_CCOEFF_NORMED)
+            if not np.isfinite(matrix).all(): raise DeploymentError('MATCH_NONFINITE')
+            best=max(best,float(matrix.max()))
+        scores.append((best,identity))
     scores.sort(reverse=True)
-    if not scores: return None
+    if scores[0][0]<threshold: return None
+    # Preserve every incompatible runner-up, including those just below the
+    # positive threshold: .94/.92 with a .04 margin is not an identity proof.
     if len(scores)>1 and scores[0][0]-scores[1][0]<margin:
         raise DeploymentError('CARD_CLASS_AMBIGUOUS')
     return scores[0][1]

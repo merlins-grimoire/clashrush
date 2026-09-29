@@ -1,7 +1,7 @@
 from dataclasses import replace
 import pytest
 from test_deployment_repair import World,card
-from clash_rush_rebuild.mvp_deployment import Intervention, DeploymentError
+from clash_rush_rebuild.mvp_deployment import Intervention, DeploymentError, CompiledDeploymentPlan
 from clash_rush_rebuild.mvp_deployment_integration import NativeDeploymentExecutor
 
 class Monitor:
@@ -14,9 +14,11 @@ class Monitor:
 
 def compose(w,monitor=None,record=None):
     m=monitor or Monitor();records=[]
+    plan=CompiledDeploymentPlan(tuple((c.identity,c.kind,c.spell,c.remaining)
+                                      for c in w.cards),6)
     e=NativeDeploymentExecutor(observe=w.observe,deliver=w.deliver,release=w.release,
          live_gate=lambda:True,monotonic=w.clock,wait=w.clock.sleep,deadline=100.,
-         monitor=m,record_result=record or records.append)
+         monitor=m,record_result=record or records.append,plan=plan)
     return e,m,records
 
 
@@ -73,5 +75,7 @@ def test_native_factory_passes_monitor_callable_not_monitor_object(monkeypatch):
     a=SimpleNamespace(transaction=lambda _:SimpleNamespace(run_nonce='1'*32))
     e=build_native_executor(binding=object(),bound_input=object(),capture_bgr=lambda:None,
         home_verified=lambda _:True,enabled=lambda:True,authority=a,transaction_ref='tx',
-        profile=SimpleNamespace(digest='a'*64),lease=SimpleNamespace(marker=42,deadline=100.,active=lambda:True))
+        profile=SimpleNamespace(digest='a'*64,
+            plan=CompiledDeploymentPlan((('troop',w.cards[0].kind,w.cards[0].spell,1),),6)),
+        lease=SimpleNamespace(marker=42,deadline=100.,active=lambda:True))
     assert isinstance(e,NativeDeploymentExecutor)

@@ -7,7 +7,7 @@ import subprocess
 import cv2
 import numpy as np
 import pytest
-from clash_rush_rebuild.mvp_deployment import DeploymentError, Screen, Intervention
+from clash_rush_rebuild.mvp_deployment import DeploymentError, Screen, Intervention, CardKind, Spell
 from clash_rush_rebuild.mvp_deployment_profile import DeploymentProfile, FrameObserver, load_profile, read_private
 
 
@@ -30,20 +30,30 @@ def redirect_directory(link, target):
 def profile_data():
     rng=np.random.default_rng(410)
     assets={k:rng.integers(0,255,(9,9,3),dtype=np.uint8) for k in
-            ['a','b','card','available','selected','depleted','deployed','blocker','otherblocker']+list('x0123456789')}
+            ['a','b','card','available','selected','depleted','deployed','blocker','otherblocker',
+             'frame_tl','frame_tr','frame_bl','frame_br','left_end','left_more','right_end','right_more']+
+            list('x0123456789')}
     loc=lambda k,box=[0.,0.,1.,1.]:{'template':k,'roi':box}
     screens={s.value:[loc('a'),loc('b')] for s in Screen if s is not Screen.UNKNOWN}
     # Other screens use different marker ROIs rather than sharing proof locations.
     for s in screens:
         if s!='HOME':screens[s]=[loc('a',[.5,.5,1.,1.]),loc('b',[.5,.5,1.,1.])]
-    data=dict(schema=1,profile_id='synthetic',reviewed_tree='a'*40,runtime_reviewed=False,size=[640,360],
+    data=dict(schema=2,profile_id='synthetic',reviewed_tree='a'*40,runtime_reviewed=False,size=[640,360],
        assets={k:{'file':k+'.png','sha256':'b'*64} for k in assets},screens=screens,
        controls={k:{v:loc('a')} for k,v in [('HOME','attack'),('MATCH','find_match'),('ARMY','army_attack'),
                  ('BATTLE','end_battle'),('END_CONFIRM','confirm_end'),('RESULT','return_home')]},
-       bar={'roi':[0.,.82,1.,.98],'left_edge':loc('a'),'right_edge':loc('b'),
+       bar={'roi':[0.,.82,1.,.98],
+          'left_edge':{'end':loc('left_end'),'continues':loc('left_more')},
+          'right_edge':{'end':loc('right_end'),'continues':loc('right_more')},
+          'frame':[loc('frame_tl',[0.,0.,.3,.3]),loc('frame_tr',[.7,0.,1.,.3]),
+                   loc('frame_bl',[0.,.7,.3,1.]),loc('frame_br',[.7,.7,1.,1.])],
           'geometry':dict(card_width=.068,width_tolerance=.010,peak_height=.8,peak_distance=10)},
-       cards=[dict(identity='troop',kind='TROOP',spell='NONE',capacity=99,icons=['card'],icon_roi=[0.,.2,1.,1.],
-                   count_roi=[0.,0.,1.,.2],available=['available'],depleted=['depleted'],deployed=[],selected=['selected'])],
+       cards=[dict(identity='troop',kind='TROOP',spell='NONE',capacity=99,icons=['card'],icon_roi=[.2,.2,.8,.6],
+                   count_roi=[.2,.6,.8,1.],available=['available'],depleted=['depleted'],deployed=[],selected=['selected'],
+                   state_rois={'available':[0.,0.,.3,.3],'depleted':[.7,0.,1.,.3],
+                               'deployed':[0.,.7,.3,1.],'selected':[.7,.7,1.,1.]})],
+       plan={'layout':'SINGLE_PAGE','viewport_limit':6,
+             'roster':[{'identity':'troop','initial_quantity':1}]},
        glyphs={k:k for k in 'x0123456789'},targets=[],
        ground=dict(marker=loc('a'),overlay_hsv=[[0,100,100],[10,255,255]],playfield=[[.1,.1],[.9,.1],[.9,.8],[.1,.8]],margin_pixels=10),
        view_anchors=[loc('a'),loc('b'),loc('card')],blockers=[loc('blocker'),loc('otherblocker')])
@@ -75,6 +85,22 @@ def test_reviewed_pack_is_tree_and_byte_bound(tmp_path):
     with pytest.raises(DeploymentError):load_profile(tmp_path,candidate_tree='c'*40)
     (tmp_path/'private/deployment/templates/card.png').write_bytes(b'wrong')
     with pytest.raises(DeploymentError):load_profile(tmp_path,candidate_tree='a'*40)
+
+
+def test_profile_compiles_exact_single_page_plan_from_private_schema():
+    data,assets=profile_data()
+    profile=DeploymentProfile(data,assets,'a'*64)
+    sealed=profile.assets['card'].payload
+    data['plan']['roster'][0]['initial_quantity']=7
+    assets['card'].fill(0)
+    assert tuple(entry[0] for entry in profile.plan.roster)==('troop',)
+    assert profile.plan.quantities==(1,)
+    assert profile.plan.viewport_limit==6
+    assert profile.assets['card'].payload==sealed
+    with pytest.raises(TypeError):profile.plan=type(profile.plan)((('other',CardKind.TROOP,Spell.NONE,1),),6)
+    with pytest.raises(TypeError):profile.data.items_tuple=()
+    with pytest.raises(DeploymentError,match='PLAN_DIGEST_MISMATCH'):
+        type(profile.plan)(profile.plan.roster,profile.plan.viewport_limit,'0'*64)
 
 
 def test_no_symlink_or_outside_profile_read(tmp_path):

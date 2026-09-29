@@ -8,6 +8,7 @@ from clash_rush_rebuild.mvp_deployment import (
     Budget, Card, CardKind, CardState, Spell, Page, Observation, Screen,
     Point, Target, TargetKind, Policy, DeploymentError, DeploymentEngine,
     Inventory, DeploymentResult, Intervention, Action,
+    CompiledDeploymentPlan,
 )
 
 
@@ -88,6 +89,12 @@ class World:
         return True
     def release(self): self.closed = True; return True
     def engine(self, **kwargs):
+        if 'plan' not in kwargs:
+            try:
+                kwargs['plan']=CompiledDeploymentPlan(tuple(
+                    (c.identity,c.kind,c.spell,c.remaining) for c in self.cards),6)
+            except DeploymentError:
+                kwargs['plan']=None
         return DeploymentEngine(observe=self.observe, deliver=self.deliver,
             release=self.release, live_gate=lambda: True,
             monotonic=self.clock, sleep=self.clock.sleep, **kwargs)
@@ -193,21 +200,20 @@ def test_navigation_runs_complete_gated_chain():
     assert [e.verb for e in w.events][:3]==['attack','find_match','army_attack']
 
 
-def test_inventory_overlap_and_complete_edge_proof():
+def test_inventory_rejects_cross_page_coverage_even_with_overlap():
     i=Inventory()
-    i.add(page([card('a'),card('b',x=.3),card('c',x=.5)],right=False))
-    i.add(page([card('c'),card('d',x=.3)],left=False))
-    assert i.complete and i.identities==('a','b','c','d')
+    with pytest.raises(DeploymentError,match='SINGLE_PAGE_COVERAGE_UNPROVED'):
+        i.add(page([card('a'),card('b',x=.3),card('c',x=.5)],right=False))
 
 
 def test_missing_overlap_is_not_end_of_bar():
-    i=Inventory(); i.add(page([card('a'),card('b',x=.4)],right=False))
-    with pytest.raises(DeploymentError): i.add(page([card('c')],left=False))
+    i=Inventory()
+    with pytest.raises(DeploymentError): i.add(page([card('a'),card('b',x=.4)],right=False))
 
 
 def test_repeated_portrait_overlap_is_ambiguous_not_guessed():
-    i=Inventory(); i.add(page([card('a'),card('a',x=.4)],right=False))
-    with pytest.raises(DeploymentError): i.add(page([card('a'),card('b',x=.4)],left=False))
+    i=Inventory()
+    with pytest.raises(DeploymentError): i.add(page([card('a'),card('a',x=.4)],right=False))
 
 @pytest.mark.parametrize('value',[True,float('nan'),float('inf'),-1.0])
 def test_invalid_clock_fails_closed(value):
@@ -276,10 +282,10 @@ def test_manual_result_between_last_decrement_and_exit_is_not_success():
     assert not any(e.verb=='end_battle' for e in w.events)
 
 
-def test_multiple_known_pages_use_actual_scrolling_without_skips():
+def test_multiple_known_pages_have_no_active_scrolling_authority():
     class ScrollingWorld(World):
         def __init__(self):
-            super().__init__([card(f't{i}',count=1,x=.1+i*.1) for i in range(7)])
+            super().__init__([card(f't{i}',count=1,x=.1+i*.1) for i in range(6)])
             self.page_index=0
         def observe(self):
             o=super().observe()
@@ -296,8 +302,8 @@ def test_multiple_known_pages_use_actual_scrolling_without_skips():
                 return True
             return super().deliver(intent,check)
     w=ScrollingWorld(); r=w.engine().run()
-    assert r.complete and r.cards_total==7
-    assert sorted(e.card_id for e in w.events if e.verb=='hold')==[f't{i}' for i in range(7)]
+    assert not r.complete and r.reason=='OBSERVATION_UNAVAILABLE'
+    assert not w.events
 
 
 def test_support_spell_waits_read_only_for_a_current_eligible_cohort():

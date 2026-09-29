@@ -11,6 +11,11 @@ Commit: `a5c943afed0ed3b9abedbbc228b0889145ecaf24`
 
 Adapted sequence/algorithm: `src/attacker.py: detect_troop_positions, deploy_troops, complete_normal_attack`.
 
+H1 retains the bounded discovery/type-dispatch topology only. Donor gap typing,
+default quantities, scrolling completion, ADB/minitouch transport, fixed/random
+targets and restart tail remain excluded. The H1 complete-frame/witness owner,
+sealed N-card plan and single-page rejection logic are local implementations.
+
 MIT License
 
 Copyright (c) 2026 m24842
@@ -95,6 +100,10 @@ Authorization, closed schemas, absolute deadlines, inventory proof, finite glyph
 reader, intervention observer, held-mouse lease, profile binding, and durable
 receipt integration are local code. Reusing the repository's existing owned-child
 runner retains its existing Hermes attribution in THIRD_PARTY_NOTICES.md.
+
+H1 copied no new donor code or artwork and added no dependency. PixelChief and
+NX-ClashClient remain comparison/study sources only as recorded in
+`docs/h0-scalable-attack-choice.md`; neither contributes runtime code or assets.
 
 SciPy is imported as an ordinary separately installed dependency, not copied into
 this bundle. The candidate declaration pins scipy==1.17.0 (the locally tested

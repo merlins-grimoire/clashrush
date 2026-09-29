@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import math
 import re
+import hashlib
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable, Iterable
@@ -42,6 +44,47 @@ class Spell(StrEnum):
     RAGE = 'RAGE'
     HEAL = 'HEAL'
     UNKNOWN = 'UNKNOWN'
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledDeploymentPlan:
+    """Immutable finite single-page roster and exact initial quantities."""
+    roster: tuple[tuple[str, CardKind, Spell, int], ...]
+    viewport_limit: int
+    digest: str = ''
+    def __post_init__(self):
+        if (type(self.roster) is not tuple or type(self.viewport_limit) is not int
+                or not 1 <= self.viewport_limit <= 6
+                or not 1 <= len(self.roster) <= self.viewport_limit):
+            code = ('PLAN_VIEWPORT_OVERFLOW' if type(self.roster) is tuple
+                    and type(self.viewport_limit) is int and len(self.roster) > self.viewport_limit
+                    else 'PLAN_INVALID')
+            raise DeploymentError(code)
+        normalized=[]
+        for entry in self.roster:
+            if (type(entry) is not tuple or len(entry)!=4 or type(entry[0]) is not str
+                    or re.fullmatch(r'[a-z0-9][a-z0-9_.:-]{0,63}',entry[0]) is None
+                    or type(entry[1]) is not CardKind or type(entry[2]) is not Spell
+                    or type(entry[3]) is not int or not 1<=entry[3]<=999
+                    or entry[1] is CardKind.UNKNOWN or entry[2] is Spell.UNKNOWN
+                    or (entry[1] is CardKind.SPELL)==(entry[2] is Spell.NONE)
+                    or (entry[1] in (CardKind.HERO,CardKind.CLAN) and entry[3]!=1)):
+                raise DeploymentError('PLAN_INVALID')
+            normalized.append((entry[0],entry[1].value,entry[2].value,entry[3]))
+        if len({entry[0] for entry in self.roster})!=len(self.roster):
+            raise DeploymentError('PLAN_INVALID')
+        payload=json.dumps({'layout':'SINGLE_PAGE','limit':self.viewport_limit,'roster':normalized},
+                           sort_keys=True,separators=(',',':')).encode()
+        computed=hashlib.sha256(payload).hexdigest()
+        if self.digest and (type(self.digest) is not str or self.digest!=computed):
+            raise DeploymentError('PLAN_DIGEST_MISMATCH')
+        object.__setattr__(self,'digest',computed)
+    @property
+    def signatures(self):
+        return tuple(entry[:3] for entry in self.roster)
+    @property
+    def quantities(self):
+        return tuple(entry[3] for entry in self.roster)
 
 
 class CardState(StrEnum):
@@ -187,7 +230,7 @@ class Observation:
         names=[]
         for item in self.controls:
             if (type(item) is not tuple or len(item)!=2 or type(item[0]) is not str
-                    or item[0] not in {'attack','find_match','army_attack','end_battle','confirm_end','return_home','scroll_left','scroll_right'}
+                    or item[0] not in {'attack','find_match','army_attack','end_battle','confirm_end','return_home'}
                     or type(item[1]) is not Point):
                 raise DeploymentError('CONTROL_INVALID')
             names.append(item[0])
@@ -210,7 +253,7 @@ class Intent:
     destination: Point | None = None
     deadline: float = 0.0
     def __post_init__(self):
-        if self.verb not in {'select','hold','tap','scroll_left','scroll_right','attack','find_match','army_attack','end_battle','confirm_end','return_home'}:
+        if self.verb not in {'select','hold','tap','attack','find_match','army_attack','end_battle','confirm_end','return_home'}:
             raise DeploymentError('INTENT_INVALID')
         if type(self.point) is not Point or type(self.action) is not Action:
             raise DeploymentError('INTENT_INVALID')
@@ -267,45 +310,28 @@ class Budget:
 
 
 class Inventory:
-    """Append only positively overlapping pages; no progress != right edge."""
+    """One complete, positively bounded single-page inventory."""
     def __init__(self, max_cards=48, max_pages=16):
         self.cards: list[Card]=[]; self.complete=False; self.pages=0
         self.max_cards=max_cards; self.max_pages=max_pages
     @property
     def identities(self): return tuple(c.identity for c in self.cards)
     def add(self, page: Page):
-        if type(page) is not Page or self.complete or self.pages >= self.max_pages:
+        if type(page) is not Page or self.complete or self.pages:
             raise DeploymentError('COVERAGE_INVALID')
         for c in page.cards: c.require_known()
-        if not self.cards:
-            if not page.left_edge: raise DeploymentError('LEFT_EDGE_UNPROVED')
-            self.cards.extend(page.cards)
-        else:
-            if page.left_edge: raise DeploymentError('SCROLL_NO_PROGRESS')
-            old=tuple(c.signature for c in self.cards)
-            new=tuple(c.signature for c in page.cards)
-            overlaps=[n for n in range(1,min(len(old),len(new))+1) if old[-n:]==new[:n]]
-            if len(overlaps)!=1 or len(set(old[-overlaps[0]:]))!=overlaps[0]:
-                raise DeploymentError('SCROLL_AMBIGUOUS')
-            n=overlaps[0]
-            if len(new)==n: raise DeploymentError('SCROLL_NO_PROGRESS')
-            # Repeated identities across a boundary cannot establish unique tracking.
-            if any(signature in old for signature in new[n:]) or old.count(new[0])!=1:
-                raise DeploymentError('SCROLL_AMBIGUOUS')
-            self.cards.extend(page.cards[n:])
+        if not page.left_edge or not page.right_edge:
+            raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+        self.cards.extend(page.cards)
         self.pages+=1
         if len(self.cards)>self.max_cards: raise DeploymentError('CARD_LIMIT')
-        self.complete=page.right_edge
+        self.complete=True
     def locate(self, page: Page) -> int:
         signatures=tuple(c.signature for c in self.cards)
         observed=tuple(c.signature for c in page.cards)
-        matches=[i for i in range(len(signatures)-len(observed)+1)
-                 if signatures[i:i+len(observed)]==observed]
-        if len(matches)!=1: raise DeploymentError('SCROLL_AMBIGUOUS')
-        start=matches[0]
-        if page.left_edge != (start==0) or page.right_edge != (start+len(observed)==len(signatures)):
-            raise DeploymentError('EDGE_CONFLICT')
-        return start
+        if not page.left_edge or not page.right_edge or observed!=signatures:
+            raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+        return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,12 +371,15 @@ class DeploymentEngine:
     acquires process authority or rewrites lifecycle state.
     """
     def __init__(self, *, observe, deliver, release, live_gate, monotonic, sleep,
-                 policy: Policy=Policy(), visit_deadline: float | None=None):
+                 policy: Policy=Policy(), visit_deadline: float | None=None,
+                 plan: CompiledDeploymentPlan | None=None):
         if type(policy) is not Policy or not all(callable(c) for c in (observe,deliver,release,live_gate,monotonic,sleep)):
             raise DeploymentError('PORT_INVALID')
+        if plan is not None and type(plan) is not CompiledDeploymentPlan:
+            raise DeploymentError('PLAN_INVALID')
         self.observe=observe; self.deliver=deliver; self.release=release
         self.live_gate=live_gate; self.clock=monotonic; self.sleep=sleep; self.policy=policy
-        self.visit_deadline=visit_deadline
+        self.visit_deadline=visit_deadline; self.plan=plan
         self.used=False; self.sequence=0; self.captured=-1.0; self.view=None
         self.inventory=Inventory(policy.max_cards,policy.max_pages)
         self.cards: dict[str, Card]={}; self.holds: dict[str,float]={}
@@ -404,6 +433,8 @@ class DeploymentEngine:
             o=self._read(intent.deadline)
             if o.screen is not before.screen or o.view!=before.view:
                 raise DeploymentError('STATE_CHANGED')
+            if self.plan is not None and o.screen is Screen.BATTLE:
+                self._sync(o)
             if intent.card_id is not None:
                 old=self._visible(before,intent.card_id); c=self._visible(o,intent.card_id)
                 if c.signature!=old.signature or c.remaining!=old.remaining or c.state is not old.state:
@@ -454,31 +485,39 @@ class DeploymentEngine:
         if o.screen is not Screen.BATTLE: raise DeploymentError('BATTLE_UNPROVED')
         return o
 
-    def _scroll(self, o, direction, deadline):
-        if o.screen is not Screen.BATTLE: raise DeploymentError('BATTLE_UNPROVED')
-        verb='scroll_'+direction
-        start=o.control(verb)
-        # Calibrated scroll controls specify stable bar endpoints, never field input.
-        end=o.control('scroll_left' if direction=='right' else 'scroll_right')
-        self._send(Intent(verb,start,Action.TROOP_DEPLOYMENT,destination=end,duration=.25,deadline=deadline),o)
-        self.budget.wait(.05,deadline)
-        return self._await({Screen.BATTLE},min(deadline,self.budget.check()+1),Screen.BATTLE)
-
     def _scan(self, o, deadline):
-        self.inventory.add(o.page)
-        while not self.inventory.complete:
-            o=self._scroll(o,'right',deadline)
+        if self.plan is not None:
+            if not o.page.left_edge or not o.page.right_edge:
+                raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+            observed=tuple(c.signature for c in o.page.cards)
+            if len(observed)>self.plan.viewport_limit:
+                raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
+            if observed!=self.plan.signatures:
+                if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
+                if any(item not in self.plan.signatures for item in observed):
+                    raise DeploymentError('ROSTER_ADDITIONAL')
+                raise DeploymentError('ROSTER_INCOMPLETE')
+            for current,expected in zip(o.page.cards,self.plan.quantities):
+                current.require_known()
+                if current.remaining!=expected or current.state is not CardState.AVAILABLE:
+                    raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
             self.inventory.add(o.page)
-        if len(set(self.inventory.identities))!=len(self.inventory.identities):
-            # Duplicate semantic identities need calibrated donated/occurrence identities.
-            raise DeploymentError('ROSTER_AMBIGUOUS')
-        self.cards={c.identity:c for c in self.inventory.cards}
-        self.holds={key:0.0 for key in self.cards}
-        self._sync(o)
-        return o
+            self.cards={c.identity:c for c in o.page.cards}
+            self.holds={key:0.0 for key in self.cards}
+            return o
+        raise DeploymentError('PLAN_REQUIRED')
 
     def _sync(self,o, permitted=None):
         if o.screen is not Screen.BATTLE or o.page is None: raise DeploymentError('BATTLE_UNPROVED')
+        if self.plan is not None:
+            if not o.page.left_edge or not o.page.right_edge:
+                raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+            observed=tuple(c.signature for c in o.page.cards)
+            if observed!=self.plan.signatures:
+                if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
+                if any(item not in self.plan.signatures for item in observed):
+                    raise DeploymentError('ROSTER_ADDITIONAL')
+                raise DeploymentError('ROSTER_INCOMPLETE')
         self.inventory.locate(o.page)
         for c in o.page.cards:
             c.require_known(); old=self.cards[c.identity]
@@ -488,13 +527,12 @@ class DeploymentEngine:
             self.cards[c.identity]=c
 
     def _bring(self, identity, o, deadline):
-        for _ in range(self.policy.max_pages*2):
+        if self.plan is not None:
             self._sync(o)
-            if any(c.identity==identity for c in o.page.cards): return o
-            start=self.inventory.locate(o.page)
-            index=self.inventory.identities.index(identity)
-            o=self._scroll(o,'left' if index<start else 'right',deadline)
-        raise DeploymentError('SCROLL_LIMIT')
+            if not any(c.identity==identity for c in o.page.cards):
+                raise DeploymentError('ROSTER_INCOMPLETE')
+            return o
+        raise DeploymentError('PLAN_REQUIRED')
 
     def _consume(self,c,o,deadline):
         if not c.selected:
@@ -566,11 +604,15 @@ class DeploymentEngine:
                 self.budget.wait(.1,deadline)
             else:idle_observations=0
             o=self._read(deadline)
-        # Final complete rescan, including hidden cards. No old-page-only success.
-        for key in self.inventory.identities:
-            o=self._bring(key,o,deadline)
-            if not self._visible(o,key).exhausted: raise DeploymentError('DEPLETION_UNPROVED')
-        return o
+        # Final complete rescan. A sealed single-page plan requires one fresh
+        # whole-roster equality proof and never gains scrolling authority.
+        if self.plan is not None:
+            o=self._read(deadline)
+            self._sync(o)
+            if any(not c.exhausted for c in o.page.cards):
+                raise DeploymentError('DEPLETION_UNPROVED')
+            return o
+        raise DeploymentError('PLAN_REQUIRED')
 
     def _exit(self,o):
         deadline=min(self.budget.deadline,self.budget.check()+self.policy.exit_seconds)

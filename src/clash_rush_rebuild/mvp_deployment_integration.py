@@ -13,10 +13,12 @@ from .mvp_deployment import DeploymentEngine, DeploymentError, DeploymentResult,
 class NativeDeploymentExecutor:
     """Keep rich proof until durable commit; legacy tuple is only an adapter."""
     def __init__(self,*,observe,deliver,release,live_gate,monotonic,wait,deadline,
-                 monitor,record_result):
+                 monitor,record_result,plan):
         self.observe=observe;self.deliver=deliver;self.release=release
         self.gate=live_gate;self.clock=monotonic;self.wait=wait;self.deadline=deadline
-        self.monitor=monitor;self.record=record_result;self.used=False
+        from .mvp_deployment import CompiledDeploymentPlan
+        if type(plan) is not CompiledDeploymentPlan:raise DeploymentError('PLAN_INVALID')
+        self.monitor=monitor;self.record=record_result;self.plan=plan;self.used=False
     def run(self):
         if self.used:raise DeploymentError('EXECUTOR_ALREADY_USED')
         self.used=True
@@ -25,7 +27,7 @@ class NativeDeploymentExecutor:
             self.monitor.start()
             result=DeploymentEngine(observe=self.observe,deliver=self.deliver,
                 release=self.release,live_gate=self.gate,monotonic=self.clock,
-                sleep=self.wait,visit_deadline=self.deadline).run()
+                sleep=self.wait,visit_deadline=self.deadline,plan=self.plan).run()
             if self.monitor.state() is not Intervention.CLEAR:
                 result=replace(result,complete=False,reason='INTERVENTION',intervention_free=False)
         except BaseException:
@@ -72,4 +74,5 @@ def build_native_executor(*,binding,bound_input,capture_bgr,home_verified,enable
     return NativeDeploymentExecutor(observe=observer,deliver=delivery.deliver,
           release=delivery.release,live_gate=active,monotonic=time.monotonic,
           wait=time.sleep,deadline=lease.deadline-STOP_RESERVE,monitor=monitor,
-          record_result=lambda result:record_proof(authority,transaction_ref,result,profile.digest))
+          record_result=lambda result:record_proof(authority,transaction_ref,result,profile.digest),
+          plan=profile.plan)
