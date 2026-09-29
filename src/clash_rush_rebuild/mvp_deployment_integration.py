@@ -7,7 +7,10 @@ from __future__ import annotations
 from dataclasses import replace
 import time
 
-from .mvp_deployment import DeploymentEngine, DeploymentError, DeploymentResult, Intervention
+from .mvp_deployment import (
+    DeploymentEngine, DeploymentError, DeploymentResult, Intervention,
+    _execute_registered_run,
+)
 
 
 class NativeDeploymentExecutor:
@@ -25,9 +28,10 @@ class NativeDeploymentExecutor:
         result=DeploymentResult(False,'DEPLOYMENT_UNAVAILABLE',0,0,False,False,False)
         try:
             self.monitor.start()
-            result=DeploymentEngine(observe=self.observe,deliver=self.deliver,
+            facade=DeploymentEngine(observe=self.observe,deliver=self.deliver,
                 release=self.release,live_gate=self.gate,monotonic=self.clock,
-                sleep=self.wait,visit_deadline=self.deadline,plan=self.plan).run()
+                sleep=self.wait,visit_deadline=self.deadline,plan=self.plan)
+            result=_execute_registered_run(facade)
             if self.monitor.state() is not Intervention.CLEAR:
                 result=replace(result,complete=False,reason='INTERVENTION',intervention_free=False)
         except BaseException:

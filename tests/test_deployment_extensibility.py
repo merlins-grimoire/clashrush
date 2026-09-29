@@ -7,6 +7,7 @@ from clash_rush_rebuild import mvp_deployment_profile as profile_module
 from clash_rush_rebuild.mvp_deployment import (
     CardKind,
     CardState,
+    DeploymentEngine,
     DeploymentError,
     Policy,
     Spell,
@@ -134,66 +135,41 @@ def test_engine_detaches_the_original_plan_alias_at_ingress():
     assert not any(event.card_id == "card_1" for event in world.events)
 
 
-@pytest.mark.parametrize("boundary", ["observe", "deliver", "live_gate"])
-def test_plan_replacement_during_arbitrary_callback_fails_before_new_down(boundary):
-    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
-    replacement = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
-    world = World([card("card_0", count=1, x=.2)])
-    engine = world.engine(plan=approved)
-    fired = False
-
-    def replace_plan():
-        nonlocal fired
-        if not fired:
-            fired = True
-            engine.plan = replacement
-
-    if boundary == "observe":
-        original = engine.observe
-        def observe():
-            replace_plan()
-            return original()
-        engine.observe = observe
+def _callback_engine(world, plan, boundary, attack, *, policy=Policy(), release=None):
+    ports = {
+        "observe": world.observe,
+        "deliver": world.deliver,
+        "release": release or world.release,
+        "live_gate": lambda: True,
+        "monotonic": world.clock,
+        "sleep": world.clock.sleep,
+    }
+    if boundary == "clock":
+        original = ports["monotonic"]
+        ports["monotonic"] = lambda: (attack(), original())[1]
+    elif boundary == "live_gate":
+        ports["live_gate"] = lambda: (attack(), True)[1]
+    elif boundary == "observe":
+        original = ports["observe"]
+        ports["observe"] = lambda: (attack(), original())[1]
     elif boundary == "deliver":
-        original = engine.deliver
-        def deliver(intent, proof):
-            replace_plan()
-            return original(intent, proof)
-        engine.deliver = deliver
-    else:
-        def live_gate():
-            replace_plan()
-            return True
-        engine.live_gate = live_gate
-
-    result = engine.run()
-
-    assert not result.complete
-    assert not world.events
-
-
-def test_observe_cannot_replace_and_reseal_run_authority():
-    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
-    replacement = profile_module.CompiledDeploymentPlan((_entry(1),), viewport_limit=6)
-    world = World([card("card_1", count=1, x=.2)])
-    engine = world.engine(plan=approved)
-    original = engine.observe
-    fired = False
-
-    def observe():
-        nonlocal fired
-        if not fired:
-            fired = True
-            engine._plan = replacement
-            engine._plan_seal = replacement.digest
-            engine._validate_plan = lambda: None
-        return original()
-
-    engine.observe = observe
-    result = engine.run()
-
-    assert not result.complete
-    assert not any(event.card_id == "card_1" for event in world.events)
+        original = ports["deliver"]
+        ports["deliver"] = lambda intent, proof: (attack(), original(intent, proof))[1]
+    elif boundary == "proof":
+        original = ports["deliver"]
+        ports["deliver"] = lambda intent, proof: original(
+            intent, lambda: (attack(), proof())[1])
+    elif boundary == "sleep":
+        original = ports["sleep"]
+        ports["sleep"] = lambda seconds: (attack(), original(seconds))[1]
+    elif boundary == "release":
+        original = ports["release"]
+        ports["release"] = lambda: (attack(), original())[1]
+    return DeploymentEngine(
+        observe=ports["observe"], deliver=ports["deliver"], release=ports["release"],
+        live_gate=ports["live_gate"], monotonic=ports["monotonic"],
+        sleep=ports["sleep"], policy=policy, plan=plan,
+    )
 
 
 @pytest.mark.parametrize("boundary", [
@@ -203,7 +179,7 @@ def test_engine_reference_callback_cannot_replace_closed_run_authority(boundary)
     approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
     replacement = profile_module.CompiledDeploymentPlan((_entry(1),), viewport_limit=6)
     world = World([card("card_0", count=1, x=.2)])
-    engine = world.engine(plan=approved)
+    engine_ref = {}
     fired = False
 
     def attack():
@@ -211,36 +187,22 @@ def test_engine_reference_callback_cannot_replace_closed_run_authority(boundary)
         if fired:
             return
         fired = True
+        engine = engine_ref["engine"]
         engine._plan = replacement
         engine._plan_seal = replacement.digest
         engine._validate_plan = lambda: None
+        engine.actions = -100
+        engine.spells = 999
+        engine.budget = object()
 
-    if boundary == "clock":
-        original = engine.clock
-        engine.clock = lambda: (attack(), original())[1]
-    elif boundary == "live_gate":
-        engine.live_gate = lambda: (attack(), True)[1]
-    elif boundary == "observe":
-        original = engine.observe
-        engine.observe = lambda: (attack(), original())[1]
-    elif boundary == "deliver":
-        original = engine.deliver
-        engine.deliver = lambda intent, proof: (attack(), original(intent, proof))[1]
-    elif boundary == "proof":
-        original = engine.deliver
-        engine.deliver = lambda intent, proof: original(
-            intent, lambda: (attack(), proof())[1])
-    elif boundary == "sleep":
-        original = engine.sleep
-        engine.sleep = lambda seconds: (attack(), original(seconds))[1]
-    else:
-        original = engine.release
-        engine.release = lambda: (attack(), original())[1]
-
+    engine = _callback_engine(world, approved, boundary, attack)
+    engine_ref["engine"] = engine
     result = engine.run()
 
     assert fired
     assert result.complete
+    assert result.cards_total == 1
+    assert result.spells_consumed == 0
     assert engine.plan.signatures == approved.signatures
     assert any(event.card_id == "card_0" for event in world.events)
     assert not any(event.card_id == "card_1" for event in world.events)
@@ -261,105 +223,44 @@ def test_engine_plan_property_returns_only_a_detached_copy():
 def test_callback_cannot_shadow_failed_release_into_false_completion():
     approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
     world = World([card("card_0", count=1, x=.2)])
-    engine = world.engine(plan=approved)
-    original_observe = engine.observe
-    engine.release = lambda: False
+    engine_ref = {}
 
-    def observe():
-        engine.release = lambda: True
-        return original_observe()
+    def attack():
+        engine_ref["engine"].release = lambda: True
 
-    engine.observe = observe
+    engine = _callback_engine(world, approved, "observe", attack, release=lambda: False)
+    engine_ref["engine"] = engine
     result = engine.run()
 
     assert not result.complete
     assert result.reason == "RELEASE_UNPROVED"
 
 
-@pytest.mark.parametrize("boundary", ["observe", "deliver", "proof", "sleep", "release"])
-def test_callback_policy_shadow_cannot_accept_stale_evidence(boundary):
-    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
-    world = World([card("card_0", count=1, x=.2)])
-    engine = world.engine(plan=approved, policy=Policy(observation_age=.75))
-    original_observe = engine.observe
-    fired = False
-    stale_emitted = False
-
-    def shadow_policy():
-        nonlocal fired
-        if fired:
-            return
-        fired = True
-        replacement = Policy(observation_age=.75)
-        object.__setattr__(replacement, "observation_age", 999.0)
-        engine.policy = replacement
-
-    def observe():
-        nonlocal stale_emitted
-        observation = original_observe()
-        if boundary == "observe":
-            shadow_policy()
-        if fired and boundary != "release" and not stale_emitted:
-            stale_emitted = True
-            world.clock.now += .8 if boundary == "sleep" else 5.0
-        return observation
-
-    engine.observe = observe
-    if boundary == "deliver":
-        original = engine.deliver
-        engine.deliver = lambda intent, proof: (shadow_policy(), original(intent, proof))[1]
-    elif boundary == "proof":
-        original = engine.deliver
-        engine.deliver = lambda intent, proof: original(
-            intent, lambda: (shadow_policy(), proof())[1])
-    elif boundary == "sleep":
-        original = engine.sleep
-        engine.sleep = lambda seconds: (shadow_policy(), original(seconds))[1]
-    elif boundary == "release":
-        original = engine.release
-        engine.release = lambda: (shadow_policy(), original())[1]
-
-    result = engine.run()
-
-    assert fired
-    assert world.closed
-    if boundary == "release":
-        assert result.complete
-    else:
-        assert result.reason == "OBSERVATION_STALE"
-        assert not result.complete
-        assert not any(event.verb in {"end_battle", "confirm_end", "return_home"}
-                       for event in world.events)
-
-
 def test_callback_exit_seconds_shadow_cannot_extend_frozen_exit_deadline():
     approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
     world = World([card("card_0", count=1, x=.2)])
-    engine = world.engine(plan=approved, policy=Policy(exit_seconds=1.0))
-    original_deliver = engine.deliver
-    original_observe = engine.observe
-    fired = False
-    delayed_exit = False
-
-    def deliver(intent, proof):
-        nonlocal fired
-        if not fired:
-            fired = True
-            engine.policy = Policy(exit_seconds=30.0)
-        return original_deliver(intent, proof)
+    policy = Policy(exit_seconds=1.0)
+    engine_ref = {}
+    original_observe = world.observe
+    delayed = False
 
     def observe():
-        nonlocal delayed_exit
-        if world.screen.name == "END_CONFIRM" and not delayed_exit:
-            delayed_exit = True
+        nonlocal delayed
+        if world.screen is profile_module.Screen.END_CONFIRM and not delayed:
+            delayed = True
             world.clock.now += 2.0
         return original_observe()
 
-    engine.deliver = deliver
-    engine.observe = observe
+    world.observe = observe
+    def attack():
+        engine_ref["engine"].policy = Policy(exit_seconds=30.0)
+        object.__setattr__(policy, "exit_seconds", 30.0)
+
+    engine = _callback_engine(world, approved, "deliver", attack, policy=policy)
+    engine_ref["engine"] = engine
     result = engine.run()
 
-    assert fired and delayed_exit
+    assert delayed
     assert result.reason == "DEADLINE"
     assert not result.complete
     assert [event.verb for event in world.events if event.verb in {
@@ -371,31 +272,32 @@ def test_callback_deadline_shadow_cannot_extend_frozen_visit_deadline():
     approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
     world = World([card("card_0", count=1, x=.2)])
     world.screen = profile_module.Screen.HOME
-    engine = world.engine(
-        plan=approved,
-        policy=Policy(visit_seconds=3.0, exit_seconds=1.0),
-    )
-    original_observe = engine.observe
-    fired = False
-    delayed_transition = False
+    engine_ref = {}
+    original_observe = world.observe
+    delayed = False
 
     def observe():
-        nonlocal fired, delayed_transition
-        if world.screen is profile_module.Screen.MATCH and not delayed_transition:
-            delayed_transition = True
+        nonlocal delayed
+        if world.screen is profile_module.Screen.MATCH and not delayed:
+            delayed = True
             world.clock.now += 3.0
-        observation = original_observe()
-        if not fired:
-            fired = True
-            engine.visit_deadline = 999.0
-            engine.budget.deadline = 999.0
-        return observation
+        return original_observe()
 
-    engine.observe = observe
+    world.observe = observe
+    def attack():
+        engine_ref["engine"].visit_deadline = 999.0
+        engine_ref["engine"].budget = object()
+
+    engine = _callback_engine(
+        world, approved, "observe", attack,
+        policy=Policy(visit_seconds=3.0, exit_seconds=1.0),
+    )
+    engine_ref["engine"] = engine
     result = engine.run()
 
-    assert fired and delayed_transition
+    assert delayed
     assert result.reason == "DEADLINE"
     assert not result.complete
-    assert [event.verb for event in world.events if event.action.name == "ATTACK_NAVIGATION"] == ["attack"]
+    assert [event.verb for event in world.events
+            if event.action.name == "ATTACK_NAVIGATION"] == ["attack"]
     assert world.closed

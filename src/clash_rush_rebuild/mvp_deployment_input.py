@@ -21,6 +21,9 @@ class GuardedDeploymentInput:
         self.lease=lease; self.clock=monotonic; self.wait=wait
         self.held=False; self.last=-1.0
         self.observed_events=observed_events
+        self._prepare_down=getattr(type(mouse),'prepare_down',None)
+        self._commit_down=getattr(type(mouse),'commit_down',None)
+        self._legacy_down=type(mouse).down
     def _guard(self,action,deadline):
         try:
             if self.authorize(action) is not True or self.monitor() is not Intervention.CLEAR:
@@ -44,6 +47,17 @@ class GuardedDeploymentInput:
         if result is False or before is None:return False
         end=finite(self.clock())+.12
         if deadline is not None:end=min(end,deadline)
+        for _ in range(16):
+            count=self._counter()
+            if count<before:return False
+            if count>before:return True
+            now=finite(self.clock())
+            if now>=end:return False
+            self.wait(min(.01,end-now))
+        return False
+    def _finish_event(self,result,before,deadline):
+        if result is False:return False
+        end=min(finite(self.clock())+.12,deadline)
         for _ in range(16):
             count=self._counter()
             if count<before:return False
@@ -82,11 +96,21 @@ class GuardedDeploymentInput:
             self.wait(min(.04,max(0.0,intent.deadline-finite(self.clock()))))
             if proof() is not True or not self._guard(expected,intent.deadline): return False
             if self.mouse.at_target(intent.point) is not True: return False
+            prepared=(self._prepare_down(self.mouse,intent.point)
+                      if self._prepare_down is not None else None)
             # Write possible-held intent BEFORE the OS mutation. A killed worker's
             # parent releases only this explicitly tracked button after retirement.
             self.lease.set_held(True); self.held=True
-            start=finite(self.clock())
-            if not self._event(self.mouse.down,intent.deadline):return False
+            before=self._counter()
+            # Final tail: original authorization/intervention/clock, followed by
+            # one captured class primitive over already prepared exact scalars.
+            # Target/binding/lease/event-baseline work is complete before this.
+            if not self._guard(expected,intent.deadline):return False
+            start=self.last
+            result=(self._commit_down(self.mouse,prepared)
+                    if self._commit_down is not None
+                    else self._legacy_down(self.mouse))
+            if not self._finish_event(result,before,intent.deadline):return False
             end=min(intent.deadline,start+(intent.duration or .02))
             while finite(self.clock())<end:
                 if not self._guard(expected,intent.deadline): return False
@@ -140,10 +164,14 @@ class TaggedWin32Mouse:
         if not self.user.GetCursorPos(ctypes.byref(cursor)): return False
         self.bound._require_binding(b)
         return self.pixel==current==(cursor.x,cursor.y)
-    def down(self):
+    def prepare_down(self,_point):
         b=self.bound._binding
         self.bound._require_binding(b)
-        self.user.mouse_event(0x0002,0,0,0,ctypes.c_void_p(self.marker))
+        return self.marker
+    def commit_down(self,marker):
+        self.user.mouse_event(0x0002,0,0,0,ctypes.c_void_p(marker))
+    def down(self):
+        self.commit_down(self.prepare_down(None))
     def up(self): self.user.mouse_event(0x0004,0,0,0,ctypes.c_void_p(self.marker))
 
 

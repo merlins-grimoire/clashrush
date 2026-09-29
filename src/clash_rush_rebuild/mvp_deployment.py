@@ -15,10 +15,10 @@ import math
 import re
 import hashlib
 import json
-import weakref
+import threading
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Callable, Iterable
+from typing import Callable, Iterable, NamedTuple
 
 
 class DeploymentError(RuntimeError):
@@ -93,91 +93,12 @@ class CompiledDeploymentPlan:
         return tuple(entry[3] for entry in self.roster)
 
 
-# Bounded authority boundary: callbacks may hold the engine, but the canonical
-# run plan is not an attribute reachable from that reference. This is not
-# isolation from arbitrary same-process reflection or module mutation.
-@dataclass(frozen=True,slots=True)
-class _RunAuthority:
-    plan: CompiledDeploymentPlan | None
-    ports: tuple | None=None
-    policy: Policy | None=None
-    visit_deadline: float | None=None
-    deadline: float | None=None
-
-
-_RUN_AUTHORITIES = weakref.WeakKeyDictionary()
-
-
 def _copy_plan(plan):
     if type(plan) is not CompiledDeploymentPlan:
         raise DeploymentError('PLAN_INVALID')
     seal=CompiledDeploymentPlan.validated_digest(plan)
     roster=tuple(tuple(entry) for entry in plan.roster)
     return CompiledDeploymentPlan(roster,plan.viewport_limit,seal)
-
-
-def _bind_plan_authority(engine,plan):
-    _RUN_AUTHORITIES[engine]=_RunAuthority(None if plan is None else _copy_plan(plan))
-
-
-def _run_authority(engine):
-    try: authority=_RUN_AUTHORITIES[engine]
-    except (KeyError,TypeError): raise DeploymentError('PLAN_REQUIRED') from None
-    if type(authority) is not _RunAuthority:
-        raise DeploymentError('PLAN_DIGEST_MISMATCH')
-    return authority
-
-
-def _canonical_plan(engine):
-    plan=_run_authority(engine).plan
-    if plan is None: raise DeploymentError('PLAN_REQUIRED')
-    if (type(plan) is not CompiledDeploymentPlan
-            or CompiledDeploymentPlan.validated_digest(plan)!=plan.digest):
-        raise DeploymentError('PLAN_DIGEST_MISMATCH')
-    return plan
-
-
-def _detached_plan(engine):
-    return _copy_plan(_canonical_plan(engine))
-
-
-def _freeze_run_authority(engine):
-    authority=_run_authority(engine)
-    ports=(engine.observe,engine.deliver,engine.release,engine.live_gate,
-           engine.clock,engine.sleep)
-    if authority.ports is not None or not all(callable(port) for port in ports):
-        raise DeploymentError('PORT_INVALID')
-    if type(engine.policy) is not Policy:
-        raise DeploymentError('POLICY_INVALID')
-    _RUN_AUTHORITIES[engine]=_RunAuthority(
-        authority.plan,ports,engine.policy,engine.visit_deadline)
-
-
-def _run_port(engine,index):
-    authority=_run_authority(engine)
-    if authority.ports is None: raise DeploymentError('PORT_INVALID')
-    return authority.ports[index]
-
-
-def _run_policy(engine):
-    authority=_run_authority(engine)
-    if type(authority.policy) is not Policy: raise DeploymentError('POLICY_INVALID')
-    return authority.policy
-
-
-def _freeze_run_deadline(engine,deadline):
-    authority=_run_authority(engine)
-    if authority.deadline is not None: raise DeploymentError('DEADLINE')
-    deadline=finite(deadline)
-    _RUN_AUTHORITIES[engine]=_RunAuthority(
-        authority.plan,authority.ports,authority.policy,authority.visit_deadline,deadline)
-    return deadline
-
-
-def _run_deadline(engine):
-    deadline=_run_authority(engine).deadline
-    if type(deadline) is not float: raise DeploymentError('DEADLINE')
-    return finite(deadline)
 
 
 class CardState(StrEnum):
@@ -470,327 +391,657 @@ class DeploymentResult:
                     remaining=self.remaining)
 
 
-class DeploymentEngine:
-    """One run, one complete inventory, no retry after uncertain consumption.
 
-    `deliver` MUST invoke the supplied final proof immediately before down and
-    unconditionally pair release. An independent lifecycle owner must enforce
-    hard retirement if an OS/capture call fails to return. The engine never
-    acquires process authority or rewrites lifecycle state.
-    """
+class _PolicyValues(NamedTuple):
+    deployment_seconds: float
+    visit_seconds: float
+    exit_seconds: float
+    troop_hold_seconds: float
+    card_hold_ceiling: float
+    observation_age: float
+    acknowledgement_seconds: float
+    max_pages: int
+    max_cards: int
+    max_actions: int
+    target_confidence: float
+
+
+def _copy_policy(policy):
+    if type(policy) is not Policy:
+        raise DeploymentError('POLICY_INVALID')
+    values = _PolicyValues(
+        finite(policy.deployment_seconds, .01, 60),
+        finite(policy.visit_seconds, 1, 600),
+        finite(policy.exit_seconds, 1, 30),
+        finite(policy.troop_hold_seconds, .01, .5),
+        finite(policy.card_hold_ceiling, .01, 25),
+        finite(policy.observation_age, .01, .75),
+        finite(policy.acknowledgement_seconds, .1, 1.5),
+        policy.max_pages, policy.max_cards, policy.max_actions,
+        finite(policy.target_confidence, .8, 1),
+    )
+    for value, maximum in ((values.max_pages, 16), (values.max_cards, 48),
+                           (values.max_actions, 1024)):
+        if type(value) is not int or not 1 <= value <= maximum:
+            raise DeploymentError('POLICY_INVALID')
+    return values
+
+
+def _copy_observation(value):
+    if type(value) is not Observation:
+        raise DeploymentError('OBSERVATION_INVALID')
+    page = None
+    if value.page is not None:
+        page = Page(tuple(Card(
+            item.identity, CardKind(item.kind.value), Spell(item.spell.value),
+            item.remaining, CardState(item.state.value),
+            Point(item.point.x, item.point.y), item.selected,
+        ) for item in value.page.cards), value.page.left_edge, value.page.right_edge)
+    return Observation(
+        value.sequence, value.captured_at, value.view, Screen(value.screen.value), page,
+        tuple(Target(TargetKind(item.kind.value), Point(item.point.x, item.point.y),
+                     item.confidence) for item in value.targets),
+        tuple((name, Point(point.x, point.y)) for name, point in value.controls),
+        Intervention(value.intervention.value), value.home_verified,
+    )
+
+
+class _RunCore:
+    __slots__ = (
+        'plan', 'viewport_limit', 'digest', 'policy', 'ports', 'visit_limit',
+        'deadline', 'last_clock', 'sequence', 'captured', 'view', 'inventory',
+        'cards', 'holds', 'ground_steps', 'spells', 'actions', 'own_exit',
+        'home', 'intervention_free', 'proof_fault', 'last_observation',
+        'pending', 'possible_input', 'released', 'reason', 'complete',
+    )
+    def __init__(self, plan, policy, ports, visit_limit):
+        self.plan = (() if plan is None else tuple(
+            (identity, kind.value, spell.value, quantity)
+            for identity, kind, spell, quantity in plan.roster))
+        self.viewport_limit = 0 if plan is None else int(plan.viewport_limit)
+        self.digest = '' if plan is None else str(plan.digest)
+        self.policy = policy
+        self.ports = ports
+        self.visit_limit = visit_limit
+        self.deadline = None
+        self.last_clock = None
+        self.sequence = 0
+        self.captured = -1.0
+        self.view = None
+        self.inventory = Inventory(policy.max_cards, policy.max_pages)
+        self.cards = {}
+        self.holds = {}
+        self.ground_steps = {}
+        self.spells = 0
+        self.actions = 0
+        self.own_exit = False
+        self.home = False
+        self.intervention_free = True
+        self.proof_fault = None
+        self.last_observation = None
+        self.pending = None
+        self.possible_input = False
+        self.released = None
+        self.reason = 'DEPLOYMENT_FAILED'
+        self.complete = False
+
+
+class _RunEntry:
+    __slots__ = ('facade', 'core', 'lock', 'claimed', 'terminal')
+    def __init__(self, facade, core):
+        self.facade = facade
+        self.core = core
+        self.lock = threading.Lock()
+        self.claimed = False
+        self.terminal = None
+
+
+class _Proof:
+    __slots__ = ()
+    def __call__(self):
+        return _consume_proof(self)
+
+
+_RUNS = {}
+_PROOFS = {}
+_RUNS_LOCK = threading.Lock()
+_PROOFS_LOCK = threading.Lock()
+
+
+def _entry_for(facade):
+    with _RUNS_LOCK:
+        entry = _RUNS.get(id(facade))
+    if entry is None or entry.facade is not facade:
+        raise DeploymentError('PLAN_REQUIRED')
+    return entry
+
+
+def _public_plan(facade):
+    entry = _entry_for(facade)
+    core = entry.core
+    if core is None:
+        plan = entry.terminal[1]
+        return CompiledDeploymentPlan(tuple(
+            (identity, CardKind(kind), Spell(spell), quantity)
+            for identity, kind, spell, quantity in plan[0]
+        ), plan[1], plan[2])
+    return CompiledDeploymentPlan(tuple(
+        (identity, CardKind(kind), Spell(spell), quantity)
+        for identity, kind, spell, quantity in core.plan
+    ), core.viewport_limit, core.digest)
+
+
+def _now(core, deadline=None):
+    try:
+        value = core.ports[4]()
+    except BaseException:
+        raise DeploymentError('CLOCK_UNAVAILABLE') from None
+    now = finite(value)
+    if core.last_clock is not None and now < core.last_clock:
+        raise DeploymentError('CLOCK_REGRESSION')
+    core.last_clock = now
+    effective = core.deadline
+    if deadline is not None:
+        supplied = finite(deadline)
+        effective = supplied if effective is None else min(effective, supplied)
+    if effective is not None and now >= effective:
+        raise DeploymentError('DEADLINE')
+    return now
+
+
+def _gate(core, deadline):
+    _now(core, deadline)
+    try:
+        allowed = core.ports[3]()
+    except BaseException:
+        allowed = False
+    _now(core, deadline)
+    if allowed is not True:
+        raise DeploymentError('AUTHORIZATION_LOST')
+
+
+def _wait(core, seconds, deadline):
+    now = _now(core, deadline)
+    end = min(core.deadline, finite(deadline))
+    delay = min(finite(seconds, 0, 5), max(0.0, end - now))
+    try:
+        core.ports[5](delay)
+    except BaseException:
+        raise DeploymentError('WAIT_UNAVAILABLE') from None
+    _now(core, deadline)
+
+
+def _read(core, deadline):
+    _gate(core, deadline)
+    try:
+        raw = core.ports[0]()
+    except BaseException:
+        raise DeploymentError('OBSERVATION_UNAVAILABLE') from None
+    try:
+        observation = _copy_observation(raw)
+    except DeploymentError:
+        raise
+    except BaseException:
+        raise DeploymentError('OBSERVATION_INVALID') from None
+    now = _now(core, deadline)
+    if (observation.sequence <= core.sequence
+            or observation.captured_at < core.captured
+            or not 0 <= now - observation.captured_at <= core.policy.observation_age):
+        raise DeploymentError('OBSERVATION_STALE')
+    core.sequence = observation.sequence
+    core.captured = observation.captured_at
+    if observation.intervention is not Intervention.CLEAR:
+        core.intervention_free = False
+        raise DeploymentError('INTERVENTION')
+    if observation.screen is Screen.BATTLE:
+        if core.view is not None and observation.view != core.view:
+            raise DeploymentError('VIEW_CHANGED')
+        core.view = observation.view
+    core.last_observation = observation
+    return observation
+
+
+def _visible(observation, identity):
+    cards = [] if observation.page is None else [
+        item for item in observation.page.cards if item.identity == identity]
+    if len(cards) != 1:
+        raise DeploymentError('CARD_IDENTITY_UNPROVED')
+    cards[0].require_known()
+    return cards[0]
+
+
+def _signatures(core):
+    return tuple((identity, CardKind(kind), Spell(spell))
+                 for identity, kind, spell, _quantity in core.plan)
+
+
+def _quantities(core):
+    return tuple(quantity for _identity, _kind, _spell, quantity in core.plan)
+
+
+def _target(core, observation, card_value):
+    kind = {
+        Spell.LIGHTNING: TargetKind.ENEMY_STRUCTURE,
+        Spell.EARTHQUAKE: TargetKind.WALL_CLUSTER,
+        Spell.RAGE: TargetKind.FRIENDLY_COHORT,
+        Spell.HEAL: TargetKind.INJURED_COHORT,
+    }.get(card_value.spell)
+    if card_value.kind is not CardKind.SPELL:
+        kind = TargetKind.GROUND
+    candidates = [item for item in observation.targets
+                  if item.kind is kind and item.confidence >= core.policy.target_confidence]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item.confidence, item.point.x, item.point.y))
+    index = (core.ground_steps.get(card_value.identity, 0) % len(candidates)
+             if kind is TargetKind.GROUND else 0)
+    return candidates[index]
+
+
+def _sync(core, observation, permitted=None):
+    if observation.screen is not Screen.BATTLE or observation.page is None:
+        raise DeploymentError('BATTLE_UNPROVED')
+    if not observation.page.left_edge or not observation.page.right_edge:
+        raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+    observed = tuple(item.signature for item in observation.page.cards)
+    expected = _signatures(core)
+    if observed != expected:
+        if len(set(observed)) != len(observed):
+            raise DeploymentError('ROSTER_DUPLICATE')
+        if any(item not in expected for item in observed):
+            raise DeploymentError('ROSTER_ADDITIONAL')
+        raise DeploymentError('ROSTER_INCOMPLETE')
+    core.inventory.locate(observation.page)
+    for item in observation.page.cards:
+        item.require_known()
+        old = core.cards[item.identity]
+        if item.signature != old.signature:
+            raise DeploymentError('CARD_CHANGED')
+        if item.identity != permitted and (item.remaining != old.remaining or item.state is not old.state):
+            raise DeploymentError('UNEXPLAINED_CARD_CHANGE')
+        core.cards[item.identity] = item
+
+
+def _proof_check(core, intent, before):
+    observation = _read(core, intent.deadline)
+    if observation.screen is not before.screen or observation.view != before.view:
+        raise DeploymentError('STATE_CHANGED')
+    if observation.screen is Screen.BATTLE:
+        _sync(core, observation)
+    if intent.card_id is not None:
+        old = _visible(before, intent.card_id)
+        current = _visible(observation, intent.card_id)
+        if (current.signature != old.signature or current.remaining != old.remaining
+                or current.state is not old.state):
+            raise DeploymentError('CARD_CHANGED')
+        if intent.verb == 'select':
+            if not current.point.near(intent.point):
+                raise DeploymentError('TARGET_MOVED')
+        else:
+            if intent.verb == 'hold' and current.kind is not CardKind.TROOP:
+                raise DeploymentError('CARD_KIND_CONFLICT')
+            target = _target(core, observation, current)
+            if not current.selected or target is None or not target.point.near(intent.point):
+                raise DeploymentError('TARGET_UNPROVED')
+    elif not observation.control(intent.verb).near(intent.point):
+        raise DeploymentError('CONTROL_CHANGED')
+    _gate(core, intent.deadline)
+    return True
+
+
+def _consume_proof(token):
+    with _PROOFS_LOCK:
+        record = _PROOFS.pop(id(token), None)
+    if record is None or record[0] is not token:
+        return False
+    core, intent, before = record[1:]
+    if core.pending != (intent.verb, intent.card_id, intent.point.x, intent.point.y,
+                        intent.duration, intent.deadline, intent.action.value):
+        core.proof_fault = 'PROOF_INVALID'
+        return False
+    try:
+        return _proof_check(core, intent, before)
+    except DeploymentError as error:
+        core.proof_fault = error.code
+        return False
+    except BaseException:
+        core.proof_fault = 'PROOF_UNAVAILABLE'
+        return False
+
+
+def _send(core, intent, before):
+    _gate(core, intent.deadline)
+    core.actions += 1
+    if core.actions > core.policy.max_actions:
+        raise DeploymentError('ACTION_LIMIT')
+    private_intent = Intent(
+        intent.verb, Point(intent.point.x, intent.point.y), Action(intent.action.value),
+        intent.card_id, intent.duration, None, intent.deadline,
+    )
+    core.pending = (private_intent.verb, private_intent.card_id,
+                    private_intent.point.x, private_intent.point.y,
+                    private_intent.duration, private_intent.deadline,
+                    private_intent.action.value)
+    core.proof_fault = None
+    token = _Proof()
+    with _PROOFS_LOCK:
+        _PROOFS[id(token)] = (token, core, private_intent, before)
+    try:
+        sent = core.ports[1](private_intent, token)
+        core.possible_input = True
+    except BaseException:
+        core.possible_input = True
+        raise DeploymentError('INPUT_UNCERTAIN') from None
+    finally:
+        with _PROOFS_LOCK:
+            _PROOFS.pop(id(token), None)
+        core.pending = None
+    _now(core, intent.deadline)
+    if sent is not True:
+        raise DeploymentError(core.proof_fault or 'INPUT_UNCERTAIN')
+    _gate(core, intent.deadline)
+
+
+def _await(core, screens, deadline, source=None):
+    for _ in range(64):
+        observation = _read(core, deadline)
+        if observation.screen in screens:
+            return observation
+        if observation.screen not in (source, Screen.UNKNOWN):
+            raise DeploymentError('UNEXPECTED_TRANSITION')
+        _wait(core, .05, deadline)
+    raise DeploymentError('OBSERVATION_LIMIT')
+
+
+def _navigate(core, observation):
+    for source, verb, destination in (
+        (Screen.HOME, 'attack', Screen.MATCH),
+        (Screen.MATCH, 'find_match', Screen.ARMY),
+        (Screen.ARMY, 'army_attack', Screen.BATTLE),
+    ):
+        if observation.screen is source:
+            if source is Screen.HOME and observation.home_verified is not True:
+                raise DeploymentError('HOME_UNPROVED')
+            deadline = min(core.deadline, _now(core) + 10)
+            _send(core, Intent(verb, observation.control(verb),
+                               Action.ATTACK_NAVIGATION, deadline=deadline), observation)
+            observation = _await(core, {destination}, deadline, source)
+    if observation.screen is not Screen.BATTLE:
+        raise DeploymentError('BATTLE_UNPROVED')
+    return observation
+
+
+def _scan(core, observation):
+    if not observation.page.left_edge or not observation.page.right_edge:
+        raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+    observed = tuple(item.signature for item in observation.page.cards)
+    expected = _signatures(core)
+    if len(observed) > core.viewport_limit:
+        raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
+    if observed != expected:
+        if len(set(observed)) != len(observed):
+            raise DeploymentError('ROSTER_DUPLICATE')
+        if any(item not in expected for item in observed):
+            raise DeploymentError('ROSTER_ADDITIONAL')
+        raise DeploymentError('ROSTER_INCOMPLETE')
+    for current, quantity in zip(observation.page.cards, _quantities(core)):
+        current.require_known()
+        if current.remaining != quantity or current.state is not CardState.AVAILABLE:
+            raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
+    core.inventory.add(observation.page)
+    core.cards = {item.identity: item for item in observation.page.cards}
+    core.holds = {identity: 0.0 for identity in core.cards}
+    return observation
+
+
+def _consume(core, card_value, observation, deadline):
+    if not card_value.selected:
+        _send(core, Intent('select', card_value.point, Action.TROOP_DEPLOYMENT,
+                           card_value.identity, deadline=deadline), observation)
+        select_deadline = min(deadline, _now(core) + 1)
+        for _ in range(24):
+            observation = _read(core, select_deadline)
+            _sync(core, observation)
+            card_value = _visible(observation, card_value.identity)
+            if card_value.selected:
+                break
+            _wait(core, .04, select_deadline)
+        else:
+            raise DeploymentError('SELECTION_UNPROVED')
+    target = _target(core, observation, card_value)
+    if target is None:
+        return observation, False
+    verb = 'hold' if card_value.kind is CardKind.TROOP else 'tap'
+    duration = 0.0
+    if verb == 'hold':
+        remaining = core.policy.card_hold_ceiling - core.holds[card_value.identity]
+        duration = min(core.policy.troop_hold_seconds, remaining,
+                       deadline - _now(core, deadline))
+        if duration <= 0:
+            raise DeploymentError('CARD_HOLD_LIMIT')
+    before_count = card_value.remaining
+    delivery_started = _now(core, deadline)
+    _send(core, Intent(verb, target.point, Action.TROOP_DEPLOYMENT,
+                       card_value.identity, duration, deadline=deadline), observation)
+    if verb == 'hold':
+        core.holds[card_value.identity] += max(
+            duration, _now(core, deadline) - delivery_started)
+        if core.holds[card_value.identity] > core.policy.card_hold_ceiling:
+            raise DeploymentError('CARD_HOLD_LIMIT')
+    ack_deadline = min(deadline, _now(core) + core.policy.acknowledgement_seconds)
+    for _ in range(40):
+        observation = _read(core, ack_deadline)
+        if observation.screen is not Screen.BATTLE:
+            raise DeploymentError('EXTERNAL_OR_EARLY_RESULT')
+        current = _visible(observation, card_value.identity)
+        if current.remaining < before_count:
+            delta = before_count - current.remaining
+            if card_value.kind is not CardKind.TROOP and delta != 1:
+                raise DeploymentError('COUNT_DELTA_UNCERTAIN')
+            _wait(core, .04, ack_deadline)
+            confirmed = _read(core, ack_deadline)
+            check = _visible(confirmed, card_value.identity)
+            if check.remaining != current.remaining or check.state is not current.state:
+                raise DeploymentError('COUNT_DELTA_UNCERTAIN')
+            _sync(core, confirmed, permitted=card_value.identity)
+            if card_value.kind is not CardKind.SPELL:
+                core.ground_steps[card_value.identity] = core.ground_steps.get(card_value.identity, 0) + 1
+            else:
+                core.spells += delta
+            return confirmed, True
+        if current.remaining != before_count or current.state is not card_value.state:
+            raise DeploymentError('COUNT_DELTA_UNCERTAIN')
+        _wait(core, .05, ack_deadline)
+    raise DeploymentError('CONSUMPTION_UNPROVED')
+
+
+def _deploy(core, observation, deadline):
+    idle = 0
+    while True:
+        _gate(core, deadline)
+        _sync(core, observation)
+        pending = [item for item in core.cards.values() if not item.exhausted]
+        if not pending:
+            break
+        pending.sort(key=lambda item: (
+            0 if item.kind is CardKind.SPELL else 1,
+            core.inventory.identities.index(item.identity)))
+        progress = False
+        for candidate in pending:
+            _sync(core, observation)
+            card_value = _visible(observation, candidate.identity)
+            if card_value.exhausted:
+                continue
+            if card_value.kind is CardKind.SPELL and _target(core, observation, card_value) is None:
+                continue
+            observation, progress = _consume(core, card_value, observation, deadline)
+            if progress:
+                break
+        if not progress:
+            idle += 1
+            if idle > 20:
+                raise DeploymentError('TARGET_UNPROVED')
+            _wait(core, .1, deadline)
+        else:
+            idle = 0
+        observation = _read(core, deadline)
+    observation = _read(core, deadline)
+    _sync(core, observation)
+    if any(not item.exhausted for item in observation.page.cards):
+        raise DeploymentError('DEPLETION_UNPROVED')
+    return observation
+
+
+def _exit(core, observation):
+    deadline = min(core.deadline, _now(core) + core.policy.exit_seconds)
+    _send(core, Intent('end_battle', observation.control('end_battle'),
+                       Action.RETURN_HOME, deadline=deadline), observation)
+    core.own_exit = True
+    observation = _await(core, {Screen.END_CONFIRM, Screen.RESULT},
+                         min(deadline, _now(core) + 5), Screen.BATTLE)
+    if observation.screen is Screen.END_CONFIRM:
+        _send(core, Intent('confirm_end', observation.control('confirm_end'),
+                           Action.RETURN_HOME, deadline=deadline), observation)
+        observation = _await(core, {Screen.RESULT},
+                             min(deadline, _now(core) + 5), Screen.END_CONFIRM)
+    _send(core, Intent('return_home', observation.control('return_home'),
+                       Action.RETURN_HOME, deadline=deadline), observation)
+    observation = _await(core, {Screen.HOME},
+                         min(deadline, _now(core) + 10), Screen.RESULT)
+    if not observation.home_verified:
+        raise DeploymentError('HOME_UNPROVED')
+    core.home = True
+
+
+def _snapshot(core, complete, reason):
+    remaining = sum(item.remaining or 0 for item in core.cards.values())
+    cards_total = len(core.plan) if core.cards else 0
+    return DeploymentResult(
+        complete, reason, cards_total, core.spells, core.own_exit, core.home,
+        core.intervention_free, remaining,
+    )
+
+
+def _execute_registered_run(facade):
+    entry = _entry_for(facade)
+    with entry.lock:
+        if entry.claimed:
+            raise DeploymentError('EXECUTOR_ALREADY_USED')
+        entry.claimed = True
+    core = entry.core
+    complete = False
+    reason = 'DEPLOYMENT_FAILED'
+    try:
+        if not core.plan:
+            raise DeploymentError('PLAN_REQUIRED')
+        start = _now(core)
+        core.deadline = min(
+            start + core.policy.visit_seconds,
+            core.visit_limit if core.visit_limit is not None else start + core.policy.visit_seconds,
+        )
+        _now(core, core.deadline)
+        observation = _navigate(core, _read(core, core.deadline))
+        deploy_deadline = min(
+            core.deadline - core.policy.exit_seconds,
+            observation.captured_at + core.policy.deployment_seconds,
+        )
+        _now(core, deploy_deadline)
+        observation = _scan(core, observation)
+        if not any(item.remaining for item in core.cards.values()):
+            raise DeploymentError('EMPTY_ARMY')
+        observation = _deploy(core, observation, deploy_deadline)
+        _exit(core, observation)
+        _now(core, core.deadline)
+        complete = True
+        reason = 'AUTONOMOUS_DEPLOYMENT_COMPLETE'
+    except DeploymentError as error:
+        reason = error.code
+    except BaseException:
+        reason = 'DEPLOYMENT_UNAVAILABLE'
+    finally:
+        cleanup_time_fault = None
+        if core.last_clock is not None:
+            try:
+                _now(core, core.deadline)
+            except DeploymentError as error:
+                cleanup_time_fault = error.code
+        try:
+            released = core.ports[2]() is True
+        except BaseException:
+            released = False
+        core.released = released
+        late = cleanup_time_fault is not None
+        if core.last_clock is not None:
+            try:
+                _now(core, core.deadline)
+            except DeploymentError as error:
+                late = True
+                cleanup_time_fault = cleanup_time_fault or error.code
+        if not released:
+            complete = False
+            reason = 'RELEASE_UNPROVED'
+        elif late and complete:
+            complete = False
+            reason = cleanup_time_fault
+    if complete and not (core.own_exit and core.home and core.intervention_free):
+        complete = False
+        reason = 'DEPLOYMENT_FAILED'
+    result = _snapshot(core, complete, reason)
+    plan_snapshot = (core.plan, core.viewport_limit, core.digest)
+    entry.terminal = (result, plan_snapshot)
+    entry.core = None
+    return DeploymentResult(
+        result.complete, result.reason, result.cards_total, result.spells_consumed,
+        result.own_exit, result.home_verified, result.intervention_free,
+        result.remaining,
+    )
+
+
+class DeploymentEngine:
+    """Inert one-use façade; all live run authority is service-owned."""
+    __slots__ = ('__dict__', '__weakref__')
+
     @property
     def plan(self):
-        return _detached_plan(self)
+        return _public_plan(self)
 
     @plan.setter
-    def plan(self,value):
+    def plan(self, _value):
         raise TypeError('sealed deployment plan')
+
+    @property
+    def observe(self):
+        return 'DETACHED'
+
+    @observe.setter
+    def observe(self, value):
+        # Legacy pre-run test/setup adapter. Once execution is claimed, callback
+        # replacement cannot reach or replace the private original port.
+        if not callable(value):
+            raise DeploymentError('PORT_INVALID')
+        entry = _entry_for(self)
+        with entry.lock:
+            if entry.claimed or entry.core is None:
+                raise TypeError('claimed deployment port')
+            ports = entry.core.ports
+            entry.core.ports = (value,) + ports[1:]
 
     def __init__(self, *, observe, deliver, release, live_gate, monotonic, sleep,
                  policy: Policy=Policy(), visit_deadline: float | None=None,
                  plan: CompiledDeploymentPlan | None=None):
-        if type(policy) is not Policy or not all(callable(c) for c in (observe,deliver,release,live_gate,monotonic,sleep)):
+        if not all(callable(item) for item in
+                   (observe, deliver, release, live_gate, monotonic, sleep)):
             raise DeploymentError('PORT_INVALID')
-        if plan is not None and type(plan) is not CompiledDeploymentPlan:
-            raise DeploymentError('PLAN_INVALID')
-        owned_plan=None if plan is None else _copy_plan(plan)
-        self.observe=observe; self.deliver=deliver; self.release=release
-        self.live_gate=live_gate; self.clock=monotonic; self.sleep=sleep; self.policy=policy
-        self.visit_deadline=visit_deadline
-        _bind_plan_authority(self,owned_plan)
-        self.used=False; self.sequence=0; self.captured=-1.0; self.view=None
-        self.inventory=Inventory(policy.max_cards,policy.max_pages)
-        self.cards: dict[str, Card]={}; self.holds: dict[str,float]={}
-        self.ground_steps: dict[str, int]={}
-        self.spells=0; self.actions=0; self.own_exit=False; self.home=False
-        self.intervention_free=True; self.proof_fault=None; self.last=None
-
-    def _validate_plan(self):
-        _canonical_plan(self)
-
-    def _clock_callback(self):
-        value=_run_port(self,4)()
-        _canonical_plan(self)
-        return value
-
-    def _sleep_callback(self,seconds):
-        value=_run_port(self,5)(seconds)
-        _canonical_plan(self)
-        return value
-
-    def _gate(self, deadline):
-        _canonical_plan(self)
-        self.budget.check(deadline)
-        try: allowed=_run_port(self,3)()
-        except BaseException: allowed=False
-        _canonical_plan(self)
-        if allowed is not True: raise DeploymentError('AUTHORIZATION_LOST')
-
-    def _read(self, deadline) -> Observation:
-        DeploymentEngine._gate(self,deadline)
-        try: o=_run_port(self,0)()
-        except BaseException: raise DeploymentError('OBSERVATION_UNAVAILABLE') from None
-        _canonical_plan(self)
-        now=self.budget.check(deadline)
-        if type(o) is not Observation: raise DeploymentError('OBSERVATION_INVALID')
-        if o.sequence<=self.sequence or o.captured_at<self.captured or not 0<=now-o.captured_at<=_run_policy(self).observation_age:
-            raise DeploymentError('OBSERVATION_STALE')
-        self.sequence=o.sequence; self.captured=o.captured_at
-        if o.intervention is not Intervention.CLEAR:
-            self.intervention_free=False
-            raise DeploymentError('INTERVENTION')
-        if o.screen is Screen.BATTLE:
-            if self.view is not None and o.view != self.view: raise DeploymentError('VIEW_CHANGED')
-            self.view=o.view
-        self.last=o
-        return o
-
-    @staticmethod
-    def _visible(o: Observation, identity: str) -> Card:
-        cards=[] if o.page is None else [c for c in o.page.cards if c.identity==identity]
-        if len(cards)!=1: raise DeploymentError('CARD_IDENTITY_UNPROVED')
-        cards[0].require_known()
-        return cards[0]
-
-    def _target(self, o, c) -> Target | None:
-        kind={Spell.LIGHTNING:TargetKind.ENEMY_STRUCTURE, Spell.EARTHQUAKE:TargetKind.WALL_CLUSTER,
-              Spell.RAGE:TargetKind.FRIENDLY_COHORT, Spell.HEAL:TargetKind.INJURED_COHORT}.get(c.spell)
-        if c.kind is not CardKind.SPELL: kind=TargetKind.GROUND
-        candidates=[t for t in o.targets if t.kind is kind and t.confidence>=_run_policy(self).target_confidence]
-        if not candidates: return None
-        candidates=sorted(candidates,key=lambda t:(-t.confidence,t.point.x,t.point.y))
-        index=self.ground_steps.get(c.identity,0)%len(candidates) if kind is TargetKind.GROUND else 0
-        return candidates[index]
-
-    def _proof(self, intent, before):
-        try:
-            o=DeploymentEngine._read(self,intent.deadline)
-            if o.screen is not before.screen or o.view!=before.view:
-                raise DeploymentError('STATE_CHANGED')
-            _canonical_plan(self)
-            if o.screen is Screen.BATTLE:
-                DeploymentEngine._sync(self,o)
-            if intent.card_id is not None:
-                old=DeploymentEngine._visible(before,intent.card_id); c=DeploymentEngine._visible(o,intent.card_id)
-                if c.signature!=old.signature or c.remaining!=old.remaining or c.state is not old.state:
-                    raise DeploymentError('CARD_CHANGED')
-                if intent.verb=='select':
-                    if not c.point.near(intent.point): raise DeploymentError('TARGET_MOVED')
-                else:
-                    if intent.verb=='hold' and c.kind is not CardKind.TROOP:
-                        raise DeploymentError('CARD_KIND_CONFLICT')
-                    target=DeploymentEngine._target(self,o,c)
-                    if not c.selected or target is None or not target.point.near(intent.point):
-                        raise DeploymentError('TARGET_UNPROVED')
-            else:
-                if not o.control(intent.verb).near(intent.point): raise DeploymentError('CONTROL_CHANGED')
-            DeploymentEngine._gate(self,intent.deadline)
-            return True
-        except DeploymentError as e:
-            self.proof_fault=e.code
-            return False
-        except BaseException:
-            self.proof_fault='PROOF_UNAVAILABLE'; return False
-
-    def _send(self, intent, before):
-        DeploymentEngine._gate(self,intent.deadline)
-        self.actions+=1
-        if self.actions>_run_policy(self).max_actions: raise DeploymentError('ACTION_LIMIT')
-        self.proof_fault=None
-        try: sent=_run_port(self,1)(intent,lambda:DeploymentEngine._proof(self,intent,before))
-        except BaseException: raise DeploymentError('INPUT_UNCERTAIN') from None
-        _canonical_plan(self)
-        if sent is not True: raise DeploymentError(self.proof_fault or 'INPUT_UNCERTAIN')
-        DeploymentEngine._gate(self,intent.deadline)
-
-    def _await(self, screens, deadline, source=None):
-        for _ in range(64):
-            o=DeploymentEngine._read(self,deadline)
-            if o.screen in screens: return o
-            if o.screen not in (source, Screen.UNKNOWN): raise DeploymentError('UNEXPECTED_TRANSITION')
-            self.budget.wait(.05,deadline)
-        raise DeploymentError('OBSERVATION_LIMIT')
-
-    def _navigate(self, o):
-        for source,verb,dest in ((Screen.HOME,'attack',Screen.MATCH),(Screen.MATCH,'find_match',Screen.ARMY),(Screen.ARMY,'army_attack',Screen.BATTLE)):
-            if o.screen is source:
-                if source is Screen.HOME and o.home_verified is not True: raise DeploymentError('HOME_UNPROVED')
-                deadline=min(_run_deadline(self),self.budget.check()+10)
-                DeploymentEngine._send(self,Intent(verb,o.control(verb),Action.ATTACK_NAVIGATION,deadline=deadline),o)
-                o=DeploymentEngine._await(self,{dest},deadline,source)
-        if o.screen is not Screen.BATTLE: raise DeploymentError('BATTLE_UNPROVED')
-        return o
-
-    def _scan(self, o, deadline):
-        plan=_canonical_plan(self)
-        if not o.page.left_edge or not o.page.right_edge:
-            raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
-        observed=tuple(c.signature for c in o.page.cards)
-        if len(observed)>plan.viewport_limit:
-            raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
-        if observed!=plan.signatures:
-            if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
-            if any(item not in plan.signatures for item in observed):
-                raise DeploymentError('ROSTER_ADDITIONAL')
-            raise DeploymentError('ROSTER_INCOMPLETE')
-        for current,expected in zip(o.page.cards,plan.quantities):
-            current.require_known()
-            if current.remaining!=expected or current.state is not CardState.AVAILABLE:
-                raise DeploymentError('INITIAL_QUANTITY_MISMATCH')
-        self.inventory.add(o.page)
-        self.cards={c.identity:c for c in o.page.cards}
-        self.holds={key:0.0 for key in self.cards}
-        return o
-
-    def _sync(self,o, permitted=None):
-        if o.screen is not Screen.BATTLE or o.page is None: raise DeploymentError('BATTLE_UNPROVED')
-        plan=_canonical_plan(self)
-        if not o.page.left_edge or not o.page.right_edge:
-            raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
-        observed=tuple(c.signature for c in o.page.cards)
-        if observed!=plan.signatures:
-            if len(set(observed))!=len(observed): raise DeploymentError('ROSTER_DUPLICATE')
-            if any(item not in plan.signatures for item in observed):
-                raise DeploymentError('ROSTER_ADDITIONAL')
-            raise DeploymentError('ROSTER_INCOMPLETE')
-        self.inventory.locate(o.page)
-        for c in o.page.cards:
-            c.require_known(); old=self.cards[c.identity]
-            if c.signature!=old.signature: raise DeploymentError('CARD_CHANGED')
-            if c.identity != permitted and (c.remaining!=old.remaining or c.state is not old.state):
-                raise DeploymentError('UNEXPLAINED_CARD_CHANGE')
-            self.cards[c.identity]=c
-
-    def _bring(self, identity, o, deadline):
-        _canonical_plan(self)
-        DeploymentEngine._sync(self,o)
-        if not any(c.identity==identity for c in o.page.cards):
-            raise DeploymentError('ROSTER_INCOMPLETE')
-        return o
-
-    def _consume(self,c,o,deadline):
-        if not c.selected:
-            DeploymentEngine._send(self,Intent('select',c.point,Action.TROOP_DEPLOYMENT,c.identity,deadline=deadline),o)
-            select_deadline=min(deadline,self.budget.check()+1)
-            for _ in range(24):
-                o=DeploymentEngine._read(self,select_deadline); DeploymentEngine._sync(self,o)
-                c=DeploymentEngine._visible(o,c.identity)
-                if c.selected: break
-                self.budget.wait(.04,select_deadline)
-            else: raise DeploymentError('SELECTION_UNPROVED')
-        target=DeploymentEngine._target(self,o,c)
-        if target is None: return o,False
-        verb='hold' if c.kind is CardKind.TROOP else 'tap'
-        duration=0.0
-        if verb=='hold':
-            policy=_run_policy(self)
-            remaining=policy.card_hold_ceiling-self.holds[c.identity]
-            duration=min(policy.troop_hold_seconds,remaining,deadline-self.budget.check())
-            if duration<=0: raise DeploymentError('CARD_HOLD_LIMIT')
-        before_count=c.remaining
-        delivery_started=self.budget.check(deadline)
-        DeploymentEngine._send(self,Intent(verb,target.point,Action.TROOP_DEPLOYMENT,c.identity,duration,deadline=deadline),o)
-        if verb=='hold':
-            self.holds[c.identity]+=max(duration,self.budget.check(deadline)-delivery_started)
-        ack_deadline=min(deadline,self.budget.check()+_run_policy(self).acknowledgement_seconds)
-        for _ in range(40):
-            o=DeploymentEngine._read(self,ack_deadline)
-            if o.screen is not Screen.BATTLE: raise DeploymentError('EXTERNAL_OR_EARLY_RESULT')
-            current=DeploymentEngine._visible(o,c.identity)
-            if current.remaining < before_count:
-                delta=before_count-current.remaining
-                if c.kind is not CardKind.TROOP and delta!=1: raise DeploymentError('COUNT_DELTA_UNCERTAIN')
-                # A transient badge animation is not a durable consumption fact.
-                self.budget.wait(.04,ack_deadline)
-                confirmed=DeploymentEngine._read(self,ack_deadline)
-                check=DeploymentEngine._visible(confirmed,c.identity)
-                if check.remaining!=current.remaining or check.state is not current.state:
-                    raise DeploymentError('COUNT_DELTA_UNCERTAIN')
-                DeploymentEngine._sync(self,confirmed,permitted=c.identity)
-                o=confirmed
-                if c.kind is not CardKind.SPELL:
-                    self.ground_steps[c.identity]=self.ground_steps.get(c.identity,0)+1
-                if c.kind is CardKind.SPELL: self.spells+=delta
-                return o,True
-            if current.remaining != before_count or current.state is not c.state:
-                raise DeploymentError('COUNT_DELTA_UNCERTAIN')
-            self.budget.wait(.05,ack_deadline)
-        raise DeploymentError('CONSUMPTION_UNPROVED')
-
-    def _deploy(self,o,deadline):
-        idle_observations=0
-        while True:
-            DeploymentEngine._gate(self,deadline); DeploymentEngine._sync(self,o)
-            pending=[c for c in self.cards.values() if not c.exhausted]
-            if not pending: break
-            # Ready support spells are interleaved before the next troop burst.
-            pending.sort(key=lambda c:(0 if c.kind is CardKind.SPELL else 1, self.inventory.identities.index(c.identity)))
-            progress=False
-            for candidate in pending:
-                o=DeploymentEngine._bring(self,candidate.identity,o,deadline)
-                c=DeploymentEngine._visible(o,candidate.identity)
-                if c.exhausted: continue
-                if c.kind is CardKind.SPELL and DeploymentEngine._target(self,o,c) is None:continue
-                o,progress=DeploymentEngine._consume(self,c,o,deadline)
-                if progress: break
-            if not progress:
-                idle_observations+=1
-                if idle_observations>20:raise DeploymentError('TARGET_UNPROVED')
-                self.budget.wait(.1,deadline)
-            else:idle_observations=0
-            o=DeploymentEngine._read(self,deadline)
-        # Final complete rescan. A sealed single-page plan requires one fresh
-        # whole-roster equality proof and never gains scrolling authority.
-        _canonical_plan(self)
-        o=DeploymentEngine._read(self,deadline)
-        DeploymentEngine._sync(self,o)
-        if any(not c.exhausted for c in o.page.cards):
-            raise DeploymentError('DEPLETION_UNPROVED')
-        return o
-
-    def _exit(self,o):
-        deadline=min(_run_deadline(self),self.budget.check()+_run_policy(self).exit_seconds)
-        DeploymentEngine._send(self,Intent('end_battle',o.control('end_battle'),Action.RETURN_HOME,deadline=deadline),o)
-        self.own_exit=True
-        o=DeploymentEngine._await(self,{Screen.END_CONFIRM,Screen.RESULT},min(deadline,self.budget.check()+5),Screen.BATTLE)
-        if o.screen is Screen.END_CONFIRM:
-            DeploymentEngine._send(self,Intent('confirm_end',o.control('confirm_end'),Action.RETURN_HOME,deadline=deadline),o)
-            o=DeploymentEngine._await(self,{Screen.RESULT},min(deadline,self.budget.check()+5),Screen.END_CONFIRM)
-        DeploymentEngine._send(self,Intent('return_home',o.control('return_home'),Action.RETURN_HOME,deadline=deadline),o)
-        o=DeploymentEngine._await(self,{Screen.HOME},min(deadline,self.budget.check()+10),Screen.RESULT)
-        if not o.home_verified: raise DeploymentError('HOME_UNPROVED')
-        self.home=True
+        owned_plan = None if plan is None else _copy_plan(plan)
+        owned_policy = _copy_policy(policy)
+        limit = None if visit_deadline is None else finite(visit_deadline)
+        core = _RunCore(owned_plan, owned_policy,
+                        (observe, deliver, release, live_gate, monotonic, sleep), limit)
+        entry = _RunEntry(self, core)
+        with _RUNS_LOCK:
+            if id(self) in _RUNS:
+                raise DeploymentError('EXECUTOR_ALREADY_USED')
+            _RUNS[id(self)] = entry
 
     def run(self) -> DeploymentResult:
-        if self.used: raise DeploymentError('EXECUTOR_ALREADY_USED')
-        self.used=True; reason='DEPLOYMENT_FAILED'; complete=False
-        try:
-            _freeze_run_authority(self)
-            policy=_run_policy(self); authority=_run_authority(self)
-            start=finite(DeploymentEngine._clock_callback(self))
-            deadline=(start+policy.visit_seconds if authority.visit_deadline is None
-                      else min(finite(authority.visit_deadline),start+policy.visit_seconds))
-            deadline=_freeze_run_deadline(self,deadline)
-            self.budget=Budget(
-                lambda:DeploymentEngine._clock_callback(self),
-                lambda seconds:DeploymentEngine._sleep_callback(self,seconds),deadline)
-            o=DeploymentEngine._navigate(self,DeploymentEngine._read(self,deadline))
-            deploy_deadline=min(deadline-policy.exit_seconds,o.captured_at+policy.deployment_seconds)
-            self.budget.check(deploy_deadline)
-            o=DeploymentEngine._scan(self,o,deploy_deadline)
-            if not any(c.remaining for c in self.cards.values()): raise DeploymentError('EMPTY_ARMY')
-            o=DeploymentEngine._deploy(self,o,deploy_deadline)
-            DeploymentEngine._exit(self,o)
-            complete=True; reason='AUTONOMOUS_DEPLOYMENT_COMPLETE'
-        except DeploymentError as e: reason=e.code
-        except BaseException: reason='DEPLOYMENT_UNAVAILABLE'
-        finally:
-            try: released=_run_port(self,2)()
-            except BaseException: released=False
-            try:_canonical_plan(self)
-            except DeploymentError as error:
-                complete=False; reason=error.code
-            if released is not True: complete=False; reason='RELEASE_UNPROVED'
-        remaining=sum(c.remaining or 0 for c in self.cards.values())
-        return DeploymentResult(complete,reason,len(self.cards),self.spells,
-            self.own_exit,self.home,self.intervention_free,remaining)
+        return _execute_registered_run(self)

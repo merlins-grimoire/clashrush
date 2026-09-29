@@ -51,10 +51,33 @@ lack of multiplicity or recoloring alone. Card selection must be visibly proved.
 
 ## Inputs and policy
 
+`DeploymentEngine` is an inert one-use façade. Trusted construction copies the
+exact plan and all eleven policy scalars into a service-owned run core and keeps
+the original observer, delivery, release, gate, monotonic and wait capabilities
+only in that private graph. The façade has no live core, budget, port, lease,
+backend or capability-bearing closure; its plan and result are detached values.
+All deadlines, counters, observation history, pending proof, intervention,
+possible-input, cleanup and completion truth remain private. Identity admission
+uses a strong service entry keyed by object identity, not façade equality/hash or
+a weak-reference callback. The opaque proof object carries no fields, closure,
+default or bound core receiver and is consumed exactly once against the private
+pending action. This closes only callbacks that capture the façade. It is not a
+Python sandbox and does not cover module reflection/mutation, code-object or
+process-memory modification, or a callback independently holding native-input
+authority.
+
 An Intent binds current card, screen/view, normalized target, existing action
 label and absolute deadline. Delivery runs fresh proof immediately before down,
 checks the durable run gate and intervention health, and pairs every down with
 owned up cleanup. Timed waits never imply successful deployment.
+
+The physical down tail completes target/binding preparation, durable possible-
+held intent and the observed-event baseline before its final original
+authorization/intervention/monotonic deadline decision. After that decision the
+actual call sequence is exactly the captured class commit primitive with the
+prepared marker, then acknowledgment bookkeeping and unconditional release.
+There is no façade access, proof callback, target/binding lookup, lease write,
+event-baseline call, user conversion or additional clock call before down.
 
 Troops receive short holds with a 25-second cumulative per-card ceiling.
 Hero/clan singletons receive one placement. Spells receive exactly one tap per

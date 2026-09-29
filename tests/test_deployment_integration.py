@@ -28,6 +28,15 @@ def test_real_engine_result_is_persisted_before_true_return():
     assert len(records)==1 and records[0].complete and m.closed
 
 
+def test_owner_does_not_consume_shadowable_facade_run(monkeypatch):
+    from clash_rush_rebuild.mvp_deployment import DeploymentEngine
+    monkeypatch.setattr(DeploymentEngine,'run',lambda _self:(_ for _ in ()).throw(
+        AssertionError('facade run must not be owner authority')))
+    w=World([card(count=1)]);e,m,records=compose(w)
+    assert e.run()==(True,'AUTONOMOUS_DEPLOYMENT_COMPLETE')
+    assert len(records)==1 and records[0].complete and m.closed
+
+
 def test_monitor_cleanup_failure_never_records_autonomous_success():
     w=World([card(count=1)]);m=Monitor();m.failed=True;e,_,records=compose(w,m)
     success,_=e.run();assert not success
