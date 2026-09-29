@@ -16,6 +16,7 @@ import re
 import hashlib
 import json
 import threading
+import weakref
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable, Iterable, NamedTuple
@@ -487,13 +488,12 @@ class _RunCore:
 
 
 class _RunEntry:
-    __slots__ = ('facade', 'core', 'lock', 'claimed', 'terminal')
+    __slots__ = ('facade', 'core', 'lock', 'claimed')
     def __init__(self, facade, core):
         self.facade = facade
         self.core = core
         self.lock = threading.Lock()
         self.claimed = False
-        self.terminal = None
 
 
 class _Proof:
@@ -503,14 +503,46 @@ class _Proof:
 
 
 _RUNS = {}
+_USED = {}
 _PROOFS = {}
 _RUNS_LOCK = threading.Lock()
 _PROOFS_LOCK = threading.Lock()
 
 
+def _used_locked(facade):
+    key = id(facade)
+    reference = _USED.get(key)
+    if reference is None:
+        return False
+    target = reference()
+    if target is facade:
+        return True
+    if _USED.get(key) is reference:
+        _USED.pop(key, None)
+    return False
+
+
+def _retire_entry(facade, entry):
+    key = id(facade)
+    def discard(reference, identity=key):
+        with _RUNS_LOCK:
+            if _USED.get(identity) is reference:
+                _USED.pop(identity, None)
+    reference = weakref.ref(facade, discard)
+    with _RUNS_LOCK:
+        if _RUNS.get(key) is entry:
+            _RUNS.pop(key)
+        _USED[key] = reference
+    entry.core = None
+    entry.facade = None
+
+
 def _entry_for(facade):
     with _RUNS_LOCK:
         entry = _RUNS.get(id(facade))
+        used = _used_locked(facade)
+    if used:
+        raise DeploymentError('EXECUTOR_ALREADY_USED')
     if entry is None or entry.facade is not facade:
         raise DeploymentError('PLAN_REQUIRED')
     return entry
@@ -519,12 +551,6 @@ def _entry_for(facade):
 def _public_plan(facade):
     entry = _entry_for(facade)
     core = entry.core
-    if core is None:
-        plan = entry.terminal[1]
-        return CompiledDeploymentPlan(tuple(
-            (identity, CardKind(kind), Spell(spell), quantity)
-            for identity, kind, spell, quantity in plan[0]
-        ), plan[1], plan[2])
     return CompiledDeploymentPlan(tuple(
         (identity, CardKind(kind), Spell(spell), quantity)
         for identity, kind, spell, quantity in core.plan
@@ -652,6 +678,7 @@ def _sync(core, observation, permitted=None):
             raise DeploymentError('ROSTER_ADDITIONAL')
         raise DeploymentError('ROSTER_INCOMPLETE')
     core.inventory.locate(observation.page)
+    reconciled = {}
     for item in observation.page.cards:
         item.require_known()
         old = core.cards[item.identity]
@@ -659,7 +686,8 @@ def _sync(core, observation, permitted=None):
             raise DeploymentError('CARD_CHANGED')
         if item.identity != permitted and (item.remaining != old.remaining or item.state is not old.state):
             raise DeploymentError('UNEXPLAINED_CARD_CHANGE')
-        core.cards[item.identity] = item
+        reconciled[item.identity] = item
+    core.cards = reconciled
 
 
 def _proof_check(core, intent, before):
@@ -987,14 +1015,13 @@ def _execute_registered_run(facade):
         complete = False
         reason = 'DEPLOYMENT_FAILED'
     result = _snapshot(core, complete, reason)
-    plan_snapshot = (core.plan, core.viewport_limit, core.digest)
-    entry.terminal = (result, plan_snapshot)
-    entry.core = None
-    return DeploymentResult(
+    public_result = DeploymentResult(
         result.complete, result.reason, result.cards_total, result.spells_consumed,
         result.own_exit, result.home_verified, result.intervention_free,
         result.remaining,
     )
+    _retire_entry(facade, entry)
+    return public_result
 
 
 class DeploymentEngine:
@@ -1039,7 +1066,7 @@ class DeploymentEngine:
                         (observe, deliver, release, live_gate, monotonic, sleep), limit)
         entry = _RunEntry(self, core)
         with _RUNS_LOCK:
-            if id(self) in _RUNS:
+            if id(self) in _RUNS or _used_locked(self):
                 raise DeploymentError('EXECUTOR_ALREADY_USED')
             _RUNS[id(self)] = entry
 

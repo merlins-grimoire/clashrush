@@ -9,7 +9,7 @@ import time
 
 from .mvp_deployment import (
     DeploymentEngine, DeploymentError, DeploymentResult, Intervention,
-    _execute_registered_run,
+    _execute_registered_run, finite,
 )
 
 
@@ -18,10 +18,19 @@ class NativeDeploymentExecutor:
     def __init__(self,*,observe,deliver,release,live_gate,monotonic,wait,deadline,
                  monitor,record_result,plan):
         self.observe=observe;self.deliver=deliver;self.release=release
-        self.gate=live_gate;self.clock=monotonic;self.wait=wait;self.deadline=deadline
+        self.gate=live_gate;self.clock=monotonic;self.wait=wait;self.deadline=finite(deadline)
         from .mvp_deployment import CompiledDeploymentPlan
         if type(plan) is not CompiledDeploymentPlan:raise DeploymentError('PLAN_INVALID')
         self.monitor=monitor;self.record=record_result;self.plan=plan;self.used=False
+        self.last_clock=None
+    def _within_deadline(self):
+        try:now=finite(self.clock())
+        except BaseException:raise DeploymentError('CLOCK_UNAVAILABLE') from None
+        if self.last_clock is not None and now<self.last_clock:
+            raise DeploymentError('CLOCK_REGRESSION')
+        self.last_clock=now
+        if now>=self.deadline:raise DeploymentError('DEADLINE')
+        return now
     def run(self):
         if self.used:raise DeploymentError('EXECUTOR_ALREADY_USED')
         self.used=True
@@ -45,8 +54,29 @@ class NativeDeploymentExecutor:
                 result=replace(result,complete=False,reason='RELEASE_UNPROVED')
             if not closed:
                 result=replace(result,complete=False,reason='INTERVENTION_MONITOR_UNAVAILABLE',intervention_free=False)
-        try:self.record(result)
+            try:self._within_deadline()
+            except DeploymentError as error:
+                if result.complete:
+                    result=replace(result,complete=False,reason=error.code)
+        supplied=False
+        def result_for_commit():
+            nonlocal result,supplied
+            if supplied:raise DeploymentError('PROOF_COMMIT_FAILED')
+            try:self._within_deadline()
+            except DeploymentError as error:
+                if result.complete:
+                    result=replace(result,complete=False,reason=error.code)
+            supplied=True
+            return replace(result)
+        try:
+            acknowledged=self.record(result_for_commit)
+            if supplied is not True or acknowledged is not True:
+                raise DeploymentError('PROOF_COMMIT_FAILED')
         except BaseException:raise DeploymentError('PROOF_COMMIT_FAILED') from None
+        try:self._within_deadline()
+        except DeploymentError as error:
+            if result.complete:
+                result=replace(result,complete=False,reason=error.code)
         return result.complete,result.reason
     def cleanup(self):
         if self.release() is not True:raise DeploymentError('RELEASE_UNPROVED')
@@ -78,5 +108,6 @@ def build_native_executor(*,binding,bound_input,capture_bgr,home_verified,enable
     return NativeDeploymentExecutor(observe=observer,deliver=delivery.deliver,
           release=delivery.release,live_gate=active,monotonic=time.monotonic,
           wait=time.sleep,deadline=lease.deadline-STOP_RESERVE,monitor=monitor,
-          record_result=lambda result:record_proof(authority,transaction_ref,result,profile.digest),
+          record_result=lambda result_for_commit:(
+              record_proof(authority,transaction_ref,result_for_commit(),profile.digest) is None),
           plan=profile.plan)

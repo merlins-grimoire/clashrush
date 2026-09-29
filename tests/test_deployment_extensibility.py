@@ -197,13 +197,14 @@ def test_engine_reference_callback_cannot_replace_closed_run_authority(boundary)
 
     engine = _callback_engine(world, approved, boundary, attack)
     engine_ref["engine"] = engine
+    detached_plan = engine.plan
     result = engine.run()
 
     assert fired
     assert result.complete
     assert result.cards_total == 1
     assert result.spells_consumed == 0
-    assert engine.plan.signatures == approved.signatures
+    assert detached_plan.signatures == approved.signatures
     assert any(event.card_id == "card_0" for event in world.events)
     assert not any(event.card_id == "card_1" for event in world.events)
     assert world.closed

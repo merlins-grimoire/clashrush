@@ -14,11 +14,14 @@ class Monitor:
 
 def compose(w,monitor=None,record=None):
     m=monitor or Monitor();records=[]
+    def persist(result_for_commit):
+        records.append(result_for_commit())
+        return True
     plan=CompiledDeploymentPlan(tuple((c.identity,c.kind,c.spell,c.remaining)
                                       for c in w.cards),6)
     e=NativeDeploymentExecutor(observe=w.observe,deliver=w.deliver,release=w.release,
          live_gate=lambda:True,monotonic=w.clock,wait=w.clock.sleep,deadline=100.,
-         monitor=m,record_result=record or records.append,plan=plan)
+         monitor=m,record_result=record or persist,plan=plan)
     return e,m,records
 
 
@@ -43,9 +46,52 @@ def test_monitor_cleanup_failure_never_records_autonomous_success():
     assert len(records)==1 and not records[0].complete and not records[0].intervention_free
 
 
+def test_monitor_close_that_crosses_deadline_records_only_non_success():
+    w=World([card(count=1)])
+    m=Monitor()
+    def close():
+        m.closed=True
+        w.clock.now=100.0
+        return True
+    m.close=close
+    e,_,records=compose(w,m)
+
+    assert e.run() == (False,'DEADLINE')
+    assert len(records)==1 and records[0].complete is False
+    assert w.closed and m.closed
+
+
+def test_record_delay_before_commit_records_only_non_success():
+    w=World([card(count=1)])
+    records=[]
+    def record(result_for_commit):
+        w.clock.now=100.0
+        records.append(result_for_commit())
+        return True
+    e,m,_=compose(w,record=record)
+
+    assert e.run() == (False,'DEADLINE')
+    assert len(records)==1 and records[0].complete is False
+    assert w.closed and m.closed
+
+
+def test_non_exact_record_acknowledgment_cannot_publish_success():
+    w=World([card(count=1)])
+    records=[]
+    def record(result_for_commit):
+        records.append(result_for_commit())
+        return 1
+    e,m,_=compose(w,record=record)
+
+    with pytest.raises(DeploymentError,match='PROOF_COMMIT_FAILED'):
+        e.run()
+    assert len(records)==1
+    assert w.closed and m.closed
+
+
 def test_receipt_failure_after_complete_input_is_not_true_return():
     w=World([card(count=1)])
-    def record(_):raise RuntimeError('private receipt failure')
+    def record(_result_for_commit):raise RuntimeError('private receipt failure')
     e,m,_=compose(w,record=record)
     with pytest.raises(DeploymentError) as error:e.run()
     assert 'private' not in str(error.value) and w.closed and m.closed

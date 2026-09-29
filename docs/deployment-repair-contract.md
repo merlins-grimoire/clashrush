@@ -51,20 +51,43 @@ lack of multiplicity or recoloring alone. Card selection must be visibly proved.
 
 ## Inputs and policy
 
-`DeploymentEngine` is an inert one-use façade. Trusted construction copies the
-exact plan and all eleven policy scalars into a service-owned run core and keeps
-the original observer, delivery, release, gate, monotonic and wait capabilities
-only in that private graph. The façade has no live core, budget, port, lease,
-backend or capability-bearing closure; its plan and result are detached values.
-All deadlines, counters, observation history, pending proof, intervention,
-possible-input, cleanup and completion truth remain private. Identity admission
-uses a strong service entry keyed by object identity, not façade equality/hash or
-a weak-reference callback. The opaque proof object carries no fields, closure,
-default or bound core receiver and is consumed exactly once against the private
-pending action. This closes only callbacks that capture the façade. It is not a
-Python sandbox and does not cover module reflection/mutation, code-object or
-process-memory modification, or a callback independently holding native-input
-authority.
+### NARROW TRUST BOUNDARY
+
+The clock, live gate, observation provider, delivery/final-proof consumer, wait,
+release/cleanup, intervention monitor, durable record adapter, and their
+transitively bound receivers are trusted internal capabilities constructed by
+the composition root. They may consume time and therefore remain subject to the
+original monotonic deadlines, but deliberate self-tampering by those callbacks,
+traceback inspection or extraction of private service state, mutation of
+engine/core fields from those callbacks, and callbacks independently holding
+native-input authority are outside this contract. The implementation is not a
+Python sandbox and does not claim isolation from arbitrary same-process module
+reflection, process-memory access, code-object mutation, or imported-module
+mutation.
+
+Data crossing those trusted ports is not trusted. Profile, configuration and
+template inputs; callback-returned `Observation`, `Page`, `Card`, `Target` and
+container values; timestamps and quantities; native delivery and release return
+values; and durable-record acknowledgments are exact-type validated, copied or
+reconciled, and rejected closed. A whole observation batch is validated against
+temporary exact values before any card progress is committed. Ordinary caller
+alias mutation outside trusted callbacks cannot rewrite the admitted plan or
+policy authority.
+
+`DeploymentEngine` remains a one-use façade. Trusted construction copies the
+exact plan and all eleven policy scalars into a service-owned run core. Original
+deadlines, action and hold limits, quantity conservation, sticky input
+uncertainty, release truth, cleanup, retirement and durable acknowledgment remain
+mandatory. Terminal runs dispose the strong façade/core registry entry and keep
+only an identity-checked weak replay tombstone while that façade remains alive;
+façade equality and hashing never authorize lookup, and object-id reuse cannot
+bind a different façade to the tombstone.
+
+This narrower boundary is intentional: the composition root owns these internal
+adapters, while arbitrary same-process Python cannot be sandboxed by additional
+attribute seals. Existing callback-mutation regressions may remain as
+defense-in-depth, but they are not a promotion claim and malicious
+engine-reference callbacks are not presented as repaired.
 
 An Intent binds current card, screen/view, normalized target, existing action
 label and absolute deadline. Delivery runs fresh proof immediately before down,

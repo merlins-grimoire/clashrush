@@ -1,9 +1,14 @@
 """Generated closed-run authority regressions; synthetic ports and fake devices only."""
+from dataclasses import replace
+import gc
 from types import SimpleNamespace
+import weakref
 
+from clash_rush_rebuild import mvp_deployment as deployment_module
 from clash_rush_rebuild.mvp_deployment import (
     Action,
     CardKind,
+    CardState,
     CompiledDeploymentPlan,
     DeploymentEngine,
     Intent,
@@ -125,6 +130,35 @@ def test_ra06_release_spell_inflation_cannot_forge_result_count():
 
     assert result.complete
     assert result.spells_consumed == 0
+
+
+def test_ra06_rejected_two_card_batch_keeps_all_private_progress_atomic():
+    world = World([
+        card("first", count=1, x=.15),
+        card("second", count=1, x=.30),
+    ])
+    world.no_progress = True
+    original = world.observe
+
+    def observe():
+        observation = original()
+        if any(event.verb == "hold" for event in world.events):
+            first, second = observation.page.cards
+            forged = replace(
+                observation.page,
+                cards=(
+                    replace(first, remaining=0, state=CardState.DEPLETED),
+                    replace(second, remaining=0, state=CardState.DEPLETED),
+                ),
+            )
+            return replace(observation, page=forged)
+        return observation
+
+    result = _engine(world, observe=observe).run()
+
+    assert result.reason == "UNEXPLAINED_CARD_CHANGE"
+    assert result.remaining == 2
+    assert [item.remaining for item in world.cards] == [1, 1]
 
 
 def test_ra12_possible_held_delay_has_zero_late_down():
@@ -298,3 +332,56 @@ def test_ra11_concurrent_claim_allows_exactly_one_run():
     for thread in threads: thread.start()
     for thread in threads: thread.join()
     assert sorted(map(str, outcomes)) == ["EXECUTOR_ALREADY_USED", "True"]
+
+
+def test_ra11_terminal_and_failed_runs_dispose_live_entries_but_deny_replay():
+    for intervention in (Intervention.CLEAR, Intervention.DETECTED):
+        world = World([card(count=1)])
+        world.intervention = intervention
+        original_plan = CompiledDeploymentPlan(tuple(
+            (item.identity, item.kind, item.spell, item.remaining)
+            for item in world.cards
+        ), 6)
+        engine = _engine(world)
+        engine.__dict__["__hash__"] = lambda: 0
+        engine.__dict__["__eq__"] = lambda _other: True
+
+        result = engine.run()
+
+        assert result.complete is (intervention is Intervention.CLEAR)
+        assert id(engine) not in deployment_module._RUNS
+        assert deployment_module._USED[id(engine)]() is engine
+        try:
+            engine.run()
+        except Exception as error:
+            assert str(error) == "EXECUTOR_ALREADY_USED"
+        else:
+            raise AssertionError("terminal façade replayed")
+        try:
+            engine.__init__(
+                observe=world.observe, deliver=world.deliver, release=world.release,
+                live_gate=lambda: True, monotonic=world.clock, sleep=world.clock.sleep,
+                plan=original_plan,
+            )
+        except Exception as error:
+            assert str(error) == "EXECUTOR_ALREADY_USED"
+        else:
+            raise AssertionError("terminal façade rebound")
+
+
+def test_ra11_many_terminal_runs_do_not_retain_facades_or_live_cores():
+    gc.collect()
+    baseline = len(deployment_module._USED)
+    facade_refs = []
+    for _ in range(128):
+        world = World([card(count=1)])
+        engine = _engine(world)
+        facade_refs.append(weakref.ref(engine))
+        assert engine.run().complete
+        assert id(engine) not in deployment_module._RUNS
+    del engine
+    gc.collect()
+
+    assert all(reference() is None for reference in facade_refs)
+    assert len(deployment_module._RUNS) == 0
+    assert len(deployment_module._USED) <= baseline
