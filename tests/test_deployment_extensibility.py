@@ -8,6 +8,7 @@ from clash_rush_rebuild.mvp_deployment import (
     CardKind,
     CardState,
     DeploymentError,
+    Policy,
     Spell,
     Page,
 )
@@ -273,3 +274,128 @@ def test_callback_cannot_shadow_failed_release_into_false_completion():
 
     assert not result.complete
     assert result.reason == "RELEASE_UNPROVED"
+
+
+@pytest.mark.parametrize("boundary", ["observe", "deliver", "proof", "sleep", "release"])
+def test_callback_policy_shadow_cannot_accept_stale_evidence(boundary):
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=approved, policy=Policy(observation_age=.75))
+    original_observe = engine.observe
+    fired = False
+    stale_emitted = False
+
+    def shadow_policy():
+        nonlocal fired
+        if fired:
+            return
+        fired = True
+        replacement = Policy(observation_age=.75)
+        object.__setattr__(replacement, "observation_age", 999.0)
+        engine.policy = replacement
+
+    def observe():
+        nonlocal stale_emitted
+        observation = original_observe()
+        if boundary == "observe":
+            shadow_policy()
+        if fired and boundary != "release" and not stale_emitted:
+            stale_emitted = True
+            world.clock.now += .8 if boundary == "sleep" else 5.0
+        return observation
+
+    engine.observe = observe
+    if boundary == "deliver":
+        original = engine.deliver
+        engine.deliver = lambda intent, proof: (shadow_policy(), original(intent, proof))[1]
+    elif boundary == "proof":
+        original = engine.deliver
+        engine.deliver = lambda intent, proof: original(
+            intent, lambda: (shadow_policy(), proof())[1])
+    elif boundary == "sleep":
+        original = engine.sleep
+        engine.sleep = lambda seconds: (shadow_policy(), original(seconds))[1]
+    elif boundary == "release":
+        original = engine.release
+        engine.release = lambda: (shadow_policy(), original())[1]
+
+    result = engine.run()
+
+    assert fired
+    assert world.closed
+    if boundary == "release":
+        assert result.complete
+    else:
+        assert result.reason == "OBSERVATION_STALE"
+        assert not result.complete
+        assert not any(event.verb in {"end_battle", "confirm_end", "return_home"}
+                       for event in world.events)
+
+
+def test_callback_exit_seconds_shadow_cannot_extend_frozen_exit_deadline():
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=approved, policy=Policy(exit_seconds=1.0))
+    original_deliver = engine.deliver
+    original_observe = engine.observe
+    fired = False
+    delayed_exit = False
+
+    def deliver(intent, proof):
+        nonlocal fired
+        if not fired:
+            fired = True
+            engine.policy = Policy(exit_seconds=30.0)
+        return original_deliver(intent, proof)
+
+    def observe():
+        nonlocal delayed_exit
+        if world.screen.name == "END_CONFIRM" and not delayed_exit:
+            delayed_exit = True
+            world.clock.now += 2.0
+        return original_observe()
+
+    engine.deliver = deliver
+    engine.observe = observe
+    result = engine.run()
+
+    assert fired and delayed_exit
+    assert result.reason == "DEADLINE"
+    assert not result.complete
+    assert [event.verb for event in world.events if event.verb in {
+        "end_battle", "confirm_end", "return_home"}] == ["end_battle"]
+    assert world.closed
+
+
+def test_callback_deadline_shadow_cannot_extend_frozen_visit_deadline():
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    world.screen = profile_module.Screen.HOME
+    engine = world.engine(
+        plan=approved,
+        policy=Policy(visit_seconds=3.0, exit_seconds=1.0),
+    )
+    original_observe = engine.observe
+    fired = False
+    delayed_transition = False
+
+    def observe():
+        nonlocal fired, delayed_transition
+        if world.screen is profile_module.Screen.MATCH and not delayed_transition:
+            delayed_transition = True
+            world.clock.now += 3.0
+        observation = original_observe()
+        if not fired:
+            fired = True
+            engine.visit_deadline = 999.0
+            engine.budget.deadline = 999.0
+        return observation
+
+    engine.observe = observe
+    result = engine.run()
+
+    assert fired and delayed_transition
+    assert result.reason == "DEADLINE"
+    assert not result.complete
+    assert [event.verb for event in world.events if event.action.name == "ATTACK_NAVIGATION"] == ["attack"]
+    assert world.closed

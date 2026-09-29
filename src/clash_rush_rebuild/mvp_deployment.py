@@ -102,6 +102,7 @@ class _RunAuthority:
     ports: tuple | None=None
     policy: Policy | None=None
     visit_deadline: float | None=None
+    deadline: float | None=None
 
 
 _RUN_AUTHORITIES = weakref.WeakKeyDictionary()
@@ -162,6 +163,21 @@ def _run_policy(engine):
     authority=_run_authority(engine)
     if type(authority.policy) is not Policy: raise DeploymentError('POLICY_INVALID')
     return authority.policy
+
+
+def _freeze_run_deadline(engine,deadline):
+    authority=_run_authority(engine)
+    if authority.deadline is not None: raise DeploymentError('DEADLINE')
+    deadline=finite(deadline)
+    _RUN_AUTHORITIES[engine]=_RunAuthority(
+        authority.plan,authority.ports,authority.policy,authority.visit_deadline,deadline)
+    return deadline
+
+
+def _run_deadline(engine):
+    deadline=_run_authority(engine).deadline
+    if type(deadline) is not float: raise DeploymentError('DEADLINE')
+    return finite(deadline)
 
 
 class CardState(StrEnum):
@@ -517,7 +533,7 @@ class DeploymentEngine:
         _canonical_plan(self)
         now=self.budget.check(deadline)
         if type(o) is not Observation: raise DeploymentError('OBSERVATION_INVALID')
-        if o.sequence<=self.sequence or o.captured_at<self.captured or not 0<=now-o.captured_at<=self.policy.observation_age:
+        if o.sequence<=self.sequence or o.captured_at<self.captured or not 0<=now-o.captured_at<=_run_policy(self).observation_age:
             raise DeploymentError('OBSERVATION_STALE')
         self.sequence=o.sequence; self.captured=o.captured_at
         if o.intervention is not Intervention.CLEAR:
@@ -599,7 +615,7 @@ class DeploymentEngine:
         for source,verb,dest in ((Screen.HOME,'attack',Screen.MATCH),(Screen.MATCH,'find_match',Screen.ARMY),(Screen.ARMY,'army_attack',Screen.BATTLE)):
             if o.screen is source:
                 if source is Screen.HOME and o.home_verified is not True: raise DeploymentError('HOME_UNPROVED')
-                deadline=min(self.budget.deadline,self.budget.check()+10)
+                deadline=min(_run_deadline(self),self.budget.check()+10)
                 DeploymentEngine._send(self,Intent(verb,o.control(verb),Action.ATTACK_NAVIGATION,deadline=deadline),o)
                 o=DeploymentEngine._await(self,{dest},deadline,source)
         if o.screen is not Screen.BATTLE: raise DeploymentError('BATTLE_UNPROVED')
@@ -733,7 +749,7 @@ class DeploymentEngine:
         return o
 
     def _exit(self,o):
-        deadline=min(self.budget.deadline,self.budget.check()+self.policy.exit_seconds)
+        deadline=min(_run_deadline(self),self.budget.check()+_run_policy(self).exit_seconds)
         DeploymentEngine._send(self,Intent('end_battle',o.control('end_battle'),Action.RETURN_HOME,deadline=deadline),o)
         self.own_exit=True
         o=DeploymentEngine._await(self,{Screen.END_CONFIRM,Screen.RESULT},min(deadline,self.budget.check()+5),Screen.BATTLE)
@@ -754,6 +770,7 @@ class DeploymentEngine:
             start=finite(DeploymentEngine._clock_callback(self))
             deadline=(start+policy.visit_seconds if authority.visit_deadline is None
                       else min(finite(authority.visit_deadline),start+policy.visit_seconds))
+            deadline=_freeze_run_deadline(self,deadline)
             self.budget=Budget(
                 lambda:DeploymentEngine._clock_callback(self),
                 lambda seconds:DeploymentEngine._sleep_callback(self,seconds),deadline)
