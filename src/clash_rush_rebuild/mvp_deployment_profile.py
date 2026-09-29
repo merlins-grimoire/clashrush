@@ -420,20 +420,33 @@ class FrameObserver:
         hypotheses=discover_card_boxes(crop,CardGeometry(**b['geometry']))
         definitions={c['identity']:c for c in d['cards']}
         catalog={c['identity']:tuple(_template(self.profile.assets[k]) for k in c['icons']) for c in d['cards']}
-        occupied=[]
+        candidates=[]
         for box in hypotheses:
             x0,y0,x1,y1=box; region=crop[y0:y1,x0:x1]
             structural=[self._any(region,(rule['template'],),rule['roi']) for rule in b['frame']]
             if any(structural) and not all(structural): raise DeploymentError('BAR_RESIDUE')
-            if not all(structural): continue
+            if not all(structural):
+                candidates.append((box,None))
+                continue
             icon_box=d['cards'][0]['icon_roi']
             identity=classify_icon(roi(region,icon_box),catalog,.93,.04)
             if identity is None: raise DeploymentError('UNKNOWN_CARD_PRESENT')
-            occupied.append((box,identity))
+            candidates.append((box,identity))
+        occupied=[item for item in candidates if item[1] is not None]
         occupied.sort(key=lambda item:item[0][0])
         if not occupied: raise DeploymentError('BAR_UNPROVED')
         if any(a[0][2]>z[0][0] for a,z in zip(occupied,occupied[1:])):
             raise DeploymentError('BAR_AMBIGUOUS')
+        # A width-compatible pair caused by artwork inside one admitted complete
+        # frame is explained by that exact frame. Every other unframed candidate
+        # is structural residue; expected roster size never truncates it away.
+        for box,identity in candidates:
+            if identity is not None: continue
+            left,_,right,_=box
+            owners=[owner for owner,_ in occupied
+                    if max(left,owner[0])<min(right,owner[2])
+                    and (owner[0]<left<owner[2] or owner[0]<right<owner[2])]
+            if len(owners)!=1: raise DeploymentError('BAR_RESIDUE')
         signatures=tuple((identity,CardKind(definitions[identity]['kind']),
                           Spell(definitions[identity]['spell'])) for _,identity in occupied)
         if len(set(signatures))!=len(signatures): raise DeploymentError('ROSTER_DUPLICATE')
@@ -442,11 +455,35 @@ class FrameObserver:
             if any(item not in self.profile.plan.signatures for item in signatures):
                 raise DeploymentError('ROSTER_ADDITIONAL')
             raise DeploymentError('ROSTER_INCOMPLETE')
-        def endpoint(rule):
-            end=bool(self._locate(frame,rule['end'])); more=bool(self._locate(frame,rule['continues']))
+        endpoint_roles=tuple(
+            (side,state,b[side][state])
+            for side in ('left_edge','right_edge')
+            for state in ('end','continues'))
+        role_counts={(side,state):0 for side,state,_ in endpoint_roles}
+        frame_h,frame_w=frame.shape[:2]
+        occurrences={}
+        for key in dict.fromkeys(rule['template'] for _,_,rule in endpoint_roles):
+            for x,y,tw,th,_ in matches(
+                    frame,_template(self.profile.assets[key]),.93,maximum=32):
+                occurrences.setdefault((x,y,tw,th),set()).add(key)
+        for (x,y,tw,th),keys in occurrences.items():
+            owners=[]
+            for side,state,rule in endpoint_roles:
+                if rule['template'] not in keys: continue
+                left,top,right,bottom=rule['roi']
+                if (x>=left*frame_w and y>=top*frame_h
+                        and x+tw<=right*frame_w and y+th<=bottom*frame_h):
+                    owners.append((side,state))
+            if len(owners)!=1: raise DeploymentError('UNEXPLAINED_WITNESS')
+            role_counts[owners[0]]+=1
+            if role_counts[owners[0]]>1:
+                raise DeploymentError('BAR_ENDPOINT_UNPROVED')
+        def endpoint(side):
+            end=role_counts[(side,'end')]==1
+            more=role_counts[(side,'continues')]==1
             if end==more: raise DeploymentError('BAR_ENDPOINT_UNPROVED')
             return end
-        left_edge=endpoint(b['left_edge']); right_edge=endpoint(b['right_edge'])
+        left_edge=endpoint('left_edge'); right_edge=endpoint('right_edge')
         if not left_edge or not right_edge: raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
         # Every structural, identity, state and quantity template occurrence in
         # the whole declared viewport must have exactly one compatible owner.

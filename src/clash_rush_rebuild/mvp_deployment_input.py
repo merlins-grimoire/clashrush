@@ -62,15 +62,18 @@ class GuardedDeploymentInput:
         except BaseException: return False
     def deliver(self,intent,proof):
         if type(intent) is not Intent or not callable(proof) or self.held: return False
+        try:
+            # Detach every exact field before invoking caller-controlled proof or
+            # authorization callbacks. Reconstructing also catches object-level
+            # mutation of the frozen Intent or its Point child.
+            intent=Intent(intent.verb,Point(intent.point.x,intent.point.y),intent.action,
+                          intent.card_id,intent.duration,intent.destination,intent.deadline)
+        except BaseException:
+            return False
         expected=(Action.ATTACK_NAVIGATION if intent.verb in ('attack','find_match','army_attack')
                   else Action.RETURN_HOME if intent.verb in ('end_battle','confirm_end','return_home')
                   else Action.TROOP_DEPLOYMENT)
         if intent.action is not expected or not self._guard(expected,intent.deadline): return False
-        if intent.verb.startswith('scroll_'):
-            if (intent.destination is None or abs(intent.point.y-intent.destination.y)>.015
-                    or not .80<=intent.point.y<=.98 or not .80<=intent.destination.y<=.98): return False
-        elif intent.destination is not None: return False
-        if intent.verb!='hold' and not intent.verb.startswith('scroll_') and intent.duration!=0: return False
         ok=False
         try:
             if not self.mouse.prepare(intent.point): return False
@@ -87,14 +90,7 @@ class GuardedDeploymentInput:
             end=min(intent.deadline,start+(intent.duration or .02))
             while finite(self.clock())<end:
                 if not self._guard(expected,intent.deadline): return False
-                if intent.destination is not None:
-                    fraction=min(1.0,(finite(self.clock())-start)/max(intent.duration,.001))
-                    p=Point(intent.point.x+(intent.destination.x-intent.point.x)*fraction,
-                            intent.point.y+(intent.destination.y-intent.point.y)*fraction)
-                    if not self._event(lambda:self.mouse.move(p),intent.deadline): return False
                 self.wait(min(.02,max(0.0,end-finite(self.clock()))))
-            if intent.destination is not None:
-                if not self._guard(expected,intent.deadline) or not self._event(lambda:self.mouse.move(intent.destination),intent.deadline): return False
             ok=self._guard(expected,intent.deadline)
         except BaseException:
             ok=False

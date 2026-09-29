@@ -3,7 +3,10 @@ import cv2
 import numpy as np
 import pytest
 
-from clash_rush_rebuild.mvp_deployment import DeploymentError, Intervention
+from clash_rush_rebuild.mvp_deployment import (
+    DeploymentEngine, DeploymentError, Intervention, Observation, Point,
+    Screen, Target, TargetKind,
+)
 from clash_rush_rebuild.mvp_deployment_profile import DeploymentProfile, FrameObserver
 from test_deployment_profile import profile_data
 
@@ -82,6 +85,76 @@ def test_partial_frame_residue_cannot_be_ignored_after_expected_roster():
         _page(profile, frame)
 
 
+def test_width_compatible_unframed_structural_hypothesis_is_residue():
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    top = round(360 * .82)
+    frame[top + 5:round(360 * .98) - 5, 120:197] = 100
+
+    with pytest.raises(DeploymentError, match="BAR_RESIDUE"):
+        _page(profile, frame)
+
+
+def _run_composed(profile, frame):
+    clock = [0.]
+    sequence = [0]
+    events = []
+    observer = FrameObserver(profile=profile, capture=lambda: frame,
+        monotonic=lambda: clock[0], intervention=lambda: Intervention.CLEAR,
+        home_verified=lambda _: False)
+
+    def observe():
+        clock[0] += .01
+        sequence[0] += 1
+        return Observation(sequence[0], clock[0], "synthetic-view", Screen.BATTLE,
+            observer._page(frame),
+            (Target(TargetKind.GROUND, Point(.4, .6), 1.),),
+            (("end_battle", Point(.1, .7)),), Intervention.CLEAR)
+
+    def deliver(intent, proof):
+        if proof() is not True:
+            return False
+        events.append(intent)
+        return True
+
+    result = DeploymentEngine(observe=observe, deliver=deliver,
+        release=lambda: True, live_gate=lambda: True,
+        monotonic=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        plan=profile.plan).run()
+    return result, events
+
+
+def test_initial_structural_residue_reaches_no_composed_gameplay_input():
+    profile, assets = _profile()
+    frame = _frame(profile, assets)
+    top = round(360 * .82)
+    frame[top + 5:round(360 * .98) - 5, 120:197] = 100
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert events == []
+
+
+def test_initial_endpoint_residue_reaches_no_composed_gameplay_input():
+    data, assets = profile_data()
+    data["bar"]["geometry"] = dict(
+        card_width=.12, width_tolerance=.006, peak_height=.7, peak_distance=5)
+    assets.update(_glyphs())
+    for side in ("left_edge", "right_edge"):
+        for state in ("end", "continues"):
+            data["bar"][side][state]["roi"] = [0., .25, .08, .35]
+    profile = DeploymentProfile(data, assets, "a" * 64)
+    frame = _frame(profile, assets)
+    _put(frame, np.asarray(assets["left_end"]), 300, 100)
+
+    result, events = _run_composed(profile, frame)
+
+    assert result.reason == "OBSERVATION_UNAVAILABLE"
+    assert events == []
+
+
 def test_identity_witness_inside_card_but_outside_relative_icon_roi_is_residue():
     profile, assets = _profile()
     frame = _frame(profile, assets)
@@ -107,3 +180,34 @@ def test_continuation_endpoint_cannot_complete_single_page_capability():
     _put(frame, np.asarray(assets["left_more"]), 5, 100)
     with pytest.raises(DeploymentError, match="SINGLE_PAGE_COVERAGE_UNPROVED"):
         _page(profile, frame)
+
+
+def test_duplicate_endpoint_template_outside_declared_owner_roi_is_residue():
+    data, assets = profile_data()
+    data["bar"]["geometry"] = dict(
+        card_width=.12, width_tolerance=.006, peak_height=.7, peak_distance=5)
+    assets.update(_glyphs())
+    for side in ("left_edge", "right_edge"):
+        for state in ("end", "continues"):
+            data["bar"][side][state]["roi"] = [0., .25, .08, .35]
+    profile = DeploymentProfile(data, assets, "a" * 64)
+    frame = _frame(profile, assets)
+    _put(frame, np.asarray(assets["left_end"]), 300, 100)
+
+    with pytest.raises(DeploymentError, match="UNEXPLAINED_WITNESS"):
+        _page(profile, frame)
+
+
+def test_one_endpoint_occurrence_cannot_own_conflicting_roles():
+    data, assets = profile_data()
+    data["bar"]["geometry"] = dict(
+        card_width=.12, width_tolerance=.006, peak_height=.7, peak_distance=5)
+    assets.update(_glyphs())
+    data["bar"]["left_edge"]["end"] = {
+        "template": "left_end", "roi": [0., .25, .08, .35]}
+    data["bar"]["right_edge"]["end"] = {
+        "template": "left_end", "roi": [0., .25, .08, .35]}
+    profile = DeploymentProfile(data, assets, "a" * 64)
+
+    with pytest.raises(DeploymentError, match="UNEXPLAINED_WITNESS"):
+        _page(profile, _frame(profile, assets))

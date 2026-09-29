@@ -113,8 +113,47 @@ def test_intervention_or_unhealthy_monitor_has_no_new_input(state):
 
 def test_wider_action_or_wrong_verb_cannot_be_smuggled():
     obj,_,mouse,_=subject()
-    assert not obj.deliver(Intent('end_battle',Point(.1,.7),Action.TROOP_DEPLOYMENT,deadline=4),lambda:True)
+    intent=Intent('end_battle',Point(.1,.7),Action.RETURN_HOME,deadline=4)
+    object.__setattr__(intent,'action',Action.TROOP_DEPLOYMENT)
+    assert not obj.deliver(intent,lambda:True)
     assert not mouse.events
+
+
+def test_forged_scroll_intent_has_no_native_or_prepare_events():
+    obj,_,mouse,lease=subject()
+    intent=Intent('tap',Point(.2,.9),Action.TROOP_DEPLOYMENT,'troop',deadline=4)
+    object.__setattr__(intent,'verb','scroll_right')
+    object.__setattr__(intent,'destination',Point(.8,.9))
+    object.__setattr__(intent,'duration',.1)
+
+    assert not obj.deliver(intent,lambda:True)
+    assert mouse.events==[] and lease.flags==[]
+
+
+@pytest.mark.parametrize('field,value',[
+    ('verb','unsupported'),
+    ('card_id',None),
+    ('card_id','INVALID CARD'),
+    ('duration',.2),
+    ('deadline',True),
+])
+def test_post_construction_intent_mutation_is_rejected_at_delivery_ingress(field,value):
+    obj,_,mouse,lease=subject()
+    intent=Intent('tap',Point(.4,.4),Action.TROOP_DEPLOYMENT,'zap',deadline=4)
+    object.__setattr__(intent,field,value)
+
+    assert not obj.deliver(intent,lambda:True)
+    assert mouse.events==[] and lease.flags==[]
+
+
+def test_mutated_point_is_revalidated_at_delivery_ingress():
+    obj,_,mouse,lease=subject()
+    point=Point(.4,.4)
+    intent=Intent('tap',point,Action.TROOP_DEPLOYMENT,'zap',deadline=4)
+    object.__setattr__(point,'x',float('nan'))
+
+    assert not obj.deliver(intent,lambda:True)
+    assert mouse.events==[] and lease.flags==[]
 
 
 def test_cleanup_is_idempotent_and_not_a_new_press():

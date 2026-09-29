@@ -79,11 +79,16 @@ class CompiledDeploymentPlan:
         if self.digest and (type(self.digest) is not str or self.digest!=computed):
             raise DeploymentError('PLAN_DIGEST_MISMATCH')
         object.__setattr__(self,'digest',computed)
+    def validated_digest(self):
+        """Recompute and validate every exact typed authority-bearing field."""
+        return type(self)(self.roster,self.viewport_limit,self.digest).digest
     @property
     def signatures(self):
+        self.validated_digest()
         return tuple(entry[:3] for entry in self.roster)
     @property
     def quantities(self):
+        self.validated_digest()
         return tuple(entry[3] for entry in self.roster)
 
 
@@ -253,12 +258,27 @@ class Intent:
     destination: Point | None = None
     deadline: float = 0.0
     def __post_init__(self):
-        if self.verb not in {'select','hold','tap','attack','find_match','army_attack','end_battle','confirm_end','return_home'}:
+        deployment={'select','hold','tap'}
+        navigation={'attack','find_match','army_attack'}
+        returning={'end_battle','confirm_end','return_home'}
+        if (type(self.verb) is not str or self.verb not in deployment|navigation|returning
+                or type(self.point) is not Point or type(self.action) is not Action
+                or self.destination is not None):
             raise DeploymentError('INTENT_INVALID')
-        if type(self.point) is not Point or type(self.action) is not Action:
-            raise DeploymentError('INTENT_INVALID')
+        finite(self.point.x,0,1); finite(self.point.y,0,1)
         finite(self.duration, 0, .5); finite(self.deadline)
-        if self.destination is not None and type(self.destination) is not Point:
+        if self.verb in deployment:
+            if (type(self.card_id) is not str
+                    or re.fullmatch(r'[a-z0-9][a-z0-9_.:-]{0,63}',self.card_id) is None
+                    or self.action is not Action.TROOP_DEPLOYMENT):
+                raise DeploymentError('INTENT_INVALID')
+        elif self.card_id is not None:
+            raise DeploymentError('INTENT_INVALID')
+        expected=(Action.ATTACK_NAVIGATION if self.verb in navigation else
+                  Action.RETURN_HOME if self.verb in returning else Action.TROOP_DEPLOYMENT)
+        if self.action is not expected:
+            raise DeploymentError('INTENT_INVALID')
+        if (self.verb=='hold')!=(self.duration>0):
             raise DeploymentError('INTENT_INVALID')
 
 
@@ -370,6 +390,16 @@ class DeploymentEngine:
     hard retirement if an OS/capture call fails to return. The engine never
     acquires process authority or rewrites lifecycle state.
     """
+    @property
+    def plan(self):
+        return self._plan
+
+    @plan.setter
+    def plan(self,value):
+        if hasattr(self,'_plan'):
+            raise TypeError('sealed deployment plan')
+        object.__setattr__(self,'_plan',value)
+
     def __init__(self, *, observe, deliver, release, live_gate, monotonic, sleep,
                  policy: Policy=Policy(), visit_deadline: float | None=None,
                  plan: CompiledDeploymentPlan | None=None):
@@ -377,9 +407,15 @@ class DeploymentEngine:
             raise DeploymentError('PORT_INVALID')
         if plan is not None and type(plan) is not CompiledDeploymentPlan:
             raise DeploymentError('PLAN_INVALID')
+        seal=None
+        owned_plan=None
+        if plan is not None:
+            seal=plan.validated_digest()
+            owned_roster=tuple(tuple(entry) for entry in plan.roster)
+            owned_plan=CompiledDeploymentPlan(owned_roster,plan.viewport_limit,seal)
         self.observe=observe; self.deliver=deliver; self.release=release
         self.live_gate=live_gate; self.clock=monotonic; self.sleep=sleep; self.policy=policy
-        self.visit_deadline=visit_deadline; self.plan=plan
+        self.visit_deadline=visit_deadline; self.plan=owned_plan; self._plan_seal=seal
         self.used=False; self.sequence=0; self.captured=-1.0; self.view=None
         self.inventory=Inventory(policy.max_cards,policy.max_pages)
         self.cards: dict[str, Card]={}; self.holds: dict[str,float]={}
@@ -387,16 +423,35 @@ class DeploymentEngine:
         self.spells=0; self.actions=0; self.own_exit=False; self.home=False
         self.intervention_free=True; self.proof_fault=None; self.last=None
 
+    def _validate_plan(self):
+        if self._plan is None: raise DeploymentError('PLAN_REQUIRED')
+        if (type(self._plan) is not CompiledDeploymentPlan
+                or self._plan.validated_digest()!=self._plan_seal):
+            raise DeploymentError('PLAN_DIGEST_MISMATCH')
+
+    def _clock_callback(self):
+        value=self.clock()
+        self._validate_plan()
+        return value
+
+    def _sleep_callback(self,seconds):
+        value=self.sleep(seconds)
+        self._validate_plan()
+        return value
+
     def _gate(self, deadline):
+        self._validate_plan()
         self.budget.check(deadline)
         try: allowed=self.live_gate()
         except BaseException: allowed=False
+        self._validate_plan()
         if allowed is not True: raise DeploymentError('AUTHORIZATION_LOST')
 
     def _read(self, deadline) -> Observation:
         self._gate(deadline)
         try: o=self.observe()
         except BaseException: raise DeploymentError('OBSERVATION_UNAVAILABLE') from None
+        self._validate_plan()
         now=self.budget.check(deadline)
         if type(o) is not Observation: raise DeploymentError('OBSERVATION_INVALID')
         if o.sequence<=self.sequence or o.captured_at<self.captured or not 0<=now-o.captured_at<=self.policy.observation_age:
@@ -464,6 +519,7 @@ class DeploymentEngine:
         self.proof_fault=None
         try: sent=self.deliver(intent,lambda:self._proof(intent,before))
         except BaseException: raise DeploymentError('INPUT_UNCERTAIN') from None
+        self._validate_plan()
         if sent is not True: raise DeploymentError(self.proof_fault or 'INPUT_UNCERTAIN')
         self._gate(intent.deadline)
 
@@ -631,9 +687,9 @@ class DeploymentEngine:
         if self.used: raise DeploymentError('EXECUTOR_ALREADY_USED')
         self.used=True; reason='DEPLOYMENT_FAILED'; complete=False
         try:
-            start=finite(self.clock())
+            start=finite(self._clock_callback())
             deadline=start+self.policy.visit_seconds if self.visit_deadline is None else min(finite(self.visit_deadline),start+self.policy.visit_seconds)
-            self.budget=Budget(self.clock,self.sleep,deadline)
+            self.budget=Budget(self._clock_callback,self._sleep_callback,deadline)
             o=self._navigate(self._read(deadline))
             deploy_deadline=min(deadline-self.policy.exit_seconds,o.captured_at+self.policy.deployment_seconds)
             self.budget.check(deploy_deadline)
@@ -647,6 +703,9 @@ class DeploymentEngine:
         finally:
             try: released=self.release()
             except BaseException: released=False
+            try:self._validate_plan()
+            except DeploymentError as error:
+                complete=False; reason=error.code
             if released is not True: complete=False; reason='RELEASE_UNPROVED'
         remaining=sum(c.remaining or 0 for c in self.cards.values())
         return DeploymentResult(complete,reason,len(self.cards),self.spells,

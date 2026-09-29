@@ -111,3 +111,61 @@ def test_first_profile_policy_is_data_not_reusable_core_constants():
 def test_malformed_partial_like_page_values_are_not_completion_authority():
     with pytest.raises(DeploymentError, match="PAGE_INVALID"):
         Page((card("card_0"),), "END", True)
+
+
+def test_stale_digest_plan_mutation_is_rejected_at_engine_ingress():
+    plan = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    object.__setattr__(plan, "roster", (_entry(1),))
+    world = World([card("card_1", count=1, x=.2)])
+
+    with pytest.raises(DeploymentError, match="PLAN_DIGEST_MISMATCH"):
+        world.engine(plan=plan)
+    assert not world.events
+
+
+def test_engine_detaches_the_original_plan_alias_at_ingress():
+    plan = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=plan)
+    object.__setattr__(plan, "roster", (_entry(1),))
+
+    assert engine.run().complete
+    assert not any(event.card_id == "card_1" for event in world.events)
+
+
+@pytest.mark.parametrize("boundary", ["observe", "deliver", "live_gate"])
+def test_plan_replacement_during_arbitrary_callback_fails_before_new_down(boundary):
+    approved = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    replacement = profile_module.CompiledDeploymentPlan((_entry(0),), viewport_limit=6)
+    world = World([card("card_0", count=1, x=.2)])
+    engine = world.engine(plan=approved)
+    fired = False
+
+    def replace_plan():
+        nonlocal fired
+        if not fired:
+            fired = True
+            engine.plan = replacement
+
+    if boundary == "observe":
+        original = engine.observe
+        def observe():
+            replace_plan()
+            return original()
+        engine.observe = observe
+    elif boundary == "deliver":
+        original = engine.deliver
+        def deliver(intent, proof):
+            replace_plan()
+            return original(intent, proof)
+        engine.deliver = deliver
+    else:
+        def live_gate():
+            replace_plan()
+            return True
+        engine.live_gate = live_gate
+
+    result = engine.run()
+
+    assert not result.complete
+    assert not world.events
