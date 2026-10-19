@@ -1,0 +1,1296 @@
+"""Fresh-approval-gated native composition for one local attack-only visit.
+
+Importing this module performs no native action.  ``run_native_mvp_visit`` is the
+only live entry and is reached only after the CLI's explicit approval flag.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import math
+import os
+import re
+import secrets
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from ctypes import wintypes
+from datetime import UTC, datetime
+from pathlib import Path
+
+import numpy as np
+
+from .config import load_private_registry
+from .input_authorization import (
+    InputAction,
+    InputAuthorization,
+    InputAuthorizationError,
+)
+from .lifecycle import AcquiredMutexLease, LifecycleSupervisor, PlayerBinding
+from .lifecycle_state import LifecycleStateStore, Ready, encode_state
+from .mvp_local_gameplay import LocalBotMode, LocalMvpBot, MvpConfiguration, VisitResult
+from .mvp_account_ready import (
+    AccountReady,
+    AccountReadinessController,
+    AccountReadinessError,
+    load_private_visual_profile,
+    manual_home_frame_verified,
+)
+from .mvp_account_startup import StartupInputPhase, await_account_home
+from .startup_debug import popup_position
+from .mvp_local_runtime import (
+    BgraGameplayRecognizer,
+    BoundedAttackExecutor,
+    ConcreteAttackVisitPorts,
+    LocalControlStore,
+    RuntimeSafetyError,
+)
+from .mvp_local_world_export import clear_windows_clipboard, read_windows_clipboard
+from .mvp_session_authority import (
+    ActionPhase,
+    ControlMode,
+    DurableSessionAuthority,
+    SessionAuthorityError,
+)
+from .registry import Slot
+from .win32_lifecycle_host import NativeLifecycleApi, Win32LifecycleHost
+from .win32_runtime import DEFAULT_MUTEX_NAME, Win32Runtime
+from .win32_state_io import NativeWin32StateApi, Win32StateFilePort
+
+_BLUESTACKS_CONF = Path(r"C:\ProgramData\BlueStacks_nxt\bluestacks.conf")
+class LocalAuditLog:
+    """Append only transaction phase facts without Team/account/instance values."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def _append(self, payload: dict[str, object]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
+        with self._path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def intent(self, transaction_ref: str) -> None:
+        self._append({"phase": "INTENT", "transaction_ref": transaction_ref})
+
+    def outcome(self, transaction_ref: str, confirmed: bool) -> None:
+        self._append(
+            {
+                "phase": "OUTCOME",
+                "transaction_ref": transaction_ref,
+                "confirmed": confirmed,
+            }
+        )
+
+
+class PolicyPlayerView:
+    """W's read-only view of P's player; no creator, stop or Job mutation method.
+
+    Retains only query/wait player and query-only Je duplicates. Reuses the
+    existing exact family/HWND validator without its legacy health capture.
+    Clock expiry blocks capture, not same-run live-ownership release checks.
+    """
+    def __init__(self, *, host, offer, run, enabled, clock=time.monotonic):
+        from .mvp_process_topology import acknowledge_player_handoff
+        from .mvp_session_authority import RunBindingV3
+        if (type(run) is not RunBindingV3 or run.run_nonce!=offer.run_nonce
+                or run.generation!=offer.generation or not callable(enabled) or not callable(clock)):
+            raise RuntimeSafetyError('policy player run binding invalid')
+        acknowledge_player_handoff(host,offer)
+        self.host=host;self.offer=offer;self.run=run;self.enabled=enabled;self.clock=clock
+        self.binding=None;self.desktop=None;self.revoked=False;self.closed=False;self.owner=None
+        self.last=run.started_ns
+
+    def _budget(self):
+        from .mvp_policy_evidence import nanoseconds
+        now=nanoseconds(self.clock())
+        if (self.closed or self.revoked or now<self.last or now>=self.run.deadline_ns
+                or self.enabled() is not True):
+            raise RuntimeSafetyError('policy player deadline or authority unavailable')
+        after=nanoseconds(self.clock())
+        if after<now or after>=self.run.deadline_ns:
+            raise RuntimeSafetyError('policy player deadline or authority unavailable')
+        self.last=after
+
+    def bind(self, expected_title):
+        from .mvp_deployment_input import InputOwner
+        from .mvp_session_authority import canonical_v3,digest_v3
+        self._budget()
+        if self.binding is not None:raise RuntimeSafetyError('policy player rebind denied')
+        members=self.host.stable_job_members(self.offer.remote_player_job_query)
+        try:
+            self.binding=self.host.bind_exact_window(self.offer.player,expected_title,members)
+        finally:
+            members.close()
+        self._budget()
+        if type(self.binding) is not PlayerBinding:raise RuntimeSafetyError('policy player window unavailable')
+        self.desktop=self.host._api.input_desktop_identity()
+        self.require_binding(self.binding)
+        digest=digest_v3(canonical_v3({'schema':3,'desktop':self.desktop,
+            'worker':[self.offer.worker.pid,self.offer.worker.creation_time_100ns],
+            'run_nonce':self.run.run_nonce,'generation':self.run.generation}))
+        self.owner=InputOwner(self.run.run_nonce,self.run.generation,self.run.binding_digest,digest)
+        return self.binding
+
+    def require_binding(self, binding):
+        try:
+            if (self.closed or self.revoked or self.binding is None or binding is not self.binding
+                    or self.host.identity_from_handle(self.host.current_process_handle(),
+                        self.host.current_process_id())!=self.offer.worker
+                    or self.host.identity_from_handle(self.offer.remote_player_handle,
+                        self.offer.player.pid)!=self.offer.player
+                    or self.host.wait_process(self.offer.remote_player_handle,0) is not False
+                    or self.host._api.input_desktop_identity()!=self.desktop
+                    or self.host._api.foreground_root()!=binding.root_hwnd):
+                raise RuntimeSafetyError('policy live input owner unavailable')
+            self.host._require_capture_binding(binding,self.offer.remote_player_job_query)
+        except BaseException:
+            self.revoked=True
+            raise
+
+    def ownership_live(self):
+        try:
+            self.require_binding(self.binding)
+            return True
+        except BaseException:return False
+
+    def capture_bgr(self):
+        self._budget()
+        self.require_binding(self.binding)
+        self._budget()  # all fallible/read-only ownership work precedes capture
+        width,height,raw=self.host.capture_bgra(self.binding,before_capture=self._budget)
+        frame=None
+        try:
+            self._budget()
+            if (width,height)!=(self.binding.width,self.binding.height):
+                raise RuntimeSafetyError('policy capture geometry changed')
+            # Native PrintWindow is BGRX, not RGBA. Pixels remain memory-only.
+            frame=np.frombuffer(raw,dtype=np.uint8).reshape(height,width,4)[:,:,:3].copy()
+            self._budget()
+            return frame
+        except BaseException:
+            frame=None
+            raise
+        finally:
+            raw=None
+
+    def close(self):
+        if self.closed:return
+        self.closed=True;self.revoked=True
+        try:
+            self.host.close_handle(self.offer.remote_player_handle)
+        finally:
+            self.host.close_handle(self.offer.remote_player_job_query)
+
+
+class DurableSessionAudit:
+    """Map the retained LocalMvpBot intent/outcome seam into durable phases."""
+
+    def __init__(self, authority: DurableSessionAuthority, transaction_ref: str) -> None:
+        self._authority = authority
+        self._transaction_ref = transaction_ref
+
+    def intent(self, transaction_ref: str) -> None:
+        if transaction_ref != self._transaction_ref:
+            raise SessionAuthorityError("transaction binding mismatch")
+        self._authority.transition_action(
+            transaction_ref,
+            expected=ActionPhase.PLANNED,
+            target=ActionPhase.INTENT_RECORDED,
+        )
+
+    def outcome(self, transaction_ref: str, confirmed: bool) -> None:
+        if transaction_ref != self._transaction_ref or type(confirmed) is not bool:
+            raise SessionAuthorityError("transaction outcome binding mismatch")
+        if confirmed:
+            from .mvp_deployment_receipt import require_complete
+            require_complete(self._authority, transaction_ref)
+        current = self._authority.transaction(transaction_ref)
+        if current.phase is ActionPhase.UNCERTAIN and confirmed is False:
+            return
+        if current.phase not in {
+            ActionPhase.PLANNED,
+            ActionPhase.INTENT_RECORDED,
+            ActionPhase.INPUT_COMPLETED,
+        }:
+            raise SessionAuthorityError("transaction outcome phase mismatch")
+        target = (
+            ActionPhase.CONFIRMED
+            if confirmed
+            else (
+                ActionPhase.UNCERTAIN
+                if current.phase is ActionPhase.INPUT_COMPLETED
+                else ActionPhase.FAILED
+            )
+        )
+        self._authority.transition_action(
+            transaction_ref,
+            expected=current.phase,
+            target=target,
+            reason_code=(
+                None
+                if confirmed
+                else (
+                    "CONFIRMATION_UNAVAILABLE"
+                    if target is ActionPhase.UNCERTAIN
+                    else "TRANSACTION_FAILED"
+                )
+            ),
+        )
+
+
+class DurableInputPhaseExecutor:
+    """Keep the physical-input phase sticky around the existing executor."""
+
+    def __init__(
+        self,
+        authority: DurableSessionAuthority,
+        transaction_ref: str,
+        executor: BoundedAttackExecutor,
+    ) -> None:
+        self._authority = authority
+        self._transaction_ref = transaction_ref
+        self._executor = executor
+
+    def run(self) -> tuple[bool, str]:
+        self._authority.transition_action(
+            self._transaction_ref,
+            expected=ActionPhase.INTENT_RECORDED,
+            target=ActionPhase.INPUT_STARTED,
+        )
+        try:
+            result = self._executor.run()
+        except BaseException:
+            self._authority.transition_action(
+                self._transaction_ref,
+                expected=ActionPhase.INPUT_STARTED,
+                target=ActionPhase.UNCERTAIN,
+                reason_code="EXECUTOR_EXCEPTION",
+            )
+            raise
+        if type(result) is not tuple or len(result) != 2 or type(result[0]) is not bool:
+            self._authority.transition_action(
+                self._transaction_ref,
+                expected=ActionPhase.INPUT_STARTED,
+                target=ActionPhase.UNCERTAIN,
+                reason_code="EXECUTOR_MALFORMED",
+            )
+            return False, "ATTACK_EXECUTION_MALFORMED"
+        self._authority.transition_action(
+            self._transaction_ref,
+            expected=ActionPhase.INPUT_STARTED,
+            target=(
+                ActionPhase.INPUT_COMPLETED if result[0] else ActionPhase.UNCERTAIN
+            ),
+            reason_code=None if result[0] else "INPUT_OUTCOME_UNCERTAIN",
+        )
+        return result
+
+
+def _configure_input_signatures(user32: object) -> None:
+    hwnd = wintypes.HWND
+    user32.GetForegroundWindow.restype = hwnd
+    user32.GetAncestor.argtypes = [hwnd, wintypes.UINT]
+    user32.GetAncestor.restype = hwnd
+    user32.SetForegroundWindow.argtypes = [hwnd]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.ShowWindow.argtypes = [hwnd, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.BringWindowToTop.argtypes = [hwnd]
+    user32.BringWindowToTop.restype = wintypes.BOOL
+    user32.ClientToScreen.argtypes = [hwnd, ctypes.POINTER(wintypes.POINT)]
+    user32.ClientToScreen.restype = wintypes.BOOL
+    user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    user32.SetCursorPos.restype = wintypes.BOOL
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    user32.GetCursorPos.restype = wintypes.BOOL
+    user32.mouse_event.argtypes = [
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    user32.keybd_event.argtypes = [
+        wintypes.BYTE,
+        wintypes.BYTE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+
+
+class Win32BoundInput:
+    """Foreground native input restricted to one immutable render binding."""
+
+    def __init__(
+        self,
+        binding: PlayerBinding,
+        safety_check,
+        authorization: InputAuthorization,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if (
+            type(binding) is not PlayerBinding
+            or not callable(safety_check)
+            or type(authorization) is not InputAuthorization
+            or (
+                deadline is not None
+                and (
+                    type(deadline) not in (int, float)
+                    or type(deadline) is bool
+                    or not math.isfinite(float(deadline))
+                    or not callable(monotonic)
+                )
+            )
+        ):
+            raise RuntimeSafetyError("exact native input binding and authorization required")
+        self._binding = binding
+        self._safety_check = safety_check
+        self._authorization = authorization
+        self._deadline = None if deadline is None else float(deadline)
+        self._monotonic = monotonic
+        self._held_keys: set[int] = set()
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        _configure_input_signatures(self._user32)
+
+    def _require_binding(self, binding: PlayerBinding) -> None:
+        if binding != self._binding:
+            raise RuntimeSafetyError("native input binding changed")
+        self._safety_check(binding)
+
+    def _foreground(self) -> bool:
+        # ClashAutomation sends input to the already-visible game window without
+        # restoring it. SW_RESTORE can unmaximize BlueStacks and invalidate the
+        # exact render geometry that authorized this input.
+        self._user32.BringWindowToTop(wintypes.HWND(self._binding.root_hwnd))
+        self._user32.SetForegroundWindow(wintypes.HWND(self._binding.root_hwnd))
+        active = self._user32.GetForegroundWindow()
+        return bool(
+            active
+            and int(self._user32.GetAncestor(active, 2)) == self._binding.root_hwnd
+        )
+
+    def _authorized(self, action: InputAction) -> bool:
+        try:
+            self._authorization.require(action)
+            return True
+        except InputAuthorizationError:
+            return False
+
+    def _deadline_open(self) -> bool:
+        if self._deadline is None:
+            return True
+        try:
+            current = self._monotonic()
+        except BaseException:
+            return False
+        return bool(
+            type(current) in (int, float)
+            and type(current) is not bool
+            and math.isfinite(float(current))
+            and float(current) < self._deadline
+        )
+
+    def click(
+        self,
+        binding: PlayerBinding,
+        x: float,
+        y: float,
+        *,
+        action: InputAction,
+        pre_input_check: Callable[[], bool] | None = None,
+    ) -> bool:
+        self._require_binding(binding)
+        if (
+            type(x) not in (int, float)
+            or type(y) not in (int, float)
+            or not 0.0 <= x <= 1.0
+            or not 0.0 <= y <= 1.0
+            or (pre_input_check is not None and not callable(pre_input_check))
+            or not self._foreground()
+        ):
+            return False
+        self._require_binding(binding)
+        point = wintypes.POINT(
+            round(x * (binding.width - 1)), round(y * (binding.height - 1))
+        )
+        if not self._user32.ClientToScreen(
+            wintypes.HWND(binding.render_hwnd), ctypes.byref(point)
+        ):
+            return False
+        if not self._authorized(action) or not self._user32.SetCursorPos(point.x, point.y):
+            return False
+        time.sleep(0.04)
+        if pre_input_check is not None:
+            try:
+                if pre_input_check() is not True:
+                    return False
+            except BaseException:
+                return False
+        if not self._authorized(action) or not self._deadline_open():
+            return False
+        try:
+            self._user32.mouse_event(0x0002, 0, 0, 0, None)
+            time.sleep(0.02)
+        finally:
+            self._user32.mouse_event(0x0004, 0, 0, 0, None)
+        return True
+
+    def drag(
+        self,
+        binding: PlayerBinding,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        *,
+        action: InputAction,
+    ) -> bool:
+        self._require_binding(binding)
+        coordinates = (x0, y0, x1, y1)
+        if any(
+            type(value) not in (int, float) or not 0.0 <= value <= 1.0
+            for value in coordinates
+        ) or not self._foreground():
+            return False
+        self._require_binding(binding)
+        start = wintypes.POINT(
+            round(x0 * (binding.width - 1)), round(y0 * (binding.height - 1))
+        )
+        end = wintypes.POINT(
+            round(x1 * (binding.width - 1)), round(y1 * (binding.height - 1))
+        )
+        for point in (start, end):
+            if not self._user32.ClientToScreen(
+                wintypes.HWND(binding.render_hwnd), ctypes.byref(point)
+            ):
+                return False
+        if not self._authorized(action) or not self._user32.SetCursorPos(start.x, start.y):
+            return False
+        time.sleep(0.15)
+        if not self._authorized(action) or not self._deadline_open():
+            return False
+        moved = True
+        try:
+            self._user32.mouse_event(0x0002, 0, 0, 0, None)
+            for step in range(1, 15):
+                if not self._authorized(action) or not self._deadline_open():
+                    moved = False
+                    break
+                x = round(start.x + (end.x - start.x) * step / 14)
+                y = round(start.y + (end.y - start.y) * step / 14)
+                if not self._user32.SetCursorPos(x, y):
+                    moved = False
+                    break
+                time.sleep(0.045)
+        finally:
+            self._user32.mouse_event(0x0004, 0, 0, 0, None)
+        return bool(moved)
+
+    def key_down(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool:
+        self._require_binding(binding)
+        if (
+            not self._foreground()
+            or any(type(key) is not int or not 1 <= key <= 255 for key in keys)
+        ):
+            return False
+        self._require_binding(binding)
+        for key in keys:
+            if not self._authorized(action) or not self._deadline_open():
+                return False
+            self._user32.keybd_event(key, 0, 0, None)
+            self._held_keys.add(key)
+        return True
+
+    def key_up(
+        self, binding: PlayerBinding, *keys: int, action: InputAction
+    ) -> bool:
+        # Releasing held controls is cleanup and must survive lost authorization.
+        if binding != self._binding or action is not InputAction.CLEANUP_RELEASE:
+            return False
+        requested = tuple(
+            dict.fromkeys(
+                key for key in keys if type(key) is int and 1 <= key <= 255
+            )
+        )
+        releasable = tuple(key for key in requested if key in self._held_keys)
+        if not releasable:
+            return False
+        for key in releasable:
+            self._user32.keybd_event(key, 0, 0x0002, None)
+            self._held_keys.discard(key)
+        return True
+
+
+class Win32AccountStartupInput:
+    """One-use Okay input with a fresh exact target proof immediately before down."""
+
+    def __init__(
+        self,
+        binding: PlayerBinding,
+        *,
+        safety_check: Callable[[PlayerBinding], object],
+        authorization: InputAuthorization,
+        capture: Callable[[], np.ndarray],
+        font_path: str | Path,
+        deadline: float,
+        detector: Callable[..., tuple[float, float] | None] = popup_position,
+    ) -> None:
+        if (
+            type(binding) is not PlayerBinding
+            or not callable(safety_check)
+            or type(authorization) is not InputAuthorization
+            or authorization.purpose.value != "ACCOUNT_STARTUP"
+            or not callable(capture)
+            or type(font_path) not in (str, Path)
+            or type(deadline) not in (int, float)
+            or type(deadline) is bool
+            or not math.isfinite(float(deadline))
+            or not callable(detector)
+        ):
+            raise RuntimeSafetyError("exact account-startup input boundary required")
+        self._binding = binding
+        self._safety_check = safety_check
+        self._authorization = authorization
+        self._capture = capture
+        self._font_path = font_path
+        self._deadline = float(deadline)
+        # Unlike recognition and authorization hooks, this is the trusted
+        # process monotonic clock rather than a caller-controlled callback.
+        self._monotonic = time.monotonic
+        self._detector = detector
+        self._used = False
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        _configure_input_signatures(self._user32)
+
+    def click_okay(self, expected_point: tuple[float, float]) -> bool:
+        if self._used:
+            return False
+        self._used = True
+        if (
+            type(expected_point) is not tuple
+            or len(expected_point) != 2
+            or any(
+                type(value) not in (int, float)
+                or type(value) is bool
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+                for value in expected_point
+            )
+        ):
+            return False
+        expected = (float(expected_point[0]), float(expected_point[1]))
+
+        # Every arbitrary/caller-controlled check completes before final capture.
+        try:
+            self._authorization.require(InputAction.STARTUP_OKAY)
+            now = self._monotonic()
+            if (
+                type(now) not in (int, float)
+                or type(now) is bool
+                or not math.isfinite(float(now))
+                or float(now) >= self._deadline
+            ):
+                return False
+            self._safety_check(self._binding)
+        except BaseException:
+            return False
+
+        # Restore/focus and settle the cursor before the final visual proof.
+        # Doing any of these state-changing calls after proof could make the
+        # target stale before mouse-down.
+        user32 = self._user32
+        binding = self._binding
+        point = wintypes.POINT(
+            round(expected[0] * (binding.width - 1)),
+            round(expected[1] * (binding.height - 1)),
+        )
+        try:
+            user32.ShowWindow(wintypes.HWND(binding.root_hwnd), 9)
+            user32.BringWindowToTop(wintypes.HWND(binding.root_hwnd))
+            user32.SetForegroundWindow(wintypes.HWND(binding.root_hwnd))
+            active = user32.GetForegroundWindow()
+            if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
+                return False
+            if not user32.ClientToScreen(
+                wintypes.HWND(binding.render_hwnd), ctypes.byref(point)
+            ) or not user32.SetCursorPos(point.x, point.y):
+                return False
+            time.sleep(0.04)
+            frame = self._capture()
+        except BaseException:
+            return False
+        try:
+            if (
+                type(frame) is not np.ndarray
+                or frame.dtype != np.uint8
+                or frame.shape != (self._binding.height, self._binding.width, 3)
+                or not frame.flags.writeable
+            ):
+                return False
+            fresh = self._detector(frame, InputAction.STARTUP_OKAY, self._font_path)
+            if (
+                type(fresh) is not tuple
+                or len(fresh) != 2
+                or any(
+                    type(value) not in (int, float) or type(value) is bool
+                    for value in fresh
+                )
+                or abs(float(fresh[0]) - expected[0]) > 0.01
+                or abs(float(fresh[1]) - expected[1]) > 0.01
+            ):
+                return False
+            fresh_point = wintypes.POINT(
+                round(float(fresh[0]) * (binding.width - 1)),
+                round(float(fresh[1]) * (binding.height - 1)),
+            )
+        except BaseException:
+            return False
+        finally:
+            if type(frame) is np.ndarray and frame.flags.writeable:
+                frame.fill(0)
+            frame = None
+
+        # Recheck authorization after the detector, then sample the trusted
+        # monotonic clock. No caller-controlled callback remains before down.
+        try:
+            self._authorization.require(InputAction.STARTUP_OKAY)
+            now = self._monotonic()
+            if (
+                type(now) not in (int, float)
+                or type(now) is bool
+                or not math.isfinite(float(now))
+                or float(now) >= self._deadline
+            ):
+                return False
+        except BaseException:
+            return False
+
+        # From final authorization to down: direct read/check calls and immutable
+        # scalar reads only. The freshly detected center must map to the
+        # already-settled cursor within two render pixels.
+        try:
+            active = user32.GetForegroundWindow()
+            if not active or int(user32.GetAncestor(active, 2)) != binding.root_hwnd:
+                return False
+            if not user32.ClientToScreen(
+                wintypes.HWND(binding.render_hwnd), ctypes.byref(fresh_point)
+            ):
+                return False
+            if abs(fresh_point.x - point.x) > 2 or abs(fresh_point.y - point.y) > 2:
+                return False
+            cursor = wintypes.POINT()
+            if (
+                not user32.GetCursorPos(ctypes.byref(cursor))
+                or cursor.x != point.x
+                or cursor.y != point.y
+                or int(user32.GetAncestor(user32.GetForegroundWindow(), 2))
+                != binding.root_hwnd
+            ):
+                return False
+        except BaseException as exc:
+            exc.startup_input_phase = StartupInputPhase.NO_GESTURE.value
+            raise
+
+        primary: BaseException | None = None
+        down_returned = False
+        up_returned = False
+        try:
+            user32.mouse_event(0x0002, 0, 0, 0, None)
+            down_returned = True
+            time.sleep(0.02)
+        except BaseException as exc:
+            primary = exc
+        try:
+            user32.mouse_event(0x0004, 0, 0, 0, None)
+            up_returned = True
+        except BaseException as cleanup_error:
+            if primary is not None:
+                primary.startup_input_phase = (
+                    StartupInputPhase.STARTED_UNCERTAIN.value
+                )
+                primary.add_note("mouse-up cleanup also failed")
+                raise primary
+            cleanup_error.startup_input_phase = (
+                StartupInputPhase.STARTED_UNCERTAIN.value
+            )
+            raise cleanup_error
+        if primary is not None:
+            primary.startup_input_phase = (
+                StartupInputPhase.COMPLETED.value
+                if down_returned and up_returned
+                else StartupInputPhase.STARTED_UNCERTAIN.value
+            )
+            raise primary
+        return True
+
+
+class Win32StartupContinueInput:
+    """One-use wrapper exposing only a positively located Continue click."""
+
+    def __init__(
+        self,
+        binding: PlayerBinding,
+        safety_check,
+        authorization: InputAuthorization,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if (
+            type(authorization) is not InputAuthorization
+            or authorization.purpose.value != "STARTUP_CONTINUE_ONLY"
+        ):
+            raise RuntimeSafetyError("exact Continue authorization required")
+        self._input = Win32BoundInput(
+            binding,
+            safety_check,
+            authorization,
+            deadline=deadline,
+            monotonic=monotonic,
+        )
+        self._used = False
+
+    def click_continue(
+        self, binding: PlayerBinding, x: float, y: float
+    ) -> bool:
+        if self._used:
+            return False
+        self._used = True
+        return self._input.click(
+            binding, x, y, action=InputAction.STARTUP_CONTINUE
+        )
+
+
+def _state_store(project: Path) -> LifecycleStateStore:
+    var = project / "var"
+    var.mkdir(exist_ok=True)
+    return LifecycleStateStore(
+        project,
+        Win32StateFilePort(project, NativeWin32StateApi()),
+    )
+
+
+def _candidate_tree(project: Path) -> str:
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(project), "status", "--porcelain", "--untracked-files=all"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if status.stdout:
+            raise RuntimeSafetyError("candidate tree is not immutable")
+        result = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD^{tree}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeSafetyError("candidate tree is unavailable") from exc
+    tree = result.stdout.strip()
+    if len(tree) != 40 or any(
+        character not in "0123456789abcdef" for character in tree
+    ):
+        raise RuntimeSafetyError("candidate tree is malformed")
+    return tree
+
+
+def _select_configured_slot(
+    slots: tuple[Slot, ...], lifecycle: Ready, instance_ref: str
+) -> Slot:
+    """Bind the public opaque reference to the private lifecycle-selected slot."""
+    expected_ref = f"slot-{lifecycle.next_slot}"
+    if type(instance_ref) is not str or instance_ref != expected_ref:
+        raise RuntimeSafetyError("WINDOW_BINDING")
+    return slots[lifecycle.next_slot]
+
+
+class StoppedControlPreparer:
+    """Prepare the lifecycle-selected STOPPED control under the host mutex."""
+
+    def __init__(
+        self,
+        runtime: object,
+        *,
+        make_state_store: Callable[[], object],
+        control: object,
+        observe_absence: Callable[[int], tuple[int, int]],
+        approval_exists: Callable[[], bool],
+    ) -> None:
+        self._runtime = runtime
+        self._make_state_store = make_state_store
+        self._control = control
+        self._observe_absence = observe_absence
+        self._approval_exists = approval_exists
+
+    def _require_boundary(self, slot_index: int) -> None:
+        try:
+            approval = self._approval_exists()
+        except BaseException as exc:
+            raise RuntimeSafetyError("active approval state is unavailable") from exc
+        if type(approval) is not bool or approval:
+            raise RuntimeSafetyError("active approval forbids control preparation")
+        try:
+            observation = self._observe_absence(slot_index)
+        except BaseException as exc:
+            raise RuntimeSafetyError("complete process/window absence is unproved") from exc
+        if (
+            type(observation) is not tuple
+            or len(observation) != 2
+            or any(type(count) is not int or count != 0 for count in observation)
+        ):
+            raise RuntimeSafetyError("complete process/window absence is unproved")
+
+    def prepare(self, configurations: tuple[MvpConfiguration, ...]) -> Ready:
+        if (
+            type(configurations) is not tuple
+            or len(configurations) != 5
+            or any(
+                type(configuration) is not MvpConfiguration
+                or configuration.instance_ref != f"slot-{index}"
+                for index, configuration in enumerate(configurations)
+            )
+        ):
+            raise RuntimeSafetyError("exact five-slot control mapping required")
+        lease = self._runtime.acquire_mutex()
+        try:
+            if type(lease.abandoned) is not bool or lease.abandoned:
+                raise RuntimeSafetyError("abandoned mutex forbids control preparation")
+            lease.require_usable()
+            store = self._make_state_store()
+            lifecycle = store.load()
+            if type(lifecycle) is not Ready:
+                raise RuntimeSafetyError("lifecycle is not READY")
+            self._require_boundary(lifecycle.next_slot)
+            configuration = configurations[lifecycle.next_slot]
+            prepared = self._control.prepare_stopped(configuration)
+            current = store.load()
+            if type(current) is not Ready or current != lifecycle:
+                raise RuntimeSafetyError("lifecycle changed during control preparation")
+            self._require_boundary(lifecycle.next_slot)
+            read_back = self._control.load()
+            if (
+                type(prepared) is not type(read_back)
+                or prepared != read_back
+                or read_back.configuration != configuration
+                or read_back.mode is not LocalBotMode.STOPPED
+            ):
+                raise RuntimeSafetyError("control preparation read-back mismatch")
+            return lifecycle
+        finally:
+            try:
+                lease.release()
+            except BaseException as exc:
+                raise RuntimeSafetyError(
+                    "mutex release is unresolved after control preparation"
+                ) from exc
+
+
+def prepare_native_mvp_control(
+    project_root: str,
+    slots_path: str,
+    player_tag_hashes: tuple[str, ...],
+) -> Ready:
+    """Prepare the current READY slot without launching or sending input."""
+    if (
+        type(player_tag_hashes) is not tuple
+        or len(player_tag_hashes) != 5
+        or any(
+            type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in player_tag_hashes
+        )
+    ):
+        raise RuntimeSafetyError("exact five-slot tag mapping required")
+    project = Path(project_root).resolve(strict=True)
+    slots_file = Path(slots_path)
+    native = NativeLifecycleApi()
+    runtime = Win32Runtime(native)
+    host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
+
+    def observe_absence(slot_index: int) -> tuple[int, int]:
+        registry = load_private_registry(project, slots_file, _BLUESTACKS_CONF)
+        if (
+            type(registry) is not tuple
+            or len(registry) != 5
+            or tuple(slot.index for slot in registry) != (0, 1, 2, 3, 4)
+        ):
+            raise RuntimeSafetyError("exact ordered five-slot registry required")
+
+        def player_count() -> int:
+            snapshot = host.complete_player_snapshot()
+            try:
+                return len(snapshot.identities)
+            finally:
+                snapshot.close()
+
+        before = player_count()
+        windows = host.complete_relevant_root_window_count(
+            registry[slot_index].display_name
+        )
+        after = player_count()
+        return max(before, after), windows
+
+    configurations = tuple(
+        MvpConfiguration(
+            "local-team-0",
+            f"local-account-{index}",
+            f"slot-{index}",
+            player_tag_hashes[index],
+        )
+        for index in range(5)
+    )
+    return StoppedControlPreparer(
+        runtime,
+        make_state_store=lambda: _state_store(project),
+        control=LocalControlStore(project / "var" / "mvp-local-control.json"),
+        observe_absence=observe_absence,
+        approval_exists=lambda: (project / "var" / "mvp-live-approval.json").exists(),
+    ).prepare(configurations)
+
+
+def _retire_owned(
+    supervisor: object,
+    binding: PlayerBinding,
+    lease: object,
+    authority: object,
+    run_nonce: str,
+) -> None:
+    """Retire, release ownership, then persist exactly one truthful outcome."""
+    stop_error: BaseException | None = None
+    release_error: BaseException | None = None
+    try:
+        supervisor.stop(binding, None)
+    except BaseException as exc:
+        stop_error = exc
+    try:
+        lease.release()
+    except BaseException as exc:
+        release_error = exc
+    succeeded = stop_error is None and release_error is None
+    try:
+        authority.record_retirement(run_nonce, succeeded=succeeded)
+    except BaseException as exc:
+        if succeeded:
+            raise RuntimeSafetyError("durable retirement receipt failed") from exc
+        receipt_error = exc
+    else:
+        receipt_error = None
+    operational_error = stop_error or release_error
+    if operational_error is not None:
+        failure = RuntimeSafetyError("owned lifecycle cleanup failed")
+        if receipt_error is not None:
+            failure.add_note("retirement failure receipt was unavailable")
+        raise failure from operational_error
+
+
+def _startup_failure_reason(
+    failure: BaseException | None, retained_phase: StartupInputPhase
+) -> str:
+    phase = retained_phase
+    if failure is not None:
+        try:
+            phase = StartupInputPhase(
+                getattr(failure, "startup_input_phase", retained_phase.value)
+            )
+        except (TypeError, ValueError):
+            phase = retained_phase
+    if phase is StartupInputPhase.COMPLETED:
+        return "STARTUP_INPUT_COMPLETED_FAILURE"
+    if phase is StartupInputPhase.STARTED_UNCERTAIN:
+        return "STARTUP_INPUT_UNCERTAIN_FAILURE"
+    return "PRE_INPUT_FAILURE"
+
+
+def _run_optional_account_readiness(
+    *,
+    readiness_only: bool,
+    controller_factory: Callable[[], object],
+    deadline: float,
+) -> AccountReady | None:
+    """Keep export navigation out of attack visits after exact slot/Home proof."""
+    if type(readiness_only) is not bool or not callable(controller_factory):
+        raise RuntimeSafetyError("readiness mode is malformed")
+    if not readiness_only:
+        return None
+    controller = controller_factory()
+    result = controller.run(deadline=deadline)
+    if type(result) is not AccountReady:
+        raise RuntimeSafetyError("account readiness result is malformed")
+    return result
+
+
+def run_native_mvp_visit(
+    project_root: str,
+    slots_path: str,
+    transaction_ref: str,
+    *,
+    readiness_only: bool = False,
+) -> VisitResult | AccountReady:
+    """Launch, bind, attack, prove HOME, and stop one configured local account."""
+    if type(readiness_only) is not bool:
+        raise RuntimeSafetyError("readiness mode is malformed")
+    project = Path(project_root).resolve(strict=True)
+    from .mvp_session_authority import require_legacy_command
+    require_legacy_command(project / 'var' / 'mvp-session.sqlite3')
+    deployment_profile = None
+    deployment_lease = None
+    if not readiness_only:
+        from .mvp_deployment_worker import require_worker_context
+        from .mvp_deployment_profile import load_profile
+        deployment_lease = require_worker_context()
+        deployment_profile = load_profile(project, candidate_tree=_candidate_tree(project))
+
+    authority = DurableSessionAuthority(project / "var" / "mvp-session.sqlite3")
+    native = NativeLifecycleApi()
+    runtime = Win32Runtime(native)
+    host = Win32LifecycleHost(native, nonce_factory=lambda: secrets.token_hex(16))
+    lease = runtime.acquire_mutex()
+    supervisor: LifecycleSupervisor | None = None
+    binding: PlayerBinding | None = None
+    result: VisitResult | None = None
+    admitted = False
+    startup_input_phase = StartupInputPhase.NO_GESTURE
+    try:
+        if lease.abandoned:
+            raise RuntimeSafetyError("WINDOW_BINDING")
+        lease.require_usable()
+        status = authority.status()
+        configured = authority.configuration()
+        if status.mode is not ControlMode.RUNNING or status.run_nonce is None:
+            raise RuntimeSafetyError("persistent control mode is not RUNNING")
+        if not readiness_only:
+            from .mvp_deployment_receipt import require_profile
+            require_profile(authority, status.run_nonce, deployment_profile.digest)
+        store = _state_store(project)
+        lifecycle = store.load()
+        if type(lifecycle) is not Ready:
+            raise RuntimeSafetyError("WINDOW_BINDING")
+        slots = load_private_registry(project, Path(slots_path), _BLUESTACKS_CONF)
+        if type(slots) is not tuple or len(slots) != 5:
+            raise RuntimeSafetyError("WINDOW_BINDING")
+        slot = _select_configured_slot(
+            slots, lifecycle, configured.instance_ref
+        )
+        visual_profile = load_private_visual_profile(
+            project, project / "private" / "readiness" / "profile.json"
+        )
+        authority.admit(
+            run_nonce=status.run_nonce,
+            transaction_ref=transaction_ref,
+            purpose=(
+                "MVP_ACCOUNT_READINESS"
+                if readiness_only
+                else "MVP_SINGLE_ACCOUNT_ATTACK"
+            ),
+            candidate_tree=_candidate_tree(project),
+            ready_bytes=encode_state(lifecycle),
+            configuration_revision=status.configuration_revision,
+            control_revision=status.control_revision,
+            now=int(time.time()),
+        )
+        admitted = True
+        players = host.complete_player_snapshot()
+        try:
+            if players.identities:
+                raise RuntimeSafetyError("WINDOW_BINDING")
+        finally:
+            players.close()
+        supervisor = LifecycleSupervisor(
+            host,
+            store,
+            AcquiredMutexLease(DEFAULT_MUTEX_NAME),
+            nonce_factory=lambda: secrets.token_hex(16),
+            preserve_ready_cursor=True,
+        )
+        binding = supervisor.start_clash(slot)
+
+        def enabled() -> bool:
+            try:
+                current = authority.status()
+                return (
+                    current.mode is ControlMode.RUNNING
+                    and current.run_nonce == status.run_nonce
+                )
+            except BaseException:
+                return False
+
+        def capture_bgr() -> np.ndarray:
+            width, height, pixels = supervisor.capture_owned(binding)
+            if (
+                type(width) is not int
+                or type(height) is not int
+                or (width, height) != (binding.width, binding.height)
+                or type(pixels) is not bytes
+                or len(pixels) != width * height * 4
+            ):
+                raise RuntimeSafetyError("FRAME_VALIDATION_FAILED")
+            return (
+                np.frombuffer(pixels, dtype=np.uint8)
+                .reshape(height, width, 4)[:, :, :3]
+                .copy()
+            )
+
+        readiness_deadline = time.monotonic() + 120.0
+        if deployment_lease is not None:
+            readiness_deadline = min(readiness_deadline, deployment_lease.deadline - 30.0)
+        startup_font = project / "private" / "assets" / "CCBackBeat.ttf"
+        startup_input_phase = await_account_home(
+            capture=capture_bgr,
+            home_verified=lambda frame: manual_home_frame_verified(
+                frame, visual_profile
+            ),
+            popup_detector=popup_position,
+            startup_input_factory=lambda: Win32AccountStartupInput(
+                binding,
+                safety_check=supervisor.capture_owned,
+                authorization=InputAuthorization.account_startup(enabled),
+                capture=capture_bgr,
+                font_path=startup_font,
+                deadline=readiness_deadline,
+            ),
+            font_path=startup_font,
+            deadline=readiness_deadline,
+            monotonic=time.monotonic,
+            wait=time.sleep,
+        )
+
+        def make_readiness_controller() -> AccountReadinessController:
+            return AccountReadinessController(
+                binding=binding,
+                run_nonce=status.run_nonce,
+                capture=capture_bgr,
+                profile=visual_profile,
+                export_input=Win32BoundInput(
+                    binding,
+                    supervisor.capture_owned,
+                    InputAuthorization.account_readiness(enabled),
+                    deadline=readiness_deadline,
+                    monotonic=time.monotonic,
+                ),
+                live_gate=enabled,
+                clipboard_read=read_windows_clipboard,
+                clipboard_clear=clear_windows_clipboard,
+                expected_tag_sha256=configured.player_tag_sha256,
+                wall_clock=lambda: datetime.now(UTC),
+                monotonic=time.monotonic,
+                wait=time.sleep,
+            )
+
+        readiness = _run_optional_account_readiness(
+            readiness_only=readiness_only,
+            controller_factory=make_readiness_controller,
+            deadline=readiness_deadline,
+        )
+        if readiness is not None:
+            if readiness.run_nonce != status.run_nonce:
+                raise RuntimeSafetyError("ACCOUNT_MISMATCH")
+            return readiness
+        recognizer = BgraGameplayRecognizer(
+            binding, supervisor.capture_owned, account_verified=True
+        )
+        input_port = Win32BoundInput(
+            binding,
+            supervisor.capture_owned,
+            InputAuthorization.monitored_attack(enabled),
+            deadline=deployment_lease.deadline - 30.0,
+            monotonic=time.monotonic,
+        )
+        from .mvp_deployment_integration import build_native_executor
+        deployment_executor = build_native_executor(
+            binding=binding, bound_input=input_port, capture_bgr=capture_bgr,
+            home_verified=lambda frame: manual_home_frame_verified(frame, visual_profile),
+            enabled=enabled, authority=authority, transaction_ref=transaction_ref,
+            profile=deployment_profile, lease=deployment_lease,
+        )
+        executor = DurableInputPhaseExecutor(authority, transaction_ref, deployment_executor)
+        ports = ConcreteAttackVisitPorts(
+            binding=binding,
+            account_ref=configured.account_ref,
+            recognizer=recognizer,
+            executor=executor,
+            kill_switch_enabled=enabled,
+            audit=DurableSessionAudit(authority, transaction_ref),
+            cleanup=deployment_executor.cleanup,
+        )
+        bot = LocalMvpBot(ports)
+        bot.setup(configured)
+        bot.run()
+        result = bot.visit_once(transaction_ref)
+        phase = authority.transaction(transaction_ref).phase
+        if phase in {ActionPhase.PLANNED, ActionPhase.INTENT_RECORDED}:
+            authority.transition_action(
+                transaction_ref,
+                expected=phase,
+                target=ActionPhase.FAILED,
+                reason_code=_startup_failure_reason(None, startup_input_phase),
+            )
+    except BaseException as failure:
+        if admitted:
+            try:
+                phase = authority.transaction(transaction_ref).phase
+                if phase in {ActionPhase.PLANNED, ActionPhase.INTENT_RECORDED}:
+                    authority.transition_action(
+                        transaction_ref,
+                        expected=phase,
+                        target=ActionPhase.FAILED,
+                        reason_code=_startup_failure_reason(
+                            failure, startup_input_phase
+                        ),
+                    )
+            except BaseException:
+                failure.add_note("pre-input failure bookkeeping was unavailable")
+        raise
+    finally:
+        prior_error = sys.exception()
+        try:
+            if supervisor is not None and binding is not None:
+                _retire_owned(supervisor, binding, lease, authority, status.run_nonce)
+            else:
+                lease.release()
+        except BaseException as cleanup_error:
+            if prior_error is None:
+                raise
+            prior_error.add_note("owned lifecycle cleanup also failed")
+            cleanup_error = None
+    if type(result) is not VisitResult:
+        raise RuntimeSafetyError("bounded visit did not produce a result")
+    return result
+
+
+def run_native_mvp_account_ready(
+    project_root: str, slots_path: str, transaction_ref: str
+) -> AccountReady:
+    """Run the owned readiness chain and retire before attack authority exists."""
+    result = run_native_mvp_visit(
+        project_root,
+        slots_path,
+        transaction_ref,
+        readiness_only=True,
+    )
+    if type(result) is not AccountReady:
+        raise RuntimeSafetyError("AccountReady result is malformed")
+    return result
+
+
+__all__ = [
+    "LocalAuditLog",
+    "StoppedControlPreparer",
+    "Win32BoundInput",
+    "Win32AccountStartupInput",
+    "Win32StartupContinueInput",
+    "prepare_native_mvp_control",
+    "run_native_mvp_account_ready",
+    "run_native_mvp_visit",
+]

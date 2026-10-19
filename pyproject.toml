@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clash-rush-rebuild"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.2", "opencv-python>=4.12", "Pillow>=11", "scipy==1.17.0"]
+license-files = ["THIRD_PARTY_NOTICES.md"]
+
+[project.scripts]
+clash-rush-rebuild = "clash_rush_rebuild.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+clash_rush_rebuild = [
+    "assets/basepilot_templates/16_9/*.png",
+    "assets/basepilot_templates/16_10/*.png",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["src"]

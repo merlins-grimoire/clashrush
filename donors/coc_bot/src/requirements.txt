@@ -1,0 +1,24 @@
+adbutils
+apscheduler
+beautifulsoup4
+curl-cffi
+easyocr
+flask
+groq
+lxml
+matplotlib
+numpy
+opencv-python
+pillow
+portalocker
+pure-python-adb
+PyGithub
+pyinstaller
+pyminitouch
+pyobjc; sys_platform == 'darwin'
+pywebview
+psutil
+rapidfuzz
+requests
+scipy
+uiautomator2

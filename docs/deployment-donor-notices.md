@@ -1,0 +1,126 @@
+# Deployment donor notices
+
+The code is an adaptation, not a byte-identical donor copy. These grants cover
+identified source code; independent artwork rights and runtime calibration
+are separate decisions. No donor fonts, original screenshots, model weights,
+external executables, or donor Python runtime are included in this ZIP.
+
+## m24842/CoC_Bot
+
+Commit: `a5c943afed0ed3b9abedbbc228b0889145ecaf24`
+
+Adapted sequence/algorithm: `src/attacker.py: detect_troop_positions, deploy_troops, complete_normal_attack`.
+
+H1 retains the bounded discovery/type-dispatch topology only. Donor gap typing,
+default quantities, scrolling completion, ADB/minitouch transport, fixed/random
+targets and restart tail remain excluded. The H1 complete-frame/witness owner,
+sealed N-card plan and single-page rejection logic are local implementations.
+
+MIT License
+
+Copyright (c) 2026 m24842
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## efebolukbasi/BasePilot
+
+Commit: `4ede1efd220ffc79a5b490cfd3788b44d2584da4`
+
+Adapted sequence/algorithm: `app/core/bot.py: _return_home and _wait_for_return_home_or_chest_claim`, restricted to the positively observed Return Home branch. S004 waits for natural Result; donor End/Surrender, reward/chest, recovery and restart branches are excluded.
+
+Updated-UI source quantity candidate also adapts
+`app/services/vision.py: preprocess_bw_ui_text` (strict white-text brightness
+floor) and `filter_binary_ink_by_component_area` (8-connected area filtering).
+The local adaptation keeps bright-on-black polarity, bounds the small-component
+floor to eight pixels, rejects clipped evidence before filtering, requires each
+discarded speck to overlap exactly one retained component horizontally, and
+never discards large components. The donor's OCR, permissive correction,
+unbounded area deletion, debug writes and fallback paths are not retained.
+See `updated-ui-source-quantity.md` for the incomplete full-profile fit verdict.
+
+MIT License
+
+Copyright (c) 2026 Efe Bolukbasi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## calebmwelsh/ClashAutomation
+
+Commit: `c41fe12a6df051e241c695b71b6859286e24c612`
+
+Adapted sequence/algorithm: `utils/object_detection.py: detect_base_bbox and detect_deploy_ring`.
+
+MIT License
+
+Copyright (c) 2026 Caleb Welsh
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Local replacements and package dependencies
+
+Authorization, closed schemas, absolute deadlines, inventory proof, finite glyph
+reader, intervention observer, held-mouse lease, profile binding, and durable
+receipt integration are local code. Reusing the repository's existing owned-child
+runner retains its existing Hermes attribution in THIRD_PARTY_NOTICES.md.
+
+H1 copied no new donor code or artwork and added no dependency. PixelChief and
+NX-ClashClient remain comparison/study sources only as recorded in
+`docs/h0-scalable-attack-choice.md`; neither contributes runtime code or assets.
+
+SciPy is imported as an ordinary separately installed dependency, not copied into
+this bundle. The candidate declaration pins scipy==1.17.0 (the locally tested
+version); Hermes must resolve/review uv.lock and the canonical environment.
+NumPy/OpenCV/Pillow are existing project dependencies.
+
+Auto Farmer at 0120019918758e45feddf84fd5522e31cc6fd578 contributes only artifact
+search metadata. No Auto Farmer implementation or PNG is copied into this bundle.
+Its optional offline import requires the exact existing reference Git objects.
+No unlicensed keshav-x or NX source is copied.

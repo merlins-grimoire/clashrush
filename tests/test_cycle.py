@@ -1,0 +1,572 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+import clash_rush_rebuild.cycle as cycle_module
+from clash_rush_rebuild.basepilot_vision import (
+    BasePilotRecognitionError,
+    RecognitionReason,
+)
+from clash_rush_rebuild.basepilot_window import BasePilotCaptureError
+from clash_rush_rebuild.cycle import CycleError, InertCycle, NoInputDiagnosticCycle
+from clash_rush_rebuild.no_input_home_diagnostic import HomeDiagnosticResult
+from clash_rush_rebuild.lifecycle import PlayerBinding, ProcessIdentity, StopRecord
+from clash_rush_rebuild.lifecycle_state import Active, BlockReason, LifecycleStateError, Ready
+from clash_rush_rebuild.registry import Slot
+
+
+@dataclass
+class FakeLease:
+    events: list[str]
+    abandoned: bool = False
+    fail_release: bool = False
+
+    def require_usable(self) -> None:
+        self.events.append("mutex:require-usable")
+        if self.abandoned:
+            raise RuntimeError("abandoned")
+
+    def release(self) -> None:
+        self.events.append("mutex:release")
+        if self.fail_release:
+            raise RuntimeError("release failed")
+
+
+class FakeRuntime:
+    def __init__(self, events: list[str], lease: FakeLease) -> None:
+        self.events = events
+        self.lease = lease
+
+    def acquire_mutex(self) -> FakeLease:
+        self.events.append("mutex:acquire")
+        return self.lease
+
+
+class FakeStateStore:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def load(self) -> Ready:
+        self.events.append("state:load")
+        return Ready(0)
+
+    def initialize_ready(self) -> Ready:
+        self.events.append("state:initialize")
+        return Ready(0)
+
+
+class FakeSupervisor:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.binding = PlayerBinding(
+            ProcessIdentity(100, 9001),
+            ProcessIdentity(100, 9001),
+            101,
+            102,
+            1280,
+            720,
+            "a" * 32,
+        )
+
+    def start(self, slot: Slot) -> PlayerBinding:
+        self.events.append(f"start:{slot.index}")
+        return self.binding
+
+    def stop(self, binding: PlayerBinding, proof: None) -> StopRecord:
+        self.events.append("stop")
+        return StopRecord(0, "0" * 32, 1, 2, True)
+
+
+def _cycle(events: list[str], lease: FakeLease) -> InertCycle:
+    slots = tuple(
+        Slot(
+            index,
+            "Pie64" if index == 0 else f"Pie64_{index + 1}",
+            f"Generic Slot {index}",
+            1280,
+            720,
+            240,
+        )
+        for index in range(5)
+    )
+
+    def load_registry() -> tuple[Slot, ...]:
+        events.append("registry:load")
+        return slots
+
+    def make_state_store() -> FakeStateStore:
+        events.append("state-store:create")
+        return FakeStateStore(events)
+
+    def observe_player_count() -> int:
+        events.append("players:observe")
+        return 0
+
+    def make_supervisor(store: FakeStateStore, mutex_name: str) -> FakeSupervisor:
+        del store, mutex_name
+        events.append("supervisor:create")
+        return FakeSupervisor(events)
+
+    return InertCycle(
+        FakeRuntime(events, lease),
+        load_registry=load_registry,
+        make_state_store=make_state_store,
+        observe_player_count=observe_player_count,
+        make_supervisor=make_supervisor,
+    )
+
+
+def test_mutex_precedes_configuration_state_and_process_discovery() -> None:
+    events: list[str] = []
+    cycle = _cycle(events, FakeLease(events))
+
+    record = cycle.visit_once()
+
+    assert record.slot == 0
+    assert events == [
+        "mutex:acquire",
+        "mutex:require-usable",
+        "registry:load",
+        "state-store:create",
+        "state:load",
+        "players:observe",
+        "supervisor:create",
+        "start:0",
+        "stop",
+        "mutex:release",
+    ]
+
+
+def test_explicit_initialization_is_mutex_owned_and_never_creates_supervisor() -> None:
+    events: list[str] = []
+    cycle = _cycle(events, FakeLease(events))
+
+    state = cycle.initialize()
+
+    assert state == Ready(0)
+    assert events == [
+        "mutex:acquire",
+        "mutex:require-usable",
+        "registry:load",
+        "players:observe",
+        "state-store:create",
+        "state:initialize",
+        "mutex:release",
+    ]
+    assert "supervisor:create" not in events
+
+
+def test_abandoned_mutex_allows_only_read_only_reconciliation() -> None:
+    events: list[str] = []
+    cycle = _cycle(events, FakeLease(events, abandoned=True))
+
+    with pytest.raises(CycleError, match="reconciliation"):
+        cycle.visit_once()
+
+    assert events == [
+        "mutex:acquire",
+        "state-store:create",
+        "state:load",
+        "players:observe",
+        "mutex:release",
+    ]
+    assert not any(event.startswith("start:") for event in events)
+
+
+def test_mutex_release_failure_permanently_disables_cycle_process() -> None:
+    events: list[str] = []
+    lease = FakeLease(events, fail_release=True)
+    cycle = _cycle(events, lease)
+
+    with pytest.raises(CycleError, match="permanently disabled"):
+        cycle.visit_once()
+    with pytest.raises(CycleError, match="permanently disabled"):
+        cycle.visit_once()
+
+    assert events.count("mutex:acquire") == 1
+
+
+def test_exact_five_visits_emit_start_stop_zero_through_four_across_reopen() -> None:
+    events: list[str] = []
+    slots = tuple(
+        Slot(
+            index,
+            "Pie64" if index == 0 else f"Pie64_{index + 1}",
+            f"Generic Slot {index}",
+            1280,
+            720,
+            240,
+        )
+        for index in range(5)
+    )
+
+    class PersistentStore:
+        state = Ready(0)
+
+        def load(self) -> Ready:
+            return self.state
+
+    store = PersistentStore()
+
+    class RotatingSupervisor(FakeSupervisor):
+        def __init__(self, selected_store: PersistentStore) -> None:
+            super().__init__(events)
+            self.store = selected_store
+            self.slot = 0
+
+        def start(self, slot: Slot) -> PlayerBinding:
+            self.slot = slot.index
+            events.append(f"START{slot.index}")
+            return self.binding
+
+        def stop(self, binding: PlayerBinding, proof: None) -> StopRecord:
+            del binding, proof
+            events.append(f"STOP{self.slot}")
+            self.store.state = Ready((self.slot + 1) % 5)
+            return StopRecord(self.slot, "0" * 32, 1, 2, True)
+
+    def make_cycle() -> InertCycle:
+        return InertCycle(
+            FakeRuntime(events, FakeLease(events)),
+            load_registry=lambda: slots,
+            make_state_store=lambda: store,
+            observe_player_count=lambda: 0,
+            make_supervisor=lambda selected_store, _mutex: RotatingSupervisor(
+                selected_store
+            ),
+        )
+
+    cycle = make_cycle()
+    for _ in range(2):
+        cycle.visit_once()
+    cycle = make_cycle()
+    for _ in range(3):
+        cycle.visit_once()
+
+    trace = [event for event in events if event.startswith(("START", "STOP"))]
+    assert trace == [
+        "START0",
+        "STOP0",
+        "START1",
+        "STOP1",
+        "START2",
+        "STOP2",
+        "START3",
+        "STOP3",
+        "START4",
+        "STOP4",
+    ]
+
+
+class FakeDiagnosticStore(FakeStateStore):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        state: Ready | Active = Ready(0),
+        load_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(events)
+        self.state = state
+        self.load_error = load_error
+
+    def load(self) -> Ready | Active:
+        self.events.append("state:load")
+        if self.load_error is not None:
+            raise self.load_error
+        return self.state
+
+    def load_with_bytes(self) -> tuple[Ready | Active, bytes]:
+        self.events.append("state:load-with-bytes")
+        if self.load_error is not None:
+            raise self.load_error
+        return self.state, b'{"next_slot":0,"schema":1,"state":"READY"}\n'
+
+
+class FakeDiagnosticApprovals:
+    def __init__(self, events: list[str], *, fail: bool = False) -> None:
+        self.events = events
+        self.fail = fail
+
+    def validate_then_consume(self, action, tree, state, state_bytes) -> object:
+        self.events.append(
+            f"approval:{action.value}:{tree}:{state.next_slot}:{len(state_bytes)}"
+        )
+        if self.fail:
+            raise RuntimeError("approval refused")
+        return object()
+
+
+def _diagnostic_cycle(
+    events: list[str],
+    lease: FakeLease,
+    *,
+    approval_fails: bool = False,
+    observation_fails: bool = False,
+    observation_error: BaseException | None = None,
+    observation_result: object = HomeDiagnosticResult.HOME,
+    player_count: object = 0,
+    state: Ready | Active = Ready(0),
+    load_error: BaseException | None = None,
+    start_fails: bool = False,
+    stop_fails: bool = False,
+) -> NoInputDiagnosticCycle:
+    slots = tuple(
+        Slot(
+            index,
+            "Pie64" if index == 0 else f"Pie64_{index + 1}",
+            f"Generic Slot {index}",
+            1280,
+            720,
+            240,
+        )
+        for index in range(5)
+    )
+
+    def make_supervisor(_store, _mutex_name) -> FakeSupervisor:
+        events.append("supervisor:create")
+        supervisor = FakeSupervisor(events)
+        if start_fails:
+            supervisor.start = lambda _slot: (_ for _ in ()).throw(
+                RuntimeError("start failed")
+            )
+        if stop_fails:
+            supervisor.stop = lambda _binding, _proof: (_ for _ in ()).throw(
+                RuntimeError("READY commit failed")
+            )
+        return supervisor
+
+    def observe(_supervisor, _binding) -> HomeDiagnosticResult:
+        events.append("observe")
+        if observation_error is not None:
+            raise observation_error
+        if observation_fails:
+            raise RuntimeError("recognition failed")
+        return observation_result
+
+    return NoInputDiagnosticCycle(
+        FakeRuntime(events, lease),
+        load_registry=lambda: (events.append("registry:load") or slots),
+        make_state_store=lambda: (
+            events.append("state-store:create")
+            or FakeDiagnosticStore(events, state=state, load_error=load_error)
+        ),
+        observe_player_count=lambda: (events.append("players:observe") or player_count),
+        approvals=FakeDiagnosticApprovals(events, fail=approval_fails),
+        candidate_tree=lambda: (events.append("tree") or "a" * 40),
+        make_supervisor=make_supervisor,
+        observe=observe,
+    )
+
+
+def test_no_input_diagnostic_consumes_exact_approval_before_launch_and_stops() -> None:
+    events: list[str] = []
+    result = _diagnostic_cycle(events, FakeLease(events)).visit_once()
+
+    assert result is HomeDiagnosticResult.HOME
+    assert events == [
+        "mutex:acquire",
+        "mutex:require-usable",
+        "registry:load",
+        "state-store:create",
+        "state:load-with-bytes",
+        "players:observe",
+        "tree",
+        "approval:LAUNCH_WINDOW_BINDING_DIAGNOSTIC:" + "a" * 40 + ":0:43",
+        "supervisor:create",
+        "start:0",
+        "observe",
+        "stop",
+        "mutex:release",
+    ]
+
+
+def test_no_input_diagnostic_stops_when_recognition_raises() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_fails=True,
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.RECOGNITION
+    assert events[-3:] == ["observe", "stop", "mutex:release"]
+
+
+def test_no_input_diagnostic_refuses_launch_when_approval_fails() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events), approval_fails=True)
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert "supervisor:create" not in events
+    assert not any(event.startswith("start:") for event in events)
+    assert events[-1] == "mutex:release"
+
+
+def test_no_input_diagnostic_abandoned_mutex_is_read_only() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events, abandoned=True))
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert "state:load" in events
+    assert "supervisor:create" not in events
+    assert "observe" not in events
+
+
+@pytest.mark.parametrize(
+    ("state", "load_error", "player_count", "message"),
+    [
+        (Active(0, "a" * 32, BlockReason.WINDOW_BINDING), None, 0, "ACTIVE"),
+        (Ready(0), LifecycleStateError("transition guard"), 0, "transition guard"),
+        (Ready(0), None, 1, "pre-existing player"),
+    ],
+)
+def test_no_input_diagnostic_refuses_unsafe_prelaunch_state(
+    state: Ready | Active,
+    load_error: BaseException | None,
+    player_count: int,
+    message: str,
+) -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        state=state,
+        load_error=load_error,
+        player_count=player_count,
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert message not in str(raised.value)
+    assert "supervisor:create" not in events
+    assert "observe" not in events
+
+
+def test_no_input_diagnostic_start_failure_never_observes() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events), start_fails=True)
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert "observe" not in events
+    assert "stop" not in events
+
+
+def test_no_input_diagnostic_stop_ready_failure_suppresses_scalar() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events), stop_fails=True)
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CLEANUP
+    assert "observe" in events
+    assert events[-1] == "mutex:release"
+
+
+def test_no_input_diagnostic_release_failure_suppresses_scalar_and_disables_reuse() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events, fail_release=True))
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CLEANUP
+    with pytest.raises(cycle_module.DiagnosticStageError) as reused:
+        cycle.visit_once()
+
+    assert reused.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert events.count("mutex:acquire") == 1
+
+
+def test_no_input_diagnostic_rejects_malformed_observation_after_stop() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events), observation_result="HOME")
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.RECOGNITION
+    assert events[-2:] == ["stop", "mutex:release"]
+
+
+def test_no_input_diagnostic_preserves_closed_capture_stage() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_error=BasePilotCaptureError("private capture detail"),
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CAPTURE
+    assert str(raised.value) == "CAPTURE"
+    assert "private" not in str(raised.value)
+    assert events[-3:] == ["observe", "stop", "mutex:release"]
+
+
+def test_no_input_diagnostic_preserves_closed_recognition_stage() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_error=BasePilotRecognitionError(
+            RecognitionReason.OPENCV_FAILURE,
+            "private recognition detail",
+        ),
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.RECOGNITION
+    assert str(raised.value) == "RECOGNITION"
+    assert "private" not in str(raised.value)
+
+
+def test_no_input_diagnostic_cleanup_overrides_capture_failure() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(
+        events,
+        FakeLease(events),
+        observation_error=BasePilotCaptureError("private capture detail"),
+        stop_fails=True,
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.CLEANUP
+    assert "observe" in events
+    assert events[-1] == "mutex:release"
+
+
+def test_no_input_diagnostic_mutex_acquisition_failure_is_launch_without_release() -> None:
+    events: list[str] = []
+    cycle = _diagnostic_cycle(events, FakeLease(events))
+    cycle._runtime.acquire_mutex = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("private mutex detail")
+    )
+
+    with pytest.raises(cycle_module.DiagnosticStageError) as raised:
+        cycle.visit_once()
+
+    assert raised.value.stage is cycle_module.DiagnosticFailureStage.LAUNCH
+    assert "mutex:release" not in events
