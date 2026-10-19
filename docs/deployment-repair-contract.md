@@ -1,3 +1,8 @@
+> **Status: PARTIALLY SUPERSEDED.**
+> Immediate End Battle prescription is not current accepted S004 policy.
+> Retained as main-candidate/history evidence.
+> See [CURRENT.md](architecture/CURRENT.md). No implementation is authorized by this document.
+
 # Mixed-card deployment repair contract (candidate)
 
 Base: ed3b2b5b66a9395d35c14353ebbcc619d763d137. This contract describes the new

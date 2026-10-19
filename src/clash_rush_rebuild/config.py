@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .registry import RegistryError, Slot, load_exact_five
+from .registry import RegistryError, Slot, load_exact_five, load_instance_slots
 
 
 class ConfigError(RuntimeError):
@@ -32,6 +32,12 @@ def load_private_registry(
         raw = json.loads(slots.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ConfigError("private slot configuration is unreadable") from exc
+    if type(raw) is dict and type(raw.get('schema')) is int and raw['schema'] == 2:
+        try:
+            conf_text = Path(bluestacks_conf_path).read_text(encoding='utf-8')
+            return load_instance_slots(conf_text, raw)
+        except (OSError, UnicodeError, RegistryError):
+            raise ConfigError('private instance slot registry could not be bound safely') from None
     if type(raw) is not dict or set(raw) != {"schema", "display_names"}:
         raise ConfigError("private slot schema fields are invalid")
     if type(raw["schema"]) is not int or raw["schema"] != 1:

@@ -1,5 +1,41 @@
 # Production backlog
 
+Current owner-policy overlay (`t_4b4717dd`): future scheduling/control targets
+stable registered instances/slots. Display labels and loaded-game names/tags are
+not admission identity. Historical account-key work below needs an explicitly
+reviewed migration, not implicit compatibility. See
+[current policy](../docs/attack-a-decision-b.md#instance-centric-owner-policy).
+
+> Deferred scope, not scheduling/live authority. Read [CURRENT.md](../docs/architecture/CURRENT.md)
+> and the existing [architecture sequence](integration-plan.md). The single
+> [currency policy](../docs/product-policy/spending.md) controls currency scope;
+> legacy feature restrictions neither narrow currency classes nor activate actions.
+
+## Unresolved review evidence
+
+- **OBS05: CHANGES_REQUESTED, not CORE_STATIC_READY**, despite done cards.
+  `clashrush-mvp:t_a351393f`, `OBS05_SUMMARY.txt`, names three blocking boundaries:
+  malformed notification bindings report HTTP 200/READY; Writer accepts corrupt
+  historical events without outbox rows; failed transport-worker retirement is
+  swallowed as response ambiguity and admits a second row. Five independent
+  regressions failed. One bounded correction then focused exact-tree review remains
+  required; no correction is performed here. OBS06 `t_31b9f273` still needs both
+  exact S005 STATIC_READY and CORE_STATIC_READY. OBS07/briefing remain todo and
+  the private webhook gate blocked; finished cards are not production acceptance.
+- **Roadmap research: CHANGES_REQUESTED**, per RR-I1 `t_82ffc82f`,
+  `RR_I1_OWNER_BRIEF.md` and RR-V1 `t_89f65d23`. Preserve six correction categories:
+  closed/private Builder values and current-village evidence; exact capacity types
+  and domains; generation schema reconciliation; complete advanced card/support/
+  remaining-quantity binding; donor/caller/completion ledger; closed scout
+  ACCEPT/REJECT/UNKNOWN without an undeclared DEFER. Eight reviewer probes failed
+  despite supplied suites passing. The 14 proposed slices remain research-only;
+  one correction and independent review are prerequisites, not new dispatch.
+
+Home progression, Builder and multi-account scope remain in the existing architecture.
+Local P1 operations remain required before production, not hidden behind optional
+remote/fleet work. Historical receipts are preserved; prioritizing a finding is not
+fixing or accepting it.
+
 P1 observability/operator Setup is required before the first Home/Builder production release. P2 and later features follow that release unless a read-only API slice is promoted independently. Backlog status does not authorize live input or asset redistribution.
 
 ## P1 — observability and operator UI
@@ -32,7 +68,7 @@ P1 observability/operator Setup is required before the first Home/Builder produc
 
 - Request donations in game only from a positively proved clan-chat/request state.
 - Send donations only after exact requested-unit parsing, configured unit allowlist, army/training reserve, donation budget, and positive postcondition.
-- No auto-reinforcement medal spending, gems, training fallback, or “first colorful card” behavior.
+- Auto-reinforcement/refill has no authorized executor here; medal currency permission alone cannot activate it. No training fallback or “first colorful card” behavior. Apply the canonical spending policy rather than a separate currency prohibition.
 - Official API donation counters validate trends but cannot prove one specific UI donation transaction.
 
 ## P5 — daily resource cart

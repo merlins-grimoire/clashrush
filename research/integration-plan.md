@@ -1,4 +1,42 @@
+> **Status: PARTIALLY SUPERSEDED / DEFERRED PRODUCT ROADMAP.**
+> Not current MVP scheduling authority.
+> See [CURRENT.md](../docs/architecture/CURRENT.md). No implementation is authorized by this document.
+
 # Integration plan
+
+Current owner-policy overlay (`t_4b4717dd`): future orchestration is instance/slot
+centric; names/tags are not admission identity. Older multi-account terms below
+are historical schema/design language, not authority to restore account-marker
+gates. No scheduler/Discord migration or runtime acceptance follows from this
+documentation. See [current policy](../docs/attack-a-decision-b.md#instance-centric-owner-policy).
+
+## Reconciled later product sequence
+
+This remains the canonical deferred architecture, not a second current roadmap.
+Current offline completion, open native/live gates and the finite Home acceptance
+contract are in [CURRENT.md](../docs/architecture/CURRENT.md). After those gates,
+separately adopted milestones may add Home progression (upgrades, laboratory and
+hero work), Builder Base, gameplay integration with the durable multi-account
+foundation, then complete local product operations; optional remote/fleet features
+remain later. Preserve the detailed donor seals and migration contracts below.
+
+Roadmap research is **CHANGES_REQUESTED**, even though research cards are done:
+RR-I1 `t_82ffc82f`, `RR_I1_OWNER_BRIEF.md`, records six corrections before research
+acceptance. Its 14 proposed slices are not dispatched implementation cards. The
+conditional sequence is capacity planner/exact verifier → bounded Saved Recipes;
+read-only Builder observation may proceed independently after its own accepted
+foundation. Generic mixed roster/scrolling precedes heroes/abilities/spells/support/
+strategies. Direct editing and Builder combat remain research gates, not fallbacks.
+Positive current-village/stage evidence is required; a timer cannot establish
+Builder Stage 2. See [unresolved reviews](production-backlog.md#unresolved-review-evidence).
+
+Historical prescriptions below are retained scoped design evidence, not immediate
+execution instructions. Candidate-specific Je/Jw/post-D ownership and completion
+constraints in CURRENT take precedence over older process-tree termination wording.
+Currency scope comes only from the [canonical spending policy](../docs/product-policy/spending.md),
+not legacy five-resource restrictions or donor behavior. Privacy follows the
+[standing policy](../docs/governance/development-workflow.md#3a--image-privacy-and-provider-policy);
+no historical diagnostic paragraph grants a new full-frame or provider exception.
 
 ## Target outcome
 
@@ -198,9 +236,9 @@ Each intent executes through:
 9. positive postcondition;
 10. outcome audit and safe-screen recovery.
 
-The owner does not operate these gates by editing files. One-time Setup records explicit non-premium resource authorizations through a command/UI. Starting Run authorizes that bounded run; Stop revokes further transaction admission immediately and performs safe cleanup. Development-only `--owner-approved` flags do not define the release UX.
+The owner does not operate these gates by editing files. Future Setup/Run controls must apply the [standing currency policy](../docs/product-policy/spending.md) separately from capability/executor/account/run admission. Stop revokes further transaction admission and performs only authorized safe cleanup. Development-only `--owner-approved` flags do not define release UX or grant present authority.
 
-The typed resource allowlist distinguishes `HOME_GOLD`, `HOME_ELIXIR`, `HOME_DARK_ELIXIR`, `BUILDER_GOLD`, and `BUILDER_ELIXIR`. Each resource type requires independent explicit owner enablement and a separately promoted transaction executor. First-release `HOME_DARK_ELIXIR` scope is limited to hero upgrades and laboratory research; pet upgrades remain deferred because their ordering is meta-dependent, and the current slice has no Dark Elixir executor. `GEMS`, real-money purchases, purchase fallbacks, reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion, and CAPTCHA handling remain unimplemented and unauthorized. Donations and the daily resource cart are separate post-production slices in `research/production-backlog.md`, never recovery side effects.
+Legacy typed-resource enumerations describe historical implementation scope, not the current currency permission. Dark Elixir hero upgrades and laboratory research remain later product capabilities needing separately promoted executors; pets remain deferred. Reward/chest/cart claims, social/clan/war/donation, Supercell account switching, evasion and CAPTCHA handling are not authorized by currency approval. Donations and the daily cart remain separate backlog slices, never recovery side effects.
 
 ### Observability and diagnostic mode
 

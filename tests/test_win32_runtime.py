@@ -527,9 +527,10 @@ def test_native_unique_mutex_and_harmless_suspended_job_process_smoke() -> None:
     assert api.close_handle(duplicate) is True
     lease.release()
 
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    executable = os.path.join(system_root, "System32", "cmd.exe")
-    command_line = f'"{executable}" /d /c exit 0'
+    import sys
+    import subprocess
+    executable = sys.executable
+    command_line = subprocess.list2cmdline([executable, '-c', 'pass'])
     job = runtime.create_job()
     process: object | None = None
     thread: object | None = None

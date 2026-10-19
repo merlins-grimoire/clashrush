@@ -1,5 +1,11 @@
 # Discord fleet control and due-account scheduling plan
 
+Current owner-policy overlay (`t_4b4717dd`): future team/control/scheduler routing
+uses stable registered instance/slot identity; names/tags are optional private
+metadata, not admission gates. The account-key schema below is historical design
+evidence, not an implemented or reviewed instance migration. See
+[current policy](../docs/attack-a-decision-b.md#instance-centric-owner-policy). This adds no Discord authority.
+
 ## Purpose
 
 Add Discord control after the local runner has stable Setup, Run, Pause, Resume, Stop, and Status operations. Discord is a remote control and reporting adapter; it never owns BlueStacks processes, chooses gameplay actions, or becomes the scheduler source of truth.

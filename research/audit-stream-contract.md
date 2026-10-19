@@ -1,3 +1,7 @@
+> **Status: UNRESOLVED / OWNER-PARKED (DBG2).**
+> Not accepted finalization authority.
+> See [CURRENT.md](../docs/architecture/CURRENT.md). No implementation is authorized by this document.
+
 # Durable audit-stream contract
 
 ## Scope and donor decision

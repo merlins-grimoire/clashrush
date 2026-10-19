@@ -109,34 +109,35 @@ def discover_card_boxes(bar: np.ndarray, geometry: CardGeometry=CardGeometry()):
     if not math.isfinite(spread) or spread<=0: raise DeploymentError('BAR_UNPROVED')
     profile=(profile-profile.min())/spread
     peaks=find_peaks(profile,height=geometry.peak_height,distance=geometry.peak_distance)[0]
+    # A complete frame edge must be vertically contained by the declared bar
+    # viewport. Full-height crop/chrome/scenery edges are clipping witnesses,
+    # not candidate card boundaries.
+    peaks=np.asarray([value for value in peaks
+                      if not edges[0,int(value)] and not edges[-1,int(value)]],dtype=np.int64)
     if len(peaks)<2 or len(peaks)>64: raise DeploymentError('BAR_UNPROVED')
-    # CoC_Bot's donor grammar alternates card-width spans with one of two
-    # observed inter-card gap classes. Selecting the longest complete run keeps
-    # a strong translucent-bar/scenery edge outside the card sequence instead
-    # of pairing it as a phantom first card.
-    def near(value,target,tolerance): return abs(value-target)<=tolerance
-    gaps=(.007,.015); gap_tolerance=.01
-    runs=[]
-    for start in range(len(peaks)-1):
-        left,right=int(peaks[start]),int(peaks[start+1])
-        if not near((right-left)/w,geometry.card_width,geometry.width_tolerance):
-            continue
-        boxes=[(left,0,right,h)]; index=start+1
-        while index+2<len(peaks):
-            gap=(int(peaks[index+1])-int(peaks[index]))/w
-            next_left,next_right=int(peaks[index+1]),int(peaks[index+2])
-            if (not any(near(gap,expected,gap_tolerance) for expected in gaps)
-                    or not near((next_right-next_left)/w,geometry.card_width,geometry.width_tolerance)):
-                break
-            boxes.append((next_left,0,next_right,h)); index+=2
-        runs.append(tuple(boxes))
-    if not runs: raise DeploymentError('BAR_UNPROVED')
-    longest=max(map(len,runs))
-    winners={run for run in runs if len(run)==longest}
-    if len(winners)!=1: raise DeploymentError('BAR_AMBIGUOUS')
-    boxes=winners.pop()
-    if len(boxes)>24: raise DeploymentError('BAR_UNPROVED')
-    return boxes
+    minimum=geometry.card_width-geometry.width_tolerance
+    maximum=geometry.card_width+geometry.width_tolerance
+    boxes=[]
+    for index,left in enumerate(peaks):
+        for right in peaks[index+1:]:
+            width=(int(right)-int(left))/w
+            if width>maximum: break
+            if minimum<=width<=maximum:
+                # Paired boundaries may not step across a neighboring frame edge
+                # immediately inside either endpoint. Interior artwork farther
+                # from the endpoints remains a hypothesis witness, not a split.
+                interior=[int(value) for value in peaks if int(left)<int(value)<int(right)]
+                proximity=max(geometry.peak_distance,round(.025*w))
+                if any(value-int(left)<=proximity
+                       or int(right)-value<=proximity for value in interior):
+                    continue
+                boxes.append((int(left),0,int(right),h))
+                if len(boxes)>256: raise DeploymentError('BAR_UNPROVED')
+    if not boxes: raise DeploymentError('BAR_UNPROVED')
+    # Return every width-compatible whole-frame hypothesis. Semantic frame,
+    # identity and witness ownership must reconcile the set; this layer never
+    # selects a longest run or truncates to an expected roster size.
+    return tuple(boxes)
 
 
 def classify_icon(crop, catalog: Mapping[str,tuple[np.ndarray,...]], threshold=.93, margin=.04):
@@ -148,11 +149,19 @@ def classify_icon(crop, catalog: Mapping[str,tuple[np.ndarray,...]], threshold=.
             raise DeploymentError('CATALOG_INVALID')
         best=-1.0
         for template in variants:
-            found=match_unique(crop,template,threshold)
-            if found: best=max(best,found[-1])
-        if best>=threshold: scores.append((best,identity))
+            image(template,gray=True)
+            source,needle=_gray(crop),_gray(template)
+            if needle.shape[0]>source.shape[0] or needle.shape[1]>source.shape[1]:
+                continue
+            if float(needle.std())<1: raise DeploymentError('TEMPLATE_FLAT')
+            matrix=cv2.matchTemplate(source,needle,cv2.TM_CCOEFF_NORMED)
+            if not np.isfinite(matrix).all(): raise DeploymentError('MATCH_NONFINITE')
+            best=max(best,float(matrix.max()))
+        scores.append((best,identity))
     scores.sort(reverse=True)
-    if not scores: return None
+    if scores[0][0]<threshold: return None
+    # Preserve every incompatible runner-up, including those just below the
+    # positive threshold: .94/.92 with a .04 margin is not an identity proof.
     if len(scores)>1 and scores[0][0]-scores[1][0]<margin:
         raise DeploymentError('CARD_CLASS_AMBIGUOUS')
     return scores[0][1]
@@ -185,19 +194,48 @@ def _normal_glyph(binary):
     return out>0
 
 
+def _quantity_binary(crop, threshold, minimum_component_area=1):
+    binary=(_gray(image(crop,gray=True))>=threshold).astype(np.uint8)*255
+    if minimum_component_area>1:
+        # Adapt BasePilot's bounded component-area preprocessing, without its
+        # upper-area deletion: a merged rim/glyph must remain visible and fail.
+        count,labels,stats,_=cv2.connectedComponentsWithStats(binary,connectivity=8)
+        retained=[row for row in stats[1:] if row[cv2.CC_STAT_AREA]>=minimum_component_area]
+        for label in range(1,count):
+            if stats[label,cv2.CC_STAT_AREA]<minimum_component_area:
+                x,_,width,_,_=stats[label]
+                # A speck may perturb an existing glyph, never disappear as a
+                # separate partial character between/outside complete glyphs.
+                owners=[row for row in retained if max(x,row[0])<min(x+width,row[0]+row[2])]
+                if len(owners)!=1:raise DeploymentError('QUANTITY_UNKNOWN')
+                binary[labels==label]=0
+    return binary
+
+
 def read_quantity(crop, glyphs: Mapping[str,np.ndarray], maximum: int,
-                  *, threshold: int=160, minimum_score: float=.92, margin: float=.04) -> int:
+                  *, threshold: int=160, minimum_component_area: int=1,
+                  minimum_score: float=.92, margin: float=.04) -> int:
     """Closed x[0-9]{1,3} reader; every glyph is consumed, no default value.
 
     The exact count ROI and glyph bank must be privately calibrated. A whole
     field—not an arbitrary substring—is matched. No unrestricted OCR is used.
+    Source profiles may supply bounded same-label glyph variants and a stricter
+    brightness floor/small-component policy. Defaults retain the Battle reader.
     """
     image(crop,gray=True)
     if set(glyphs)!=set('x0123456789') or type(maximum) is not int or not 0<=maximum<=999:
         raise DeploymentError('QUANTITY_POLICY_INVALID')
     if type(threshold) is not int or not 0<threshold<255: raise DeploymentError('QUANTITY_POLICY_INVALID')
+    if type(minimum_component_area) is not int or not 1<=minimum_component_area<=8:
+        raise DeploymentError('QUANTITY_POLICY_INVALID')
     finite(minimum_score,.8,1); finite(margin,.001,.2)
-    binary=(_gray(crop)>=threshold).astype(np.uint8)*255
+    binary=_quantity_binary(crop,threshold)
+    # Never erase a clipped glyph/fragment and then accept its surviving suffix.
+    if minimum_component_area>1:
+        if (np.any(binary[0]) or np.any(binary[-1])
+                or np.any(binary[:,0]) or np.any(binary[:,-1])):
+            raise DeploymentError('QUANTITY_CLIPPED')
+        binary=_quantity_binary(crop,threshold,minimum_component_area)
     active=np.any(binary>0,axis=0)
     padded=np.pad(active.astype(np.int8),(1,1))
     starts=np.flatnonzero(np.diff(padded)==1); ends=np.flatnonzero(np.diff(padded)==-1)
@@ -205,16 +243,24 @@ def read_quantity(crop, glyphs: Mapping[str,np.ndarray], maximum: int,
     # Text touching a field boundary may be clipped, so it cannot authorize input.
     if starts[0]==0 or ends[-1]==crop.shape[1] or np.any(binary[0]) or np.any(binary[-1]):
         raise DeploymentError('QUANTITY_CLIPPED')
-    bank={key:_normal_glyph((_gray(image(value,gray=True))>=threshold).astype(np.uint8)*255)
-          for key,value in glyphs.items()}
+    bank={}
+    for key,value in glyphs.items():
+        variants=value if type(value) is tuple else (value,)
+        if not 1<=len(variants)<=8:raise DeploymentError('QUANTITY_POLICY_INVALID')
+        bank[key]=tuple(_normal_glyph(_quantity_binary(v,threshold,minimum_component_area))
+                        for v in variants)
     text=''
     for left,right in zip(starts,ends):
         normal=_normal_glyph(binary[:,left:right])
         ranks=[]
-        for key,glyph in bank.items():
-            union=int(np.count_nonzero(normal|glyph))
-            score=float(np.count_nonzero(normal&glyph))/union if union else 0
-            ranks.append((score,key))
+        for key,variants in bank.items():
+            scores=[]
+            for glyph in variants:
+                union=int(np.count_nonzero(normal|glyph))
+                scores.append(float(np.count_nonzero(normal&glyph))/union if union else 0)
+            # As in classify_icon, variants compete within one label; different
+            # labels still compete with the unchanged score and margin gates.
+            ranks.append((max(scores),key))
         ranks.sort(reverse=True)
         if ranks[0][0]<minimum_score or ranks[0][0]-ranks[1][0]<margin:
             raise DeploymentError('QUANTITY_UNKNOWN')

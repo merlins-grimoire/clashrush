@@ -1,3 +1,7 @@
+> **Status: UNRESOLVED DESIGN EVIDENCE.**
+> Not HOME-readiness acceptance or implementation authority.
+> See [CURRENT.md](../docs/architecture/CURRENT.md). No implementation is authorized by this document.
+
 # R10A design: scalar-only private readiness helper
 
 Status: DESIGN ONLY; pending independent same-card review. This document does

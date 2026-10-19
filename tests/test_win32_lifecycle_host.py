@@ -771,7 +771,38 @@ def test_native_retained_identity_job_listing_and_termination_are_handle_based()
     assert kernel.calls[-1] == ("terminate", 55, 1)
 
 
+class FakeDesktopKernel:
+    def GetCurrentProcessId(self):return 321
+    def GetCurrentThreadId(self):return 7
+    def ProcessIdToSessionId(self,pid,out):
+        out._obj.value=2
+        return True
+
+
+class FakeDesktopWts:
+    def __init__(self):
+        self.state=ctypes.c_int(0);self.freed=0
+    def WTSQuerySessionInformationW(self,server,session,kind,buffer,size):
+        assert server is None and session==2 and kind==8
+        buffer._obj.value=ctypes.addressof(self.state)
+        size._obj.value=ctypes.sizeof(self.state)
+        return True
+    def WTSFreeMemory(self,buffer):self.freed+=1
+
+
 class FakeWindowUser:
+    def GetProcessWindowStation(self):return 'station'
+    def GetThreadDesktop(self,thread):return 'thread'
+    def GetUserObjectInformationW(self,handle,kind,buffer,size,needed):
+        if kind==2:
+            buffer.value='WinSta0' if handle=='station' else 'Default'
+            needed._obj.value=(len(buffer.value)+1)*ctypes.sizeof(ctypes.c_wchar)
+        else:
+            assert kind==6
+            buffer._obj.value=1
+            needed._obj.value=ctypes.sizeof(ctypes.wintypes.BOOL)
+        return True
+
     def EnumWindows(self, callback, lparam):
         return callback(10, lparam) and callback(20, lparam)
 
@@ -821,9 +852,20 @@ class FakeWindowUser:
         return False
 
 
+def test_unlocked_probe_must_not_switch_or_repair_desktop() -> None:
+    api=object.__new__(NativeLifecycleApi)
+    api._user32=FakeWindowUser()
+    api._kernel32=FakeDesktopKernel();api._wts=FakeDesktopWts()
+    calls=[]
+    api._user32.SwitchDesktop=lambda desktop:calls.append(desktop) or True
+    assert api.interactive_desktop_unlocked() is True
+    assert calls==[]
+
+
 def test_native_window_and_unlocked_desktop_facts_are_exact() -> None:
     api = object.__new__(NativeLifecycleApi)
     api._user32 = FakeWindowUser()
+    api._kernel32=FakeDesktopKernel();api._wts=FakeDesktopWts()
 
     assert api.enum_top_level_windows() == (10, 20)
     assert api.enum_child_windows(10) == (11, 12)
@@ -835,6 +877,30 @@ def test_native_window_and_unlocked_desktop_facts_are_exact() -> None:
     assert api.client_size(11) == (1280, 720)
     assert api.interactive_desktop_unlocked() is True
     assert api.is_iconic(10) is False
+    assert api.input_desktop_identity()==(2,7,'WinSta0','Default')
+    assert api._wts.freed==2
+
+
+@pytest.mark.parametrize('fault',['disconnected','locked','not_receiving','bad_session','bad_name','close'])
+def test_readonly_desktop_query_fails_closed_and_closes_its_handle(fault):
+    api=object.__new__(NativeLifecycleApi)
+    api._user32=FakeWindowUser();api._kernel32=FakeDesktopKernel();api._wts=FakeDesktopWts()
+    query=api._user32.GetUserObjectInformationW
+    def changed(handle,kind,buffer,size,needed):
+        ok=query(handle,kind,buffer,size,needed)
+        if fault=='locked' and handle=='desktop' and kind==2:
+            buffer.value='Winlogon';needed._obj.value=18
+        if fault=='not_receiving' and kind==6:buffer._obj.value=0
+        if fault=='bad_name' and kind==2:needed._obj.value=0
+        return ok
+    api._user32.GetUserObjectInformationW=changed
+    if fault=='disconnected':api._wts.state.value=4
+    if fault=='bad_session':api._kernel32.ProcessIdToSessionId=lambda *a:False
+    closed=[]
+    api._user32.CloseDesktop=lambda handle:closed.append(handle) or fault!='close'
+    assert api.interactive_desktop_unlocked() is False
+    assert closed==([] if fault in ('disconnected','bad_session') else ['desktop'])
+    assert api._wts.freed==(0 if fault=='bad_session' else 1)
 
 
 class EmptyOrFailingChildWindowUser:

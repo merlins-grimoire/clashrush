@@ -87,6 +87,106 @@ class LocalAuditLog:
         )
 
 
+class PolicyPlayerView:
+    """W's read-only view of P's player; no creator, stop or Job mutation method.
+
+    Retains only query/wait player and query-only Je duplicates. Reuses the
+    existing exact family/HWND validator without its legacy health capture.
+    Clock expiry blocks capture, not same-run live-ownership release checks.
+    """
+    def __init__(self, *, host, offer, run, enabled, clock=time.monotonic):
+        from .mvp_process_topology import acknowledge_player_handoff
+        from .mvp_session_authority import RunBindingV3
+        if (type(run) is not RunBindingV3 or run.run_nonce!=offer.run_nonce
+                or run.generation!=offer.generation or not callable(enabled) or not callable(clock)):
+            raise RuntimeSafetyError('policy player run binding invalid')
+        acknowledge_player_handoff(host,offer)
+        self.host=host;self.offer=offer;self.run=run;self.enabled=enabled;self.clock=clock
+        self.binding=None;self.desktop=None;self.revoked=False;self.closed=False;self.owner=None
+        self.last=run.started_ns
+
+    def _budget(self):
+        from .mvp_policy_evidence import nanoseconds
+        now=nanoseconds(self.clock())
+        if (self.closed or self.revoked or now<self.last or now>=self.run.deadline_ns
+                or self.enabled() is not True):
+            raise RuntimeSafetyError('policy player deadline or authority unavailable')
+        after=nanoseconds(self.clock())
+        if after<now or after>=self.run.deadline_ns:
+            raise RuntimeSafetyError('policy player deadline or authority unavailable')
+        self.last=after
+
+    def bind(self, expected_title):
+        from .mvp_deployment_input import InputOwner
+        from .mvp_session_authority import canonical_v3,digest_v3
+        self._budget()
+        if self.binding is not None:raise RuntimeSafetyError('policy player rebind denied')
+        members=self.host.stable_job_members(self.offer.remote_player_job_query)
+        try:
+            self.binding=self.host.bind_exact_window(self.offer.player,expected_title,members)
+        finally:
+            members.close()
+        self._budget()
+        if type(self.binding) is not PlayerBinding:raise RuntimeSafetyError('policy player window unavailable')
+        self.desktop=self.host._api.input_desktop_identity()
+        self.require_binding(self.binding)
+        digest=digest_v3(canonical_v3({'schema':3,'desktop':self.desktop,
+            'worker':[self.offer.worker.pid,self.offer.worker.creation_time_100ns],
+            'run_nonce':self.run.run_nonce,'generation':self.run.generation}))
+        self.owner=InputOwner(self.run.run_nonce,self.run.generation,self.run.binding_digest,digest)
+        return self.binding
+
+    def require_binding(self, binding):
+        try:
+            if (self.closed or self.revoked or self.binding is None or binding is not self.binding
+                    or self.host.identity_from_handle(self.host.current_process_handle(),
+                        self.host.current_process_id())!=self.offer.worker
+                    or self.host.identity_from_handle(self.offer.remote_player_handle,
+                        self.offer.player.pid)!=self.offer.player
+                    or self.host.wait_process(self.offer.remote_player_handle,0) is not False
+                    or self.host._api.input_desktop_identity()!=self.desktop
+                    or self.host._api.foreground_root()!=binding.root_hwnd):
+                raise RuntimeSafetyError('policy live input owner unavailable')
+            self.host._require_capture_binding(binding,self.offer.remote_player_job_query)
+        except BaseException:
+            self.revoked=True
+            raise
+
+    def ownership_live(self):
+        try:
+            self.require_binding(self.binding)
+            return True
+        except BaseException:return False
+
+    def capture_bgr(self):
+        self._budget()
+        self.require_binding(self.binding)
+        self._budget()  # all fallible/read-only ownership work precedes capture
+        width,height,raw=self.host.capture_bgra(self.binding,before_capture=self._budget)
+        frame=None
+        try:
+            self._budget()
+            if (width,height)!=(self.binding.width,self.binding.height):
+                raise RuntimeSafetyError('policy capture geometry changed')
+            # Native PrintWindow is BGRX, not RGBA. Pixels remain memory-only.
+            frame=np.frombuffer(raw,dtype=np.uint8).reshape(height,width,4)[:,:,:3].copy()
+            self._budget()
+            return frame
+        except BaseException:
+            frame=None
+            raise
+        finally:
+            raw=None
+
+    def close(self):
+        if self.closed:return
+        self.closed=True;self.revoked=True
+        try:
+            self.host.close_handle(self.offer.remote_player_handle)
+        finally:
+            self.host.close_handle(self.offer.remote_player_job_query)
+
+
 class DurableSessionAudit:
     """Map the retained LocalMvpBot intent/outcome seam into durable phases."""
 
@@ -942,6 +1042,8 @@ def run_native_mvp_visit(
     if type(readiness_only) is not bool:
         raise RuntimeSafetyError("readiness mode is malformed")
     project = Path(project_root).resolve(strict=True)
+    from .mvp_session_authority import require_legacy_command
+    require_legacy_command(project / 'var' / 'mvp-session.sqlite3')
     deployment_profile = None
     deployment_lease = None
     if not readiness_only:

@@ -39,7 +39,7 @@ def test_owned_runner_distinct_failure_reasons(stage, expected):
         owner.retained_process = 21
         owner.assigned = owner.resumed = True
         return Process()
-    result = job.run_owned_diagnostic_child(["generic"], timeout=1,
+    result = job.run_owned_diagnostic_child([sys.executable], timeout=1,
         runtime_factory=lambda: runtime, popen_factory=popen, installer=lambda: None)
     assert result.reason.value == expected
     assert "private-marker" not in repr(result)
@@ -58,7 +58,7 @@ def test_cleanup_reason_structurally_preserves_timeout():
     def popen(*a, **k):
         job._spawn_owner.owner.retained_process = 21
         return Process()
-    result = job.run_owned_diagnostic_child(["generic"], timeout=1,
+    result = job.run_owned_diagnostic_child([sys.executable], timeout=1,
         runtime_factory=lambda: runtime, popen_factory=popen, installer=lambda: None)
     assert result.reason.value == "PARENT_CLEANUP"
     assert result.prior_reason.value == "PARENT_TIMEOUT"
@@ -76,7 +76,7 @@ def test_parent_cleanup_keeps_exact_child_failure_structurally():
     def popen(*a, **k):
         job._spawn_owner.owner.retained_process = 21
         return Process()
-    result = job.run_owned_diagnostic_child(["generic"], timeout=1,
+    result = job.run_owned_diagnostic_child([sys.executable], timeout=1,
         runtime_factory=lambda: runtime, popen_factory=popen, installer=lambda: None)
     assert result.reason is job.DiagnosticParentReason.CLEANUP
     assert result.prior_reason is StartupReason.GEOMETRY_BINDING

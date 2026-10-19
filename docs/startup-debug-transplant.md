@@ -1,3 +1,7 @@
+> **Status: SCOPED HISTORICAL EXCEPTION.**
+> Its local full-frame opt-in does not authorize ordinary capture retention or future tasks.
+> See [CURRENT.md](architecture/CURRENT.md). No implementation is authorized by this document.
+
 # Bounded startup diagnostic transplant
 
 ## Scope and immutable donor inventory

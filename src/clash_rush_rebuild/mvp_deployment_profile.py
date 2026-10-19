@@ -14,24 +14,88 @@ import re
 import stat
 import struct
 import traceback
-from types import MappingProxyType
+from dataclasses import dataclass
+from collections.abc import Mapping
 
 import cv2
 import numpy as np
 
 from .mvp_deployment import (
     Card, CardKind, CardState, Spell, Page, Observation, Screen, Point, Target,
-    TargetKind, Intervention, DeploymentError, Policy, finite,
+    TargetKind, Intervention, DeploymentError, Policy, finite, CompiledDeploymentPlan,
+    DeploymentDisposition, SourceInventoryEntry,
 )
 from .mvp_deployment_vision import (
     image, roi, CardGeometry, discover_card_boxes, classify_icon, matches,
-    match_unique, read_quantity, exact_grey, candidate_ring, validated_ground,
+    match_unique, read_quantity, exact_grey, candidate_ring, validated_ground, _normal_glyph, _gray,
+    _quantity_binary,
 )
 
 
 PROFILE_NAME='private/deployment/profile.json'
 _HEX=re.compile(r'[0-9a-f]{64}')
 _KEY=re.compile(r'[a-z0-9][a-z0-9_.-]{0,63}')
+
+
+class FrozenMap(Mapping):
+    """Tuple-backed mapping: no mutable dictionary remains authoritative."""
+    __slots__=('items_tuple',)
+    def __init__(self,items): object.__setattr__(self,'items_tuple',tuple(items))
+    def __setattr__(self,_name,_value): raise TypeError('frozen mapping')
+    def __getitem__(self,key):
+        for candidate,value in self.items_tuple:
+            if candidate==key:return value
+        raise KeyError(key)
+    def __iter__(self): return (key for key,_ in self.items_tuple)
+    def __len__(self): return len(self.items_tuple)
+
+
+def _freeze(value):
+    if type(value) is dict:return FrozenMap((key,_freeze(item)) for key,item in value.items())
+    if type(value) is list:return tuple(_freeze(item) for item in value)
+    if type(value) in (str,int,float,bool) or value is None:return value
+    raise DeploymentError('PROFILE_SCHEMA')
+
+
+@dataclass(frozen=True,slots=True)
+class _Flags:
+    writeable: bool=False
+
+
+@dataclass(frozen=True,slots=True)
+class ImmutableTemplate:
+    """Authority-bearing pixels stored only as immutable bytes and scalars."""
+    payload: bytes
+    shape: tuple[int,...]
+    flags: _Flags=_Flags()
+    @classmethod
+    def from_array(cls,value):
+        array=np.ascontiguousarray(image(value,gray=True))
+        return cls(array.tobytes(),tuple(int(v) for v in array.shape))
+    def array(self):
+        return np.frombuffer(self.payload,dtype=np.uint8).reshape(self.shape)
+    def setflags(self,**_):
+        raise ValueError('immutable template authority')
+    def __array__(self,dtype=None,copy=None):
+        array=self.array()
+        if dtype is not None:array=array.astype(dtype,copy=True)
+        elif copy is True:array=array.copy()
+        return array
+
+
+def _template(value):
+    return value.array() if type(value) is ImmutableTemplate else value
+
+
+def _source_absent(region,assets,keys,maximum_pixel_delta):
+    # Whole-template alternatives, never a pixelwise union or an area average.
+    for key in keys:
+        template=_template(assets[key])
+        if (region.shape==template.shape
+                and int(cv2.absdiff(region,template).max())<=maximum_pixel_delta
+                and match_unique(region,template,.93) is not None):
+            return True
+    return False
 
 
 def _exact(mapping, keys):
@@ -157,20 +221,37 @@ def _validate_locator(value, assets):
 
 
 class DeploymentProfile:
-    """Validated detached configuration + readonly template arrays."""
+    """Validated, deeply immutable configuration and byte-backed templates."""
+    __slots__=('data','assets','digest','plan','_sealed')
+    def __setattr__(self,name,value):
+        if getattr(self,'_sealed',False): raise TypeError('sealed deployment profile')
+        object.__setattr__(self,name,value)
     def __init__(self,data,assets,digest):
-        # Rebuild independent JSON values. Do not retain a caller's mutable mapping.
-        self.data=json.loads(json.dumps(data,allow_nan=False))
-        self.assets=MappingProxyType({k:np.array(v,copy=True) for k,v in assets.items()})
-        for v in self.assets.values(): v.setflags(write=False)
+        # Validate detached mutable working values, then discard them completely.
+        detached=json.loads(json.dumps(data,allow_nan=False))
+        decoded={k:np.array(v,copy=True) for k,v in assets.items()}
+        for value in decoded.values():
+            image(value,gray=True)
+            if float(value.std())<1:raise DeploymentError('PROFILE_ASSET_INVALID')
+        self.data=detached; self.assets=decoded
         self.digest=digest
         self.validate()
+        frozen_data=_freeze(detached)
+        frozen_assets=FrozenMap((key,ImmutableTemplate.from_array(value))
+                                for key,value in decoded.items())
+        self.data=frozen_data; self.assets=frozen_assets
+        self._sealed=True
     def validate(self):
         d=self.data
         if type(self.digest) is not str or not _HEX.fullmatch(self.digest):raise DeploymentError('PROFILE_SCHEMA')
-        _exact(d,('schema','profile_id','reviewed_tree','runtime_reviewed','size','assets','screens','controls',
-                  'bar','cards','glyphs','targets','ground','view_anchors','blockers'))
-        if type(d['schema']) is not int or d['schema']!=1 or type(d['runtime_reviewed']) is not bool:
+        base_keys=('schema','profile_id','reviewed_tree','runtime_reviewed','size','assets','screens','controls',
+                   'bar','cards','plan','glyphs','targets','ground','view_anchors','blockers')
+        if set(d) not in (set(base_keys), set(base_keys) | {'source_inventory','dispositions'},
+                          set(base_keys) | {'source_inventory','dispositions','source_layout'}):
+            raise DeploymentError('PROFILE_SCHEMA')
+        if type(d['schema']) is not int or d['schema'] not in (2,3) or type(d['runtime_reviewed']) is not bool:
+            raise DeploymentError('PROFILE_SCHEMA')
+        if (d['schema']==3) != ('source_layout' in d):
             raise DeploymentError('PROFILE_SCHEMA')
         if type(d['profile_id']) is not str or not _KEY.fullmatch(d['profile_id']): raise DeploymentError('PROFILE_SCHEMA')
         if type(d['reviewed_tree']) is not str or not re.fullmatch(r'[0-9a-f]{40}',d['reviewed_tree']): raise DeploymentError('PROFILE_SCHEMA')
@@ -184,27 +265,40 @@ class DeploymentProfile:
             if not _KEY.fullmatch(k) or not re.fullmatch(r'[a-zA-Z0-9_.-]+\.png',entry['file']) or not _HEX.fullmatch(entry['sha256']):
                 raise DeploymentError('PROFILE_SCHEMA')
         required={s.value for s in Screen if s is not Screen.UNKNOWN}
-        if type(d['screens']) is not dict or set(d['screens'])!=required: raise DeploymentError('PROFILE_SCHEMA')
+        if (type(d['screens']) is not dict
+                or set(d['screens']) != required):
+            raise DeploymentError('PROFILE_SCHEMA')
         for screen,rules in d['screens'].items():
             if type(rules) is not list or not 2<=len(rules)<=8: raise DeploymentError('PROFILE_SCHEMA')
             for rule in rules: _validate_locator(rule,self.assets)
             if len({r['template'] for r in rules})!=len(rules): raise DeploymentError('PROFILE_SCHEMA')
         required_controls={'HOME':{'attack'},'MATCH':{'find_match'},'ARMY':{'army_attack'},
                            'BATTLE':{'end_battle'},'END_CONFIRM':{'confirm_end'},'RESULT':{'return_home'}}
-        if set(d['controls'])!=set(required_controls): raise DeploymentError('PROFILE_SCHEMA')
-        for screen,verbs in required_controls.items():
+        expected_controls = required_controls
+        if set(d['controls'])!=set(expected_controls): raise DeploymentError('PROFILE_SCHEMA')
+        for screen,verbs in expected_controls.items():
             if set(d['controls'][screen])!=verbs: raise DeploymentError('PROFILE_SCHEMA')
             for rule in d['controls'][screen].values(): _validate_locator(rule,self.assets)
-        b=d['bar']; _exact(b,('roi','left_edge','right_edge','geometry'))
+        navigation=[d['controls'][s][v] for s,v in
+                    (('HOME','attack'),('MATCH','find_match'),('ARMY','army_attack'))]
+        for i,left in enumerate(navigation if d['schema']==3 else ()):
+            if any(np.array_equal(_gray(self.assets[left['template']]),
+                                  _gray(self.assets[right['template']])) for right in navigation[i+1:]):
+                raise DeploymentError('PROFILE_CONTROL_ALIAS')
+        b=d['bar']; _exact(b,('roi','left_edge','right_edge','frame','geometry'))
         # Validate bar rectangle through the same bounded locator grammar.
         _validate_locator({'template':next(iter(self.assets)),'roi':b['roi']},self.assets)
-        _validate_locator(b['left_edge'],self.assets); _validate_locator(b['right_edge'],self.assets)
+        for edge in (b['left_edge'],b['right_edge']):
+            _exact(edge,('end','continues'))
+            _validate_locator(edge['end'],self.assets); _validate_locator(edge['continues'],self.assets)
+        if type(b['frame']) is not list or len(b['frame'])!=4: raise DeploymentError('PROFILE_SCHEMA')
+        for locator in b['frame']:_validate_locator(locator,self.assets)
         _exact(b['geometry'],('card_width','width_tolerance','peak_height','peak_distance'))
         CardGeometry(**b['geometry'])
         if type(d['cards']) is not list or not 1<=len(d['cards'])<=48: raise DeploymentError('PROFILE_SCHEMA')
         seen=set()
         for c in d['cards']:
-            _exact(c,('identity','kind','spell','capacity','icons','icon_roi','count_roi','available','depleted','deployed','selected'))
+            _exact(c,('identity','kind','spell','capacity','icons','icon_roi','count_roi','available','depleted','deployed','selected','state_rois'))
             if not _KEY.fullmatch(c['identity']) or c['identity'] in seen: raise DeploymentError('PROFILE_SCHEMA')
             seen.add(c['identity'])
             kind,spell=CardKind(c['kind']),Spell(c['spell'])
@@ -222,8 +316,73 @@ class DeploymentProfile:
                 raise DeploymentError('PROFILE_ASSET_MISSING')
             for name in ('icon_roi','count_roi'):
                 _validate_locator({'template':c['icons'][0],'roi':c[name]},self.assets)
+            if type(c['state_rois']) is not dict or set(c['state_rois'])!={'available','depleted','deployed','selected'}:
+                raise DeploymentError('PROFILE_SCHEMA')
+            for name,box in c['state_rois'].items():
+                marker=(c[name] or c['icons']) [0]
+                _validate_locator({'template':marker,'roi':box},self.assets)
+            semantic=[(name,key) for name in ('available','depleted','deployed','selected')
+                      for key in c[name]]
+            for index,(name,key) in enumerate(semantic):
+                if any(name!=other and np.array_equal(self.assets[key],self.assets[other_key])
+                       for other,other_key in semantic[index+1:]):
+                    raise DeploymentError('PROFILE_SCHEMA')
+        if len({tuple(c['icon_roi']) for c in d['cards']})!=1 or len({tuple(c['count_roi']) for c in d['cards']})!=1:
+            raise DeploymentError('PROFILE_SCHEMA')
+        plan=d['plan']; _exact(plan,('layout','viewport_limit','roster'))
+        if plan['layout']!='SINGLE_PAGE' or type(plan['roster']) is not list:
+            raise DeploymentError('PROFILE_SCHEMA')
+        definitions={c['identity']:c for c in d['cards']}
+        compiled=[]
+        for entry in plan['roster']:
+            _exact(entry,('identity','initial_quantity'))
+            identity=entry['identity']
+            if identity not in definitions:raise DeploymentError('PROFILE_SCHEMA')
+            spec=definitions[identity]; quantity=entry['initial_quantity']
+            if type(quantity) is not int or not 1<=quantity<=spec['capacity']:
+                raise DeploymentError('PROFILE_SCHEMA')
+            compiled.append((identity,CardKind(spec['kind']),Spell(spec['spell']),quantity))
+        source_inventory=()
+        if 'source_inventory' in d:
+            if type(d['source_inventory']) is not list or not 1<=len(d['source_inventory'])<=48:
+                raise DeploymentError('PROFILE_SCHEMA')
+            values=[]
+            for entry in d['source_inventory']:
+                _exact(entry,('identity','category','kind','spell','quantity'))
+                values.append(SourceInventoryEntry(entry['identity'],entry['category'],
+                                                   CardKind(entry['kind']),Spell(entry['spell']),
+                                                   entry['quantity'],CardState.AVAILABLE if d['schema']==3 else None))
+            source_inventory=tuple(values)
+        dispositions=()
+        if 'dispositions' in d:
+            if type(d['dispositions']) is not list:
+                raise DeploymentError('PROFILE_SCHEMA')
+            items=[]
+            for entry in d['dispositions']:
+                _exact(entry,('identity','disposition'))
+                items.append((entry['identity'],DeploymentDisposition(entry['disposition'])))
+            dispositions=tuple(items)
+        self.plan=CompiledDeploymentPlan(tuple(compiled),plan['viewport_limit'],
+                                         dispositions=dispositions,
+                                         source_inventory=source_inventory)
+        if d['schema']==3:
+            self._validate_source()
+            layout=d['source_layout']
+            assets_digest=hashlib.sha256(b''.join(
+                key.encode()+np.ascontiguousarray(image(self.assets[key],gray=True)).tobytes()
+                for key in sorted(self.assets))).hexdigest()
+            self.plan=CompiledDeploymentPlan(tuple(compiled),plan['viewport_limit'],
+                dispositions=dispositions,source_inventory=source_inventory,
+                source_categories=tuple((c['category'],c['state']) for c in layout['categories']),
+                source_context=(self.digest,d['reviewed_tree'],assets_digest,layout['build'],layout['mode']),
+                match_entry_cost=layout['match']['expected_cost'],
+                allow_empty_support=layout.get('allow_empty_support',False))
         if set(d['glyphs'])!=set('x0123456789') or any(k not in self.assets for k in d['glyphs'].values()):
             raise DeploymentError('PROFILE_ASSET_MISSING')
+        normalized=[_normal_glyph((_gray(self.assets[d['glyphs'][key]])>=160).astype(np.uint8)*255)
+                    for key in 'x0123456789']
+        if any(np.array_equal(left,right) for index,left in enumerate(normalized)
+               for right in normalized[index+1:]):raise DeploymentError('PROFILE_SCHEMA')
         if type(d['targets']) is not list or len(d['targets'])>32: raise DeploymentError('PROFILE_SCHEMA')
         for rule in d['targets']:
             _exact(rule,('kind','locator','required_context','excluded_context','context_radius'))
@@ -253,6 +412,186 @@ class DeploymentProfile:
             for v,hi in zip(bound,(179,255,255)):
                 if type(v) is not int or not 0<=v<=hi:raise DeploymentError('PROFILE_SCHEMA')
 
+    def _validate_source(self):
+        d=self.data; layout=d['source_layout']
+        # The Battle witness grammar requires one identity owner for every
+        # icon/state occurrence. Reject impossible packs before match entry.
+        for index,left in enumerate(d['cards']):
+            left_keys=[k for role in ('icons','available','depleted','deployed','selected') for k in left[role]]
+            for right in d['cards'][index+1:]:
+                right_keys=[k for role in ('icons','available','depleted','deployed','selected') for k in right[role]]
+                if any(np.array_equal(_gray(self.assets[a]),_gray(self.assets[b]))
+                       for a in left_keys for b in right_keys):
+                    raise DeploymentError('PROFILE_AMBIGUOUS')
+        keys=('build','mode','context','match','categories','entries','empty','available','selected','vacant',
+              'icon_roi','count_roi','state_roi')
+        _exact(layout,keys+tuple(k for k in ('quantity','allow_empty_support') if k in layout))
+        if type(layout.get('allow_empty_support',False)) is not bool:
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        if 'quantity' in layout:
+            quantity=layout['quantity']
+            _exact(quantity,('threshold','minimum_component_area','glyphs'))
+            if (type(quantity['threshold']) is not int or not 160<=quantity['threshold']<255
+                    or type(quantity['minimum_component_area']) is not int
+                    or not 1<=quantity['minimum_component_area']<=8):
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+            _exact(quantity['glyphs'],'x0123456789')
+            normalized=[]
+            for symbol,variants in quantity['glyphs'].items():
+                if (type(variants) is not list or not 1<=len(variants)<=8
+                        or any(type(key) is not str or key not in self.assets for key in variants)):
+                    raise DeploymentError('PROFILE_ASSET_MISSING')
+                for key in variants:
+                    glyph=_normal_glyph(_quantity_binary(self.assets[key],quantity['threshold'],
+                                                        quantity['minimum_component_area']))
+                    if any(other!=symbol and np.array_equal(glyph,previous)
+                           for other,previous in normalized):raise DeploymentError('PROFILE_AMBIGUOUS')
+                    normalized.append((symbol,glyph))
+        _exact(layout['context'],('source',))
+        match=layout['match']
+        _exact(match,('normal','ranked','cost','expected_cost'))
+        if type(match['expected_cost']) is not int or not 1<=match['expected_cost']<=1000000:
+            raise DeploymentError('PROFILE_MATCH_INVALID')
+        for role in ('normal','ranked','cost'):_validate_locator(match[role],self.assets)
+        match_art=[_gray(self.assets[match[role]['template']]) for role in ('normal','ranked','cost')]
+        if any(np.array_equal(a,b) for i,a in enumerate(match_art) for b in match_art[i+1:]):
+            raise DeploymentError('PROFILE_MATCH_INVALID')
+        box=match['cost']['roi']; w,h=d['size']
+        if match_art[2].shape!=(int(box[3]*h)-int(box[1]*h),int(box[2]*w)-int(box[0]*w)):
+            raise DeploymentError('PROFILE_MATCH_INVALID')
+        for locator in layout['context'].values():_validate_locator(locator,self.assets)
+        context_art=[_gray(self.assets[r['template']]) for r in layout['context'].values()]
+        if any(np.array_equal(a,b) for i,a in enumerate(context_art) for b in context_art[i+1:]):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        if (type(layout['build']) is not str or not _KEY.fullmatch(layout['build'])
+                or layout['mode']!='REGULAR_MULTIPLAYER'
+                or 'ARMY' not in d['screens'] or 'ARMY' not in d['controls']):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        categories=layout['categories']
+        if (type(categories) is not list or
+                [c.get('category') for c in categories]!=['ordinary','hero','spell','clan','siege']):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        geometry=any('geometry' in c for c in categories)
+        if geometry and not all('geometry' in c for c in categories):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        for c in categories:
+            keys=('category','state','header','status','complete','end','continues','slots')
+            _exact(c,keys+tuple(k for k in ('empty_status','geometry') if k in c))
+            if 'empty_status' in c:
+                if c['category'] not in ('ordinary','hero','spell') or c['state']!='POPULATED':
+                    raise DeploymentError('PROFILE_SOURCE_INVALID')
+                _validate_locator(c['empty_status'],self.assets)
+                if np.array_equal(self.assets[c['status']['template']],self.assets[c['empty_status']['template']]):
+                    raise DeploymentError('PROFILE_SOURCE_INVALID')
+            if c['state'] not in ('POPULATED','EMPTY','LOCKED'):
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+            for name in ('header','status','complete','end','continues'):
+                _validate_locator(c[name],self.assets)
+            if type(c['slots']) is not list or not (0 if geometry else 1)<=len(c['slots'])<=12:
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+            if geometry:self._validate_source_geometry(c)
+            for index,box in enumerate(c['slots']):
+                _validate_locator({'template':layout['empty'],'roi':box},self.assets)
+                fields=c['geometry']['fields'][index] if geometry else layout
+                vacant=self.assets.get(fields['vacant'])
+                w,h=d['size']
+                if vacant is None or vacant.shape[:2]!=(int(box[3]*h)-int(box[1]*h),int(box[2]*w)-int(box[0]*w)):
+                    raise DeploymentError('PROFILE_SOURCE_INVALID')
+        for name in ('empty','available','selected'):
+            if layout[name] not in self.assets:raise DeploymentError('PROFILE_ASSET_MISSING')
+        for name in ('icon_roi','count_roi','state_roi'):
+            _validate_locator({'template':layout['empty'],'roi':layout[name]},self.assets)
+        if type(layout['entries']) is not list or not 1<=len(layout['entries'])<=48:
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        for entry in layout['entries']:
+            _exact(entry,('identity','category','kind','spell','capacity','icons'))
+            SourceInventoryEntry(entry['identity'],entry['category'],CardKind(entry['kind']),
+                                 Spell(entry['spell']),entry['capacity'])
+            if (type(entry['icons']) is not list or not entry['icons'] or len(entry['icons'])>8
+                    or any(key not in self.assets for key in entry['icons'])):
+                raise DeploymentError('PROFILE_ASSET_MISSING')
+        expected={e.identity:e for e in self.plan.source_inventory}
+        if (len({e['identity'] for e in layout['entries']})!=len(layout['entries'])
+                or {e['identity'] for e in layout['entries']}!=set(expected)):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        for entry in layout['entries']:
+            e=expected[entry['identity']]
+            if ((entry['category'],entry['kind'],entry['spell'])!=(e.category,e.kind.value,e.spell.value)
+                    or e.quantity>entry['capacity']):raise DeploymentError('PROFILE_SOURCE_INVALID')
+        for index,left in enumerate(layout['entries']):
+            for right in layout['entries'][index+1:]:
+                if left['category']==right['category'] and any(
+                        np.array_equal(_gray(self.assets[a]),_gray(self.assets[b]))
+                        for a in left['icons'] for b in right['icons']):
+                    raise DeploymentError('PROFILE_AMBIGUOUS')
+        slots=[box for c in categories for box in c['slots']]
+        for i,a in enumerate(slots):
+            for b in slots[i+1:]:
+                if max(a[0],b[0])<min(a[2],b[2]) and max(a[1],b[1])<min(a[3],b[3]):
+                    raise DeploymentError('PROFILE_SOURCE_INVALID')
+        states=[self.assets[layout[name]] for name in ('empty','available','selected')]
+        if any(np.array_equal(a,b) for i,a in enumerate(states) for b in states[i+1:]):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        if geometry:
+            extents=[c['geometry']['extent'] for c in categories]
+            for i,a in enumerate(extents):
+                if any(max(a[0],b[0])<min(a[2],b[2]) and max(a[1],b[1])<min(a[3],b[3])
+                       for b in extents[i+1:]):raise DeploymentError('PROFILE_SOURCE_INVALID')
+
+    def _validate_source_geometry(self,category):
+        """Complete category partition; every non-card pixel has positive proof."""
+        geometry=category['geometry']
+        _exact(geometry,('extent','fields','background')+
+               tuple(k for k in ('maximum_pixel_delta',) if k in geometry))
+        delta=geometry.get('maximum_pixel_delta',0)
+        if type(delta) is not int or not 0<=delta<=16:
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        marker=self.data['source_layout']['empty']; w,h=self.data['size']
+        def rectangle(box):
+            _validate_locator({'template':marker,'roi':box},self.assets)
+            a,b,c,d=(int(v*s) for v,s in zip(box,(w,h,w,h)))
+            if a>=c or b>=d:raise DeploymentError('PROFILE_SOURCE_INVALID')
+            return a,b,c,d
+        extent=rectangle(geometry['extent'])
+        fields=geometry['fields']; background=geometry['background']
+        if (type(fields) is not list or len(fields)!=len(category['slots'])
+                or type(background) is not list or len(background)>32):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+        def absence(primary,alternatives,box):
+            if type(alternatives) is not list or len(alternatives)>7:
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+            for key in [primary]+alternatives:
+                if type(key) is not str or key not in self.assets:
+                    raise DeploymentError('PROFILE_ASSET_MISSING')
+                if self.assets[key].shape!=(box[3]-box[1],box[2]-box[0],3):
+                    raise DeploymentError('PROFILE_SOURCE_INVALID')
+        for field,slot in zip(fields,category['slots']):
+            _exact(field,('icon_roi','count_roi','state_roi','empty','available','selected','vacant')+
+                   tuple(k for k in ('vacant_alternatives',) if k in field))
+            for name in ('empty','available','selected','vacant'):
+                if type(field[name]) is not str or field[name] not in self.assets:
+                    raise DeploymentError('PROFILE_ASSET_MISSING')
+            for name in ('icon_roi','count_roi','state_roi'):
+                _validate_locator({'template':marker,'roi':field[name]},self.assets)
+            states=[self.assets[field[name]] for name in ('empty','available','selected')]
+            if any(np.array_equal(a,b) for i,a in enumerate(states) for b in states[i+1:]):
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+            absence(field['vacant'],field.get('vacant_alternatives',[]),rectangle(slot))
+        boxes=[rectangle(box) for box in category['slots']]
+        for rule in background:
+            _exact(rule,('template','roi')+tuple(k for k in ('alternatives',) if k in rule))
+            _validate_locator({k:rule[k] for k in ('template','roi')},self.assets)
+            box=rectangle(rule['roi'])
+            absence(rule['template'],rule.get('alternatives',[]),box)
+            boxes.append(box)
+        for i,(a,b,c,d) in enumerate(boxes):
+            if not (extent[0]<=a<c<=extent[2] and extent[1]<=b<d<=extent[3]):
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+            if any(max(a,e)<min(c,g) and max(b,f)<min(d,j) for e,f,g,j in boxes[i+1:]):
+                raise DeploymentError('PROFILE_SOURCE_INVALID')
+        if sum((c-a)*(d-b) for a,b,c,d in boxes)!=(extent[2]-extent[0])*(extent[3]-extent[1]):
+            raise DeploymentError('PROFILE_SOURCE_INVALID')
+
 
 def load_profile(project: Path, *, candidate_tree: str, runtime: bool=True) -> DeploymentProfile:
     raw=read_private(project,PROFILE_NAME,256*1024)
@@ -262,6 +601,8 @@ def load_profile(project: Path, *, candidate_tree: str, runtime: bool=True) -> D
             raise DeploymentError('PROFILE_NONCANONICAL')
         if data.get('reviewed_tree')!=candidate_tree or (runtime and data.get('runtime_reviewed') is not True):
             raise DeploymentError('PROFILE_NOT_ADMITTED')
+        if runtime and data.get('schema')!=3:
+            raise DeploymentError('SOURCE_PROFILE_REQUIRED')
         if type(data.get('assets')) is not dict or not 1<=len(data['assets'])<=256:raise DeploymentError('PROFILE_SCHEMA')
         assets={}; total=0
         for name,entry in data['assets'].items():
@@ -285,16 +626,56 @@ def load_profile(project: Path, *, candidate_tree: str, runtime: bool=True) -> D
     except BaseException: raise DeploymentError('PROFILE_INVALID') from None
 
 
+@dataclass(frozen=True, slots=True)
+class InstallationEvidence:
+    """Read-only adapter output. Binding identity must be the selected owned instance.
+
+    This value is not a trust source by itself. Only the composition root may
+    supply the metadata reader; profile flags/artwork never create evidence.
+    """
+    binding: object
+    package: str
+    version: str
+
+
+def require_installation(profile, binding, installed_build):
+    """Validate optional diagnostics, never mint window/UI/account authority.
+
+    Decision B removes the mandatory guest query. None means unavailable, not
+    a successful package observation. Production still supplies its owned view
+    and positively recognizes each fresh frame before any action.
+    """
+    if binding is None:
+        raise DeploymentError('WINDOW_BINDING_UNCERTAIN')
+    if installed_build is None:
+        return None
+    try:
+        if not callable(installed_build):
+            raise DeploymentError('PACKAGE_METADATA_CONFLICT')
+        evidence=installed_build(binding)
+        if evidence is None:
+            return None
+        valid=(type(evidence) is InstallationEvidence and evidence.binding is binding
+               and type(evidence.package) is str and evidence.package=='com.supercell.clashofclans'
+               and type(evidence.version) is str and evidence.version==profile.plan.source_context[3])
+    except BaseException:
+        valid=False
+    if not valid:raise DeploymentError('PACKAGE_METADATA_CONFLICT')
+    return evidence
+
+
 class FrameObserver:
     """Concrete capture→semantic observation; only detached scalars escape."""
-    def __init__(self, *, profile: DeploymentProfile, capture, monotonic, intervention, home_verified):
+    def __init__(self, *, profile: DeploymentProfile, capture, monotonic, intervention, home_verified,
+                 build_binding=None, installed_build=None):
         if type(profile) is not DeploymentProfile or not all(callable(c) for c in (capture,monotonic,intervention,home_verified)):
             raise DeploymentError('PORT_INVALID')
         self.profile=profile; self.capture=capture; self.clock=monotonic
         self.intervention=intervention; self.home_verified=home_verified
         self.sequence=0
+        self.build_binding=build_binding; self.installed_build=installed_build
     def _locate(self,frame,rule,multiple=False):
-        patch=roi(frame,rule['roi']); template=self.profile.assets[rule['template']]
+        patch=roi(frame,rule['roi']); template=_template(self.profile.assets[rule['template']])
         found=matches(patch,template,.93,maximum=16) if multiple else ()
         if not multiple:
             one=match_unique(patch,template,.93)
@@ -302,49 +683,151 @@ class FrameObserver:
         h,w=frame.shape[:2]; x0=int(rule['roi'][0]*w); y0=int(rule['roi'][1]*h)
         return tuple((Point((x0+x+tw/2)/(w-1),(y0+y+th/2)/(h-1)),score)
                      for x,y,tw,th,score in found)
-    def _any(self,card,keys):
-        return any(match_unique(card,self.profile.assets[k],.93) is not None for k in keys)
+    def _independent_occurrences(self,frame,rules):
+        # Search ROIs may overlap. The actual matched pixels must not be
+        # counted twice, even for unequal/nested or renamed templates.
+        boxes=[]; h,w=frame.shape[:2]
+        for rule in rules:
+            found=self._locate(frame,rule)
+            if len(found)!=1:raise DeploymentError('ROLE_OCCURRENCE_UNPROVED')
+            point=found[0][0]
+            th,tw=_template(self.profile.assets[rule['template']]).shape[:2]
+            x,y=round(point.x*(w-1)-tw/2),round(point.y*(h-1)-th/2)
+            box=(x,y,x+tw,y+th)
+            if any(max(x,a)<min(x+tw,c) and max(y,b)<min(y+th,e)
+                   for a,b,c,e in boxes):
+                raise DeploymentError('ROLE_OCCURRENCE_ALIASED')
+            boxes.append(box)
+
+    def _any(self,card,keys,box):
+        patch=roi(card,box)
+        return any(match_unique(patch,_template(self.profile.assets[k]),.93) is not None for k in keys)
+    def _state(self,card,spec,name):
+        if not spec[name]:return False
+        catalog={state:tuple(_template(self.profile.assets[key]) for key in spec[state])
+                 for state in ('available','depleted','deployed','selected') if spec[state]}
+        result=classify_icon(roi(card,spec['state_rois'][name]),catalog,.93,.04)
+        if result is not None and result!=name:raise DeploymentError('CARD_STATE_CONFLICT')
+        return result==name
+    @staticmethod
+    def _owns(point,box,relative):
+        x,y=point; left,top,right,bottom=box; width=right-left; height=bottom-top
+        return (left+relative[0]*width<=x<left+relative[2]*width
+                and top+relative[1]*height<=y<top+relative[3]*height)
     def _page(self,frame):
         d=self.profile.data; b=d['bar']; crop=roi(frame,b['roi'])
-        boxes=discover_card_boxes(crop,CardGeometry(**b['geometry']))
+        hypotheses=discover_card_boxes(crop,CardGeometry(**b['geometry']))
         definitions={c['identity']:c for c in d['cards']}
-        catalog={c['identity']:tuple(self.profile.assets[k] for k in c['icons']) for c in d['cards']}
+        catalog={c['identity']:tuple(_template(self.profile.assets[k]) for k in c['icons']) for c in d['cards']}
+        candidates=[]
+        for box in hypotheses:
+            x0,y0,x1,y1=box; region=crop[y0:y1,x0:x1]
+            structural=[self._any(region,(rule['template'],),rule['roi']) for rule in b['frame']]
+            if any(structural) and not all(structural): raise DeploymentError('BAR_RESIDUE')
+            if not all(structural):
+                candidates.append((box,None))
+                continue
+            icon_box=d['cards'][0]['icon_roi']
+            identity=classify_icon(roi(region,icon_box),catalog,.93,.04)
+            if identity is None: raise DeploymentError('UNKNOWN_CARD_PRESENT')
+            candidates.append((box,identity))
+        occupied=[item for item in candidates if item[1] is not None]
+        occupied.sort(key=lambda item:item[0][0])
+        if not occupied: raise DeploymentError('BAR_UNPROVED')
+        if any(a[0][2]>z[0][0] for a,z in zip(occupied,occupied[1:])):
+            raise DeploymentError('BAR_AMBIGUOUS')
+        # An unframed width-compatible hypothesis is interior artwork only when
+        # both boundaries are strictly owned by one admitted complete card.
+        # Touching/equal boundaries, partial overlap, continuation and bridges
+        # remain alternate complete/clipped-card explanations and fail closed.
+        for box,identity in candidates:
+            if identity is not None: continue
+            left,_,right,_=box
+            owners=[owner for owner,_ in occupied
+                    if owner[0] < left < right < owner[2]]
+            if len(owners)!=1: raise DeploymentError('BAR_RESIDUE')
+        signatures=tuple((identity,CardKind(definitions[identity]['kind']),
+                          Spell(definitions[identity]['spell'])) for _,identity in occupied)
+        if len(set(signatures))!=len(signatures): raise DeploymentError('ROSTER_DUPLICATE')
+        if len(signatures)>self.profile.plan.viewport_limit: raise DeploymentError('PLAN_VIEWPORT_OVERFLOW')
+        if signatures!=self.profile.plan.signatures:
+            if any(item not in self.profile.plan.signatures for item in signatures):
+                raise DeploymentError('ROSTER_ADDITIONAL')
+            raise DeploymentError('ROSTER_INCOMPLETE')
+        endpoint_roles=tuple(
+            (side,state,b[side][state])
+            for side in ('left_edge','right_edge')
+            for state in ('end','continues'))
+        role_counts={(side,state):0 for side,state,_ in endpoint_roles}
+        frame_h,frame_w=frame.shape[:2]
+        occurrences={}
+        for key in dict.fromkeys(rule['template'] for _,_,rule in endpoint_roles):
+            for x,y,tw,th,_ in matches(
+                    frame,_template(self.profile.assets[key]),.93,maximum=32):
+                occurrences.setdefault((x,y,tw,th),set()).add(key)
+        for (x,y,tw,th),keys in occurrences.items():
+            owners=[]
+            for side,state,rule in endpoint_roles:
+                if rule['template'] not in keys: continue
+                left,top,right,bottom=rule['roi']
+                if (x>=left*frame_w and y>=top*frame_h
+                        and x+tw<=right*frame_w and y+th<=bottom*frame_h):
+                    owners.append((side,state))
+            if len(owners)!=1: raise DeploymentError('UNEXPLAINED_WITNESS')
+            role_counts[owners[0]]+=1
+            if role_counts[owners[0]]>1:
+                raise DeploymentError('BAR_ENDPOINT_UNPROVED')
+        def endpoint(side):
+            end=role_counts[(side,'end')]==1
+            more=role_counts[(side,'continues')]==1
+            if end==more: raise DeploymentError('BAR_ENDPOINT_UNPROVED')
+            return end
+        left_edge=endpoint('left_edge'); right_edge=endpoint('right_edge')
+        if not left_edge or not right_edge: raise DeploymentError('SINGLE_PAGE_COVERAGE_UNPROVED')
+        # Every structural, identity, state and quantity template occurrence in
+        # the whole declared viewport must have exactly one compatible owner.
+        witness_rules=[]
+        for rule in b['frame']:
+            witness_rules.append((rule['template'],rule['roi'],None))
+        for identity,spec in definitions.items():
+            for key in spec['icons']:witness_rules.append((key,spec['icon_roi'],identity))
+            for state in ('available','depleted','deployed','selected'):
+                for key in spec[state]:witness_rules.append((key,spec['state_rois'][state],identity))
+        for key in d['glyphs'].values():witness_rules.append((key,d['cards'][0]['count_roi'],None))
+        for key,relative,identity in witness_rules:
+            for x,y,tw,th,_ in matches(crop,_template(self.profile.assets[key]),.93,maximum=32):
+                center=(x+tw/2,y+th/2)
+                owners=[1 for box,owner in occupied
+                        if (identity is None or owner==identity) and self._owns(center,box,relative)]
+                if len(owners)!=1: raise DeploymentError('UNEXPLAINED_WITNESS')
         cards=[]; h,w=frame.shape[:2]
-        for x0,y0,x1,y1 in boxes:
-            region=crop[y0:y1,x0:x1]
-            candidates=[]
-            for key,spec in definitions.items():
-                identity=classify_icon(roi(region,spec['icon_roi']),{key:catalog[key]},.93,.04)
-                if identity: candidates.append(key)
-            if len(candidates)!=1: raise DeploymentError('CARD_CLASS_UNKNOWN')
-            identity=candidates[0]; spec=definitions[identity]
+        bank={k:_template(self.profile.assets[v]) for k,v in d['glyphs'].items()}
+        for (x0,y0,x1,y1),identity in occupied:
+            region=crop[y0:y1,x0:x1]; spec=definitions[identity]
             kind,spell=CardKind(spec['kind']),Spell(spec['spell'])
-            depleted=self._any(region,spec['depleted'])
-            deployed=self._any(region,spec['deployed']) if spec['deployed'] else False
-            available=self._any(region,spec['available']) if spec['available'] else False
+            depleted=self._state(region,spec,'depleted')
+            deployed=self._state(region,spec,'deployed')
+            available=self._state(region,spec,'available')
+            selected=self._state(region,spec,'selected')
             if (depleted and available) or (deployed and available): raise DeploymentError('CARD_STATE_CONFLICT')
             if kind in (CardKind.HERO,CardKind.CLAN):
                 if deployed: q=0; state=CardState.DEPLOYED
                 elif depleted: q=0; state=CardState.DEPLETED
                 elif available: q=1; state=CardState.AVAILABLE
                 else: raise DeploymentError('CARD_STATE_UNKNOWN')
-            elif depleted:
-                if exact_grey(roi(region,spec['icon_roi'])) is not True: raise DeploymentError('DEPLETION_UNPROVED')
-                # A readable positive badge contradicts depletion even if the icon is grey.
-                try:
-                    observed=read_quantity(roi(region,spec['count_roi']),{k:self.profile.assets[v] for k,v in d['glyphs'].items()},spec['capacity'])
-                except DeploymentError:
-                    observed=None
-                if observed is not None and observed>0:raise DeploymentError('CARD_STATE_CONFLICT')
-                q=0; state=CardState.DEPLETED
             else:
-                q=read_quantity(roi(region,spec['count_roi']),{k:self.profile.assets[v] for k,v in d['glyphs'].items()},spec['capacity'])
-                if q==0: raise DeploymentError('DEPLETION_UNPROVED')
-                state=CardState.AVAILABLE
+                q=read_quantity(roi(region,spec['count_roi']),bank,spec['capacity'])
+                if q==0:
+                    if not depleted or exact_grey(roi(region,spec['icon_roi'])) is not True:
+                        raise DeploymentError('DEPLETION_UNPROVED')
+                    state=CardState.DEPLETED
+                else:
+                    if depleted: raise DeploymentError('CARD_STATE_CONFLICT')
+                    state=CardState.AVAILABLE
             point=Point((int(b['roi'][0]*w)+(x0+x1)/2)/(w-1),
                         (int(b['roi'][1]*h)+(y0+y1)/2)/(h-1))
-            cards.append(Card(identity,kind,spell,q,state,point,self._any(region,spec['selected'])))
-        return Page(tuple(cards),bool(self._locate(frame,b['left_edge'])),bool(self._locate(frame,b['right_edge'])))
+            cards.append(Card(identity,kind,spell,q,state,point,selected))
+        return Page(tuple(cards),True,True)
     def _targets(self,frame):
         d=self.profile.data; targets=[]
         # Three independently calibrated view anchors must remain visible.
@@ -362,10 +845,115 @@ class FrameObserver:
                 if all(nearby(ctx) for ctx in rule['required_context']) and not any(nearby(ctx) for ctx in rule['excluded_context']):
                     targets.append(Target(TargetKind(rule['kind']),point,score))
         return tuple(targets)
+    def _source(self,frame):
+        if self.profile.data['schema']!=3:
+            raise DeploymentError('SOURCE_PROFILE_REQUIRED')
+        layout=self.profile.data['source_layout']; entries=[]; categories=[]; witnesses=[]
+        h,w=frame.shape[:2]
+        def own(key,box,relative=(0,0,1,1)):
+            left,top,right,bottom=box
+            witnesses.append((key,(int(left*w),int(top*h),int(right*w),int(bottom*h)),relative))
+        self._independent_occurrences(frame,tuple(layout['context'].values())+
+            tuple(self.profile.data['screens']['ARMY'])+
+            (self.profile.data['controls']['ARMY']['army_attack'],))
+        geometry='geometry' in layout['categories'][0]
+        global_rules=tuple(layout['context'].values())
+        if geometry:
+            global_rules+=tuple(self.profile.data['screens']['ARMY'])+(self.profile.data['controls']['ARMY']['army_attack'],)
+        for rule in global_rules:
+            own(rule['template'],rule['roi'])
+        quantity=layout.get('quantity')
+        glyphs=quantity['glyphs'] if quantity is not None else {
+            k:(v,) for k,v in self.profile.data['glyphs'].items()}
+        bank={k:tuple(_template(self.profile.assets[v]) for v in variants)
+              for k,variants in glyphs.items()}
+        quantity_policy={} if quantity is None else {
+            name:quantity[name] for name in ('threshold','minimum_component_area')}
+        glyph_keys={key for variants in glyphs.values() for key in variants}
+        semantic_keys=set()
+        for category in layout['categories']:
+            if geometry:
+                delta=category['geometry'].get('maximum_pixel_delta',0)
+                for rule in category['geometry']['background']:
+                    if not _source_absent(roi(frame,rule['roi']),self.profile.assets,
+                            (rule['template'],)+tuple(rule.get('alternatives',())),delta):
+                        raise DeploymentError('SOURCE_EXTENT_UNPROVED')
+            for role in ('header','status','complete','end','continues'):
+                own(category[role]['template'],category[role]['roi'])
+            state=category['state']
+            positive=bool(self._locate(frame,category['status']))
+            empty_status='empty_status' in category and bool(self._locate(frame,category['empty_status']))
+            if 'empty_status' in category:own(category['empty_status']['template'],category['empty_status']['roi'])
+            if positive==empty_status:raise DeploymentError('SOURCE_STATE_UNPROVED')
+            if empty_status:state='EMPTY'
+            if (not all(self._locate(frame,category[role]) for role in ('header','complete','end'))
+                    or self._locate(frame,category['continues'])):
+                raise DeploymentError('SOURCE_EXTENT_UNPROVED')
+            definitions={e['identity']:e for e in layout['entries'] if e['category']==category['category']}
+            catalog={key:tuple(_template(self.profile.assets[k]) for k in spec['icons'])
+                     for key,spec in definitions.items()}
+            count=0
+            for index,box in enumerate(category['slots']):
+                fields=category['geometry']['fields'][index] if geometry else layout
+                semantic_keys.update(fields[name] for name in ('empty','available','selected'))
+                region=roi(frame,box)
+                empty=self._any(region,(fields['empty'],),fields['icon_roi'])
+                identity=classify_icon(roi(region,fields['icon_roi']),catalog,.93,.04) if catalog else None
+                if empty:
+                    vacant=(_source_absent(region,self.profile.assets,
+                            (fields['vacant'],)+tuple(fields.get('vacant_alternatives',())),delta)
+                            if geometry else match_unique(region,_template(self.profile.assets[fields['vacant']]),.93) is not None)
+                    if not vacant:
+                        raise DeploymentError('SOURCE_VACANCY_UNPROVED')
+                    if identity is not None or self._any(region,(fields['available'],fields['selected']),fields['state_roi']):
+                        raise DeploymentError('SOURCE_AMBIGUOUS')
+                    own(fields['empty'],box,fields['icon_roi'])
+                    continue
+                if identity is None or state!='POPULATED':
+                    raise DeploymentError('SOURCE_UNKNOWN_ENTRY')
+                if (not self._any(region,(fields['available'],),fields['state_roi'])
+                        or self._any(region,(fields['selected'],),fields['state_roi'])):
+                    raise DeploymentError('SOURCE_STATE_UNPROVED')
+                spec=definitions[identity]
+                for key in spec['icons']:own(key,box,fields['icon_roi'])
+                own(fields['available'],box,fields['state_roi'])
+                if CardKind(spec['kind']) is CardKind.HERO:
+                    q=1  # Available portrait is a singleton; its level is never a count.
+                else:
+                    if not geometry:
+                        for key in glyph_keys:own(key,box,fields['count_roi'])
+                    q=read_quantity(roi(region,fields['count_roi']),bank,spec['capacity'],**quantity_policy)
+                entries.append(SourceInventoryEntry(identity,category['category'],CardKind(spec['kind']),
+                                                    Spell(spec['spell']),q,CardState.AVAILABLE))
+                count+=1
+            if (count>0)!=(state=='POPULATED'):
+                raise DeploymentError('SOURCE_CATEGORY_UNPROVED')
+            categories.append((category['category'],state))
+        if len({e.identity for e in entries})!=len(entries):
+            raise DeploymentError('SOURCE_DUPLICATE')
+        keys=semantic_keys
+        if not geometry:keys.update(glyph_keys)
+        keys.update(key for e in layout['entries'] for key in e['icons'])
+        # A digit is not a globally unique control: headers, levels and timers
+        # legitimately repeat it. Explicit geometry instead proves every whole
+        # count field and every non-card background; semantic witnesses remain
+        # globally owned. Legacy profiles keep their original global alphabet.
+        # Numeric membership cannot remove a semantic role or grant it a count
+        # field owner. Explicit geometry never adds numeric owners above.
+        keys.update(key for key,_,_ in witnesses)
+        for key in keys:
+            for x,y,tw,th,_ in matches(frame,_template(self.profile.assets[key]),.93,maximum=64):
+                owners=[1 for k,box,relative in witnesses if key==k
+                        and self._owns((x,y),box,relative)
+                        and self._owns((x+tw-1,y+th-1),box,relative)]
+                if len(owners)!=1:raise DeploymentError('SOURCE_UNEXPLAINED_WITNESS')
+        return tuple(entries),tuple(categories)
     def __call__(self):
         frame=None; result=None; failed=False
         start=finite(self.clock())
         try:
+            if self.profile.data['schema']==3:
+                require_installation(self.profile,self.build_binding,self.installed_build)
             frame=self.capture()
             image(frame)
             w,h=self.profile.data['size']
@@ -380,8 +968,31 @@ class FrameObserver:
             for name,rule in self.profile.data['controls'].get(screen.value,{}).items():
                 found=self._locate(frame,rule)
                 if found: controls.append((name,found[0][0]))
-            if page is not None and len(page.cards)>1:
-                controls.extend((('scroll_left',page.cards[0].point),('scroll_right',page.cards[-1].point)))
+            if self.profile.data['schema']==3 and screen in (Screen.HOME,Screen.MATCH):
+                verb='attack' if screen is Screen.HOME else 'find_match'
+                self._independent_occurrences(frame,tuple(self.profile.data['screens'][screen.value])+
+                    (self.profile.data['controls'][screen.value][verb],))
+                # A preparatory button may not be the committing green control.
+                final=self.profile.data['controls']['ARMY']['army_attack']
+                hits=self._locate(frame,final,True)
+                if hits:
+                    self._independent_occurrences(frame,(
+                        self.profile.data['controls'][screen.value][verb],final))
+            match_mode=''; match_cost=None
+            if self.profile.data['schema']==3 and screen is Screen.MATCH:
+                match=self.profile.data['source_layout']['match']
+                self._independent_occurrences(frame,(match['normal'],match['cost'],
+                    self.profile.data['controls']['MATCH']['find_match']))
+                # Ranked artwork may coexist. It must not own any of the
+                # positively calibrated normal-choice/fee/Find occurrences.
+                if self._locate(frame,match['ranked'],True):
+                    self._independent_occurrences(frame,(match['normal'],match['cost'],
+                        self.profile.data['controls']['MATCH']['find_match'],match['ranked']))
+                # Whole fee field including currency, not a matching substring.
+                if not np.array_equal(_gray(roi(frame,match['cost']['roi'])),
+                                      _gray(_template(self.profile.assets[match['cost']['template']]))):
+                    raise DeploymentError('MATCH_COST_UNPROVED')
+                match_mode='REGULAR_MULTIPLAYER'; match_cost=match['expected_cost']
             home=self.home_verified(frame) if screen is Screen.HOME else False
             if type(home) is not bool: raise DeploymentError('HOME_UNPROVED')
             view=self.profile.digest
@@ -394,9 +1005,12 @@ class FrameObserver:
                     anchor_points.extend((round(p.x*(w-1)),round(p.y*(h-1))))
                 # Memory-only coordinate token; never part of a public receipt.
                 view=self.profile.digest[:16]+':'+','.join(map(str,anchor_points))
+            source_inventory,source_categories = self._source(frame) if screen is Screen.ARMY else ((),())
+            result=Observation(self.sequence+1,start,view,screen,page,
+                self._targets(frame) if screen is Screen.BATTLE else (),tuple(controls),
+                self.intervention(),home,source_inventory,source_categories,
+                self.profile.plan.source_context if screen is Screen.ARMY else (),match_mode,match_cost)
             self.sequence+=1
-            result=Observation(self.sequence,start,view,screen,page,
-                self._targets(frame) if screen is Screen.BATTLE else (),tuple(controls),self.intervention(),home)
         except BaseException as error:
             traceback.clear_frames(error.__traceback__)
             failed=True

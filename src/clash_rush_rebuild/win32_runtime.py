@@ -28,6 +28,7 @@ TOKEN_USER = 1
 JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 DUPLICATE_SAME_ACCESS = 0x00000002
+PROCESS_QUERY_AND_WAIT = 0x00101000
 
 _ABANDONED_MUTEX_NAMES: set[str] = set()
 _ABANDONED_MUTEX_NAMES_LOCK = threading.Lock()
@@ -72,6 +73,12 @@ class RuntimeApi(Protocol):
     def duplicate_process_handle(self, process: object) -> object | None: ...
     def process_creation_time(self, process: object) -> int: ...
     def job_active_process_count(self, job: object) -> int: ...
+    def get_job_limit_flags(self, job: object) -> int: ...
+    def current_process_handle(self) -> object: ...
+    def current_process_id(self) -> int: ...
+    def handle_is_inheritable(self, handle: object) -> bool: ...
+    def duplicate_query_wait_to_worker(self, process: object, worker: object) -> int: ...
+    def duplicate_query_job_to_worker(self, job: object, worker: object) -> int: ...
 
 
 @dataclass(slots=True)
@@ -217,6 +224,10 @@ class NativeWin32Api:
 
         k32.GetCurrentProcess.argtypes = []
         k32.GetCurrentProcess.restype = handle
+        k32.GetCurrentProcessId.argtypes = []
+        k32.GetCurrentProcessId.restype = wintypes.DWORD
+        k32.GetHandleInformation.argtypes = [handle, ctypes.POINTER(wintypes.DWORD)]
+        k32.GetHandleInformation.restype = wintypes.BOOL
         k32.CreateMutexW.argtypes = [
             ctypes.POINTER(SECURITY_ATTRIBUTES),
             wintypes.BOOL,
@@ -450,6 +461,44 @@ class NativeWin32Api:
             )
         )
 
+    def get_job_limit_flags(self, job: object) -> int:
+        information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        if not self._kernel32.QueryInformationJobObject(
+            job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(information), ctypes.sizeof(information), None,
+        ):
+            raise Win32RuntimeError("Job limit readback failed")
+        return int(information.BasicLimitInformation.LimitFlags)
+
+    def current_process_handle(self) -> object:
+        return self._kernel32.GetCurrentProcess()
+
+    def current_process_id(self) -> int:
+        return int(self._kernel32.GetCurrentProcessId())
+
+    def handle_is_inheritable(self, handle: object) -> bool:
+        flags = wintypes.DWORD()
+        if not self._kernel32.GetHandleInformation(handle, ctypes.byref(flags)):
+            raise Win32RuntimeError("GetHandleInformation failed")
+        return bool(flags.value & 1)
+
+    def duplicate_query_wait_to_worker(self, process: object, worker: object) -> int:
+        """Remote numeric handle, usable ONLY in W; never locally CloseHandle it."""
+        return self._duplicate_to_worker(process,worker,PROCESS_QUERY_AND_WAIT)
+
+    def duplicate_query_job_to_worker(self, job: object, worker: object) -> int:
+        """JOB_OBJECT_QUERY only; no assign, set-attributes or termination right."""
+        return self._duplicate_to_worker(job,worker,0x0004)
+
+    def _duplicate_to_worker(self, source: object, worker: object, access: int) -> int:
+        duplicate = wintypes.HANDLE()
+        if not self._kernel32.DuplicateHandle(
+            self._kernel32.GetCurrentProcess(), source, worker,
+            ctypes.byref(duplicate), access, False, 0,
+        ) or not duplicate.value:
+            raise Win32RuntimeError("restricted DuplicateHandle failed")
+        return int(duplicate.value)
+
     def create_process_w(
         self,
         executable: str,
@@ -457,6 +506,8 @@ class NativeWin32Api:
         inherit_handles: bool,
         creation_flags: int,
     ) -> CreatedProcess:
+        from .mvp_canonical_runtime import consume_native_creation
+        consume_native_creation(executable, command_line.value, inherit_handles, creation_flags)
         startup = STARTUPINFOW()
         startup.cb = ctypes.sizeof(STARTUPINFOW)
         information = PROCESS_INFORMATION()
@@ -564,6 +615,48 @@ class Win32Runtime:
             is not True
         ):
             raise Win32RuntimeError("SetInformationJobObject failed")
+
+    def set_non_killing_job(self, job: object) -> None:
+        """Configure a fresh P-owned empty Job, never migrate a live topology."""
+        if not job or self.job_active_count(job) != 0:
+            raise Win32RuntimeError("empty private Job required before configuration")
+        if self._api.set_job_limit_flags(job, 0) is not True:
+            raise Win32RuntimeError("non-killing Job configuration failed")
+        if self.job_limit_flags(job) != 0:
+            raise Win32RuntimeError("non-killing Job limit readback mismatch")
+
+    def job_limit_flags(self, job: object) -> int:
+        flags = self._api.get_job_limit_flags(job)
+        if type(flags) is not int or not 0 <= flags <= 0xFFFFFFFF:
+            raise Win32RuntimeError("invalid Job limit readback")
+        return flags
+
+    def current_process_handle(self) -> object:
+        return self._api.current_process_handle()
+
+    def current_process_id(self) -> int:
+        pid = self._api.current_process_id()
+        if type(pid) is not int or pid <= 0:
+            raise Win32RuntimeError("invalid current process identity")
+        return pid
+
+    def handle_is_inheritable(self, handle: object) -> bool:
+        result = self._api.handle_is_inheritable(handle)
+        if type(result) is not bool:
+            raise Win32RuntimeError("invalid handle inheritance readback")
+        return result
+
+    def duplicate_query_wait_to_worker(self, process: object, worker: object) -> int:
+        result = self._api.duplicate_query_wait_to_worker(process, worker)
+        if type(result) is not int or result <= 0:
+            raise Win32RuntimeError("invalid remote player handle")
+        return result
+
+    def duplicate_query_job_to_worker(self, job: object, worker: object) -> int:
+        result=self._api.duplicate_query_job_to_worker(job,worker)
+        if type(result) is not int or result<=0:
+            raise Win32RuntimeError('invalid remote query Job handle')
+        return result
 
     def create_suspended(self, executable: str, command_line: str) -> CreatedProcess:
         if (

@@ -11,6 +11,11 @@ Commit: `a5c943afed0ed3b9abedbbc228b0889145ecaf24`
 
 Adapted sequence/algorithm: `src/attacker.py: detect_troop_positions, deploy_troops, complete_normal_attack`.
 
+H1 retains the bounded discovery/type-dispatch topology only. Donor gap typing,
+default quantities, scrolling completion, ADB/minitouch transport, fixed/random
+targets and restart tail remain excluded. The H1 complete-frame/witness owner,
+sealed N-card plan and single-page rejection logic are local implementations.
+
 MIT License
 
 Copyright (c) 2026 m24842
@@ -37,7 +42,17 @@ SOFTWARE.
 
 Commit: `4ede1efd220ffc79a5b490cfd3788b44d2584da4`
 
-Adapted sequence/algorithm: `app/core/bot.py: restricted End/optional confirmation/Return sequence`.
+Adapted sequence/algorithm: `app/core/bot.py: _return_home and _wait_for_return_home_or_chest_claim`, restricted to the positively observed Return Home branch. S004 waits for natural Result; donor End/Surrender, reward/chest, recovery and restart branches are excluded.
+
+Updated-UI source quantity candidate also adapts
+`app/services/vision.py: preprocess_bw_ui_text` (strict white-text brightness
+floor) and `filter_binary_ink_by_component_area` (8-connected area filtering).
+The local adaptation keeps bright-on-black polarity, bounds the small-component
+floor to eight pixels, rejects clipped evidence before filtering, requires each
+discarded speck to overlap exactly one retained component horizontally, and
+never discards large components. The donor's OCR, permissive correction,
+unbounded area deletion, debug writes and fallback paths are not retained.
+See `updated-ui-source-quantity.md` for the incomplete full-profile fit verdict.
 
 MIT License
 
@@ -95,6 +110,10 @@ Authorization, closed schemas, absolute deadlines, inventory proof, finite glyph
 reader, intervention observer, held-mouse lease, profile binding, and durable
 receipt integration are local code. Reusing the repository's existing owned-child
 runner retains its existing Hermes attribution in THIRD_PARTY_NOTICES.md.
+
+H1 copied no new donor code or artwork and added no dependency. PixelChief and
+NX-ClashClient remain comparison/study sources only as recorded in
+`docs/h0-scalable-attack-choice.md`; neither contributes runtime code or assets.
 
 SciPy is imported as an ordinary separately installed dependency, not copied into
 this bundle. The candidate declaration pins scipy==1.17.0 (the locally tested
