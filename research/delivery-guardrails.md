@@ -1,3 +1,8 @@
+> **Status: PARTIALLY SUPERSEDED.**
+> Enduring safety/privacy rules remain useful; old sequencing/full-release scope
+> does not control current work.
+> See [CURRENT.md](../docs/architecture/CURRENT.md). No implementation is authorized by this document.
+
 # Delivery guardrails
 
 These gates exist to prevent the regression loops, hidden dependencies, unsafe live retries, and incomplete five-account behavior encountered in the previous build.

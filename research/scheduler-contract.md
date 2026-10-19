@@ -1,5 +1,11 @@
 # Scheduler contract and donor-reuse inventory
 
+Current owner-policy overlay (`t_4b4717dd`): future scheduling targets a registered
+stable instance/slot, not a name/tag inferred from the currently loaded game.
+Existing AccountKey/schema terminology below describes the older model and is
+not proof of migration. No scheduler/runtime migration is implemented here.
+See [current policy](../docs/attack-a-decision-b.md#instance-centric-owner-policy).
+
 ## Donor inventory (completed before implementation)
 
 The scheduler remains a local seam. The pinned comparison found no complete donor scheduler compatible with the durable due-account, schema-v2 admission, dual-lane, and fail-closed lifecycle requirements. Therefore no third-party implementation is copied by this slice and no new notice is required.

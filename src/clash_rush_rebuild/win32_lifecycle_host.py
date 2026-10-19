@@ -46,7 +46,7 @@ JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS = 3
 ERROR_MORE_DATA = 234
 GA_PARENT = 1
 GA_ROOT = 2
-DESKTOP_SWITCHDESKTOP = 0x0100
+DESKTOP_READOBJECTS = 0x0001
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
@@ -114,6 +114,8 @@ def configure_lifecycle_host_signatures(
     user32.GetWindowTextW.restype = ctypes.c_int
     user32.GetAncestor.argtypes = [hwnd, wintypes.UINT]
     user32.GetAncestor.restype = hwnd
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = hwnd
     user32.GetClientRect.argtypes = [hwnd, ctypes.POINTER(wintypes.RECT)]
     user32.GetClientRect.restype = wintypes.BOOL
     user32.OpenInputDesktop.argtypes = [
@@ -122,8 +124,17 @@ def configure_lifecycle_host_signatures(
         wintypes.DWORD,
     ]
     user32.OpenInputDesktop.restype = handle
-    user32.SwitchDesktop.argtypes = [handle]
-    user32.SwitchDesktop.restype = wintypes.BOOL
+    kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD,ctypes.POINTER(wintypes.DWORD)]
+    kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+    kernel32.GetCurrentThreadId.argtypes = []
+    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+    user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+    user32.GetThreadDesktop.restype = handle
+    user32.GetProcessWindowStation.argtypes = []
+    user32.GetProcessWindowStation.restype = handle
+    user32.GetUserObjectInformationW.argtypes = [handle,ctypes.c_int,ctypes.c_void_p,
+                                               wintypes.DWORD,ctypes.POINTER(wintypes.DWORD)]
+    user32.GetUserObjectInformationW.restype = wintypes.BOOL
     user32.CloseDesktop.argtypes = [handle]
     user32.CloseDesktop.restype = wintypes.BOOL
     user32.IsIconic.argtypes = [hwnd]
@@ -175,19 +186,17 @@ def enable_process_dpi_awareness(shcore: object | None, user32: object) -> None:
     raise Win32LifecycleHostError("process DPI awareness unavailable") from None
 
 
-class NativeLifecycleApi(NativeWin32Api):
-    """Native Toolhelp foundation for the integrated lifecycle host."""
+class NativeProcessApi(NativeWin32Api):
+    """Process/Job facts only: no DPI, desktop, window, capture or input setup."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
-        try:
-            self._shcore: object | None = ctypes.WinDLL("shcore", use_last_error=True)
-        except OSError:
-            self._shcore = None
-        enable_process_dpi_awareness(self._shcore, self._user32)
-        self._gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-        configure_lifecycle_host_signatures(self._kernel32, self._user32, self._gdi32)
+        configure_kernel32_signatures(self._kernel32)
+
+    def process_creation_time(self, process: object) -> int:
+        # configure_kernel32_signatures uses the shared primitives FILETIME ABI.
+        value = self.get_process_creation_time(process)
+        return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
 
     def create_toolhelp32_snapshot(self) -> object:
         return self._kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -252,6 +261,27 @@ class NativeLifecycleApi(NativeWin32Api):
             raise Win32LifecycleHostError("Job member list exceeded supplied capacity")
         pids = tuple(int(information.ProcessIdList[index]) for index in range(listed))
         return JobMembershipList(assigned, listed, pids)
+
+
+class NativeLifecycleApi(NativeProcessApi):
+    """Native Toolhelp foundation for the integrated lifecycle host."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        try:
+            self._shcore: object | None = ctypes.WinDLL("shcore", use_last_error=True)
+        except OSError:
+            self._shcore = None
+        enable_process_dpi_awareness(self._shcore, self._user32)
+        self._gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        configure_lifecycle_host_signatures(self._kernel32, self._user32, self._gdi32)
+        self._wts = ctypes.WinDLL('wtsapi32',use_last_error=True)
+        self._wts.WTSQuerySessionInformationW.argtypes = [wintypes.HANDLE,wintypes.DWORD,ctypes.c_int,
+                                    ctypes.POINTER(ctypes.c_void_p),ctypes.POINTER(wintypes.DWORD)]
+        self._wts.WTSQuerySessionInformationW.restype = wintypes.BOOL
+        self._wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        self._wts.WTSFreeMemory.restype = None
 
     def terminate_process(self, process: object, exit_code: int) -> bool:
         return bool(self._kernel32.TerminateProcess(process, exit_code))
@@ -334,28 +364,71 @@ class NativeLifecycleApi(NativeWin32Api):
             raise Win32LifecycleHostError("window parent ancestry query failed")
         return int(parent)
 
+    def foreground_root(self) -> int:
+        window=self._user32.GetForegroundWindow()
+        return 0 if not window else self.get_ancestor_root(int(window))
+
     def client_size(self, hwnd: int) -> tuple[int, int]:
         rect = wintypes.RECT()
         if not self._user32.GetClientRect(hwnd, ctypes.byref(rect)):
             raise Win32LifecycleHostError("window client rectangle unavailable")
         return int(rect.right - rect.left), int(rect.bottom - rect.top)
 
-    def interactive_desktop_unlocked(self) -> bool:
-        desktop = self._user32.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
-        if not desktop:
-            return False
+    def input_desktop_identity(self) -> tuple[int,int,str,str]:
+        """Read-only active session/thread/input-desktop identity. Never SwitchDesktop.
+
+        OpenInputDesktop alone can succeed for a disconnected RDP session (MSDN
+        Remarks). Require WTSActive, matching thread desktop, and UOI_IO as well.
+        No desktop, station or foreground repair is an observation operation.
+        """
+        session=wintypes.DWORD()
+        if not self._kernel32.ProcessIdToSessionId(self._kernel32.GetCurrentProcessId(),ctypes.byref(session)):
+            raise Win32LifecycleHostError('input session unavailable')
+        buffer=ctypes.c_void_p();size=wintypes.DWORD()
         try:
-            unlocked = bool(self._user32.SwitchDesktop(desktop))
+            if (not self._wts.WTSQuerySessionInformationW(None,session.value,8,ctypes.byref(buffer),ctypes.byref(size))
+                    or not buffer.value or size.value!=ctypes.sizeof(ctypes.c_int)
+                    or ctypes.cast(buffer,ctypes.POINTER(ctypes.c_int)).contents.value!=0):
+                raise Win32LifecycleHostError('input session inactive')
+        finally:
+            if buffer.value:self._wts.WTSFreeMemory(buffer)
+        thread=self._kernel32.GetCurrentThreadId()
+        desktop=self._user32.OpenInputDesktop(0,False,DESKTOP_READOBJECTS)
+        if not desktop:raise Win32LifecycleHostError('input desktop unavailable')
+        def name(handle):
+            value=ctypes.create_unicode_buffer(256);needed=wintypes.DWORD()
+            if (not handle or not self._user32.GetUserObjectInformationW(handle,2,value,
+                        ctypes.sizeof(value),ctypes.byref(needed)) or not value.value
+                    or needed.value!=(len(value.value)+1)*ctypes.sizeof(ctypes.c_wchar)):
+                raise Win32LifecycleHostError('input desktop identity unavailable')
+            return value.value
+        try:
+            current=name(desktop)
+            station=name(self._user32.GetProcessWindowStation())
+            receiving=wintypes.BOOL();needed=wintypes.DWORD()
+            if (not thread or station!='WinSta0'
+                    or name(self._user32.GetThreadDesktop(thread))!=current
+                    or not self._user32.GetUserObjectInformationW(desktop,6,ctypes.byref(receiving),
+                        ctypes.sizeof(receiving),ctypes.byref(needed))
+                    or needed.value!=ctypes.sizeof(receiving) or receiving.value!=1):
+                raise Win32LifecycleHostError('input desktop ownership unavailable')
+            return (int(session.value),int(thread),station,current)
         finally:
             if not self._user32.CloseDesktop(desktop):
-                raise Win32LifecycleHostError("input desktop handle close failed")
-        return unlocked
+                raise Win32LifecycleHostError('input desktop handle close failed')
+
+    def interactive_desktop_unlocked(self) -> bool:
+        try:
+            self.input_desktop_identity()
+            return True
+        except Win32LifecycleHostError:
+            return False
 
     def is_iconic(self, hwnd: int) -> bool:
         return bool(self._user32.IsIconic(hwnd))
 
     def capture_printwindow_bgra(
-        self, hwnd: int, width: int, height: int
+        self, hwnd: int, width: int, height: int, *, before_capture=None
     ) -> tuple[int, int, bytes]:
         if (
             type(hwnd) is not int
@@ -387,8 +460,11 @@ class NativeLifecycleApi(NativeWin32Api):
                 old = self._gdi32.SelectObject(memory_dc, bitmap)
                 if not old or int(old) in {-1, ctypes.c_void_p(-1).value}:
                     problem = "bitmap selection failed"
-            if problem is None and not self._user32.PrintWindow(hwnd, memory_dc, 2):
-                problem = "PrintWindow failed"
+            if problem is None:
+                if before_capture is not None:
+                    before_capture()
+                if not self._user32.PrintWindow(hwnd, memory_dc, 2):
+                    problem = "PrintWindow failed"
             if problem is None:
                 try:
                     restored = self._gdi32.SelectObject(memory_dc, old)
@@ -552,6 +628,31 @@ class Win32LifecycleHost:
 
     def set_kill_on_close(self, job: object) -> None:
         self._runtime.set_kill_on_close(job)
+
+    def set_non_killing_job(self, job: object) -> None:
+        self._runtime.set_non_killing_job(job)
+
+    def job_limit_flags(self, job: object) -> int:
+        return self._runtime.job_limit_flags(job)
+
+    def create_policy_suspended(self, executable: str, command_line: str) -> CreatedProcess:
+        """P-only explicit topology seam; preserves the existing native wrapper."""
+        return self._runtime.create_suspended(executable, command_line)
+
+    def current_process_handle(self) -> object:
+        return self._runtime.current_process_handle()
+
+    def current_process_id(self) -> int:
+        return self._runtime.current_process_id()
+
+    def handle_is_inheritable(self, handle: object) -> bool:
+        return self._runtime.handle_is_inheritable(handle)
+
+    def duplicate_query_wait_to_worker(self, player: object, worker: object) -> int:
+        return self._runtime.duplicate_query_wait_to_worker(player, worker)
+
+    def duplicate_query_job_to_worker(self, job: object, worker: object) -> int:
+        return self._runtime.duplicate_query_job_to_worker(job, worker)
 
     def create_suspended(self, internal_name: str) -> CreatedProcess:
         if (
@@ -808,7 +909,11 @@ class Win32LifecycleHost:
         if type(iconic) is not bool or iconic:
             raise Win32LifecycleHostError("minimized capture is unsupported")
 
-    def capture_bgra(self, binding: PlayerBinding) -> tuple[int, int, bytes]:
+    def capture_bgra(self, binding: PlayerBinding, *, before_capture=None) -> tuple[int, int, bytes]:
+        if before_capture is not None:
+            return self._api.capture_printwindow_bgra(
+                binding.render_hwnd, binding.width, binding.height, before_capture=before_capture
+            )
         return self._api.capture_printwindow_bgra(
             binding.render_hwnd, binding.width, binding.height
         )

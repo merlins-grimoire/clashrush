@@ -4,10 +4,12 @@ import json
 import math
 import pytest
 
+from clash_rush_rebuild import mvp_deployment as deployment_module
 from clash_rush_rebuild.mvp_deployment import (
     Budget, Card, CardKind, CardState, Spell, Page, Observation, Screen,
     Point, Target, TargetKind, Policy, DeploymentError, DeploymentEngine,
     Inventory, DeploymentResult, Intervention, Action,
+    CompiledDeploymentPlan,
 )
 
 
@@ -42,9 +44,17 @@ class World:
         self.closed = False
         self.with_confirm = True
         self.exit_at = None
+        self.natural_result_after = 6
+        self.terminal_reads = 0
     def observe(self):
         self.seq += 1
         self.clock.now += .01
+        if (self.screen is Screen.BATTLE and self.cards
+                and all(item.exhausted for item in self.cards)):
+            self.terminal_reads += 1
+            if (self.natural_result_after is not None
+                    and self.terminal_reads >= self.natural_result_after):
+                self.screen = Screen.RESULT
         cards = tuple(replace(c, selected=c.identity == self.selected) for c in self.cards)
         targets = () if not self.complete_targets else (
             Target(TargetKind.GROUND, Point(.3,.7), 1.0),
@@ -88,6 +98,12 @@ class World:
         return True
     def release(self): self.closed = True; return True
     def engine(self, **kwargs):
+        if 'plan' not in kwargs:
+            try:
+                kwargs['plan']=CompiledDeploymentPlan(tuple(
+                    (c.identity,c.kind,c.spell,c.remaining) for c in self.cards),6)
+            except DeploymentError:
+                kwargs['plan']=None
         return DeploymentEngine(observe=self.observe, deliver=self.deliver,
             release=self.release, live_gate=lambda: True,
             monotonic=self.clock, sleep=self.clock.sleep, **kwargs)
@@ -95,7 +111,7 @@ class World:
 
 def test_lightning_two_uses_are_discrete_count_verified_taps():
     w=World(); r=w.engine().run()
-    assert r.complete and r.home_verified and r.own_exit
+    assert r.complete and r.home_verified and not r.own_exit
     spells=[e for e in w.events if e.card_id=='zap' and e.verb in ('tap','hold')]
     assert [e.verb for e in spells] == ['tap','tap']
     assert r.spells_consumed == 2 and r.remaining == 0
@@ -157,22 +173,129 @@ def test_grey_false_is_not_success_without_decrement():
     assert len([e for e in w.events if e.verb=='hold'])==1
 
 
-def test_end_occurs_immediately_after_verified_exhaustion():
+def test_nr01_nr02_terminal_battle_waits_read_only_then_returns_home_once():
     w=World([card(count=1)]); r=w.engine().run()
-    assert r.complete and w.exit_at < 2.0 and w.clock()<5.0
-    assert [e.verb for e in w.events][-3:]==['end_battle','confirm_end','return_home']
+    assert r.complete and r.home_verified and not r.own_exit
+    assert w.terminal_reads >= w.natural_result_after
+    assert [e.verb for e in w.events if e.verb in {
+        'end_battle', 'confirm_end', 'return_home'}] == ['return_home']
 
 
-def test_optional_confirmation_may_be_absent_but_result_must_be_positive():
-    w=World([card(count=1)]); w.with_confirm=False
-    assert w.engine().run().complete
-    assert not any(e.verb=='confirm_end' for e in w.events)
+def test_nr02_natural_result_may_arrive_after_deployment_budget_before_visit_reserve():
+    w=World([card(count=1)]); w.natural_result_after=20
+    result=w.engine(policy=Policy(
+        deployment_seconds=.5, visit_seconds=3.0, exit_seconds=1.0)).run()
+    assert result.complete and result.home_verified and not result.own_exit
+    assert w.clock() > .5
+    assert [e.verb for e in w.events if e.verb in {
+        'end_battle', 'confirm_end', 'return_home'}] == ['return_home']
+
+
+@pytest.mark.parametrize('fault,kind,expected_reason', [
+    ('revived', CardKind.TROOP, 'UNEXPLAINED_CARD_CHANGE'),
+    ('state_changed', CardKind.HERO, 'UNEXPLAINED_CARD_CHANGE'),
+    ('stale', CardKind.TROOP, 'OBSERVATION_STALE'),
+    ('malformed', CardKind.TROOP, 'OBSERVATION_INVALID'),
+])
+def test_nr_wait_reconciles_every_battle_observation_atomically(fault, kind, expected_reason):
+    w=World([card(kind=kind, count=1)])
+    original=w.observe
+    injected=[False]
+
+    def observe():
+        observation=original()
+        if (not injected[0] and observation.screen is Screen.BATTLE
+                and w.terminal_reads >= 5):
+            injected[0]=True
+            if fault == 'revived':
+                changed=replace(observation.page.cards[0], remaining=1,
+                                state=CardState.AVAILABLE)
+                observation=replace(observation, page=page([changed]))
+            elif fault == 'state_changed':
+                changed=replace(observation.page.cards[0], state=CardState.DEPLOYED)
+                observation=replace(observation, page=page([changed]))
+            elif fault == 'stale':
+                object.__setattr__(observation, 'sequence', 1)
+            else:
+                object.__setattr__(observation, 'targets', list(observation.targets))
+        return observation
+
+    w.observe=observe
+    result=w.engine().run()
+
+    assert injected[0]
+    assert not result.complete
+    assert result.reason == expected_reason
+    assert result.remaining == 0
+    expected_deploy = 'tap' if kind is CardKind.HERO else 'hold'
+    assert [event.verb for event in w.events] == ['select', expected_deploy]
+    assert not any(event.verb in {'end_battle', 'confirm_end', 'return_home'}
+                   for event in w.events)
+    assert w.closed
+
+
+def test_nr_wait_reconciles_valid_unchanged_terminal_battle(monkeypatch):
+    w=World([card(count=1)])
+    original_sync=deployment_module._sync
+    reconciled_terminal_reads=[]
+
+    def sync(core, observation, permitted=None):
+        if (observation.screen is Screen.BATTLE and w.terminal_reads >= 5
+                and all(item.exhausted for item in observation.page.cards)):
+            reconciled_terminal_reads.append(w.terminal_reads)
+        return original_sync(core, observation, permitted)
+
+    monkeypatch.setattr(deployment_module, '_sync', sync)
+    result=w.engine().run()
+
+    assert result.complete and result.home_verified and not result.own_exit
+    assert 5 in reconciled_terminal_reads
+    assert [event.verb for event in w.events if event.verb in {
+        'end_battle', 'confirm_end', 'return_home'}] == ['return_home']
+
+
+def test_nr03_natural_result_timeout_is_incomplete_without_end_fallback():
+    w=World([card(count=1)]); w.natural_result_after=None
+    result=w.engine(policy=Policy(visit_seconds=2.0, exit_seconds=1.0)).run()
+    assert not result.complete and not result.own_exit
+    assert not any(e.verb in {'end_battle','confirm_end','return_home'} for e in w.events)
 
 
 def test_manual_surrender_cannot_satisfy_success():
     w=World(); w.screen=Screen.RESULT
     r=w.engine().run(); assert not r.complete and not r.own_exit
     assert not w.events
+
+
+@pytest.mark.parametrize('fault', ['malformed','stale','unknown','intervention'])
+def test_nr04_wait_faults_are_incomplete_without_end_or_success(fault):
+    w=World([card(count=1)]); original=w.observe
+    def observe():
+        observation=original()
+        if w.screen is Screen.BATTLE and w.terminal_reads >= 5:
+            if fault=='malformed':
+                object.__setattr__(observation,'targets',list(observation.targets))
+            elif fault=='stale':
+                object.__setattr__(observation,'sequence',1)
+            elif fault=='unknown':
+                object.__setattr__(observation,'screen',Screen.UNKNOWN)
+                object.__setattr__(observation,'page',None)
+            else:
+                object.__setattr__(observation,'intervention',Intervention.DETECTED)
+        return observation
+    w.observe=observe
+    result=w.engine().run()
+    assert not result.complete
+    assert not any(e.verb in {'end_battle','confirm_end','return_home'} for e in w.events)
+
+
+def test_nr05_immediate_end_confirm_is_not_a_supported_success_intent():
+    w=World([card(count=1)])
+    result=w.engine().run()
+    assert result.complete
+    assert not result.own_exit
+    assert not any(e.verb in {'end_battle','confirm_end'} for e in w.events)
+
 
 @pytest.mark.parametrize('intervention',[Intervention.DETECTED,Intervention.UNKNOWN])
 def test_intervention_blocks_new_input_and_releases(intervention):
@@ -187,27 +310,27 @@ def test_input_exception_is_sanitized_and_release_runs():
 
 
 def test_navigation_runs_complete_gated_chain():
-    w=World([card(count=1)]); w.screen=Screen.HOME
-    r=w.engine().run()
+    from test_s004_occupied_unused import SourceWorld,occupied_unused_plan
+    w=SourceWorld()
+    r=w.engine(plan=occupied_unused_plan()).run()
     assert r.complete
     assert [e.verb for e in w.events][:3]==['attack','find_match','army_attack']
 
 
-def test_inventory_overlap_and_complete_edge_proof():
+def test_inventory_rejects_cross_page_coverage_even_with_overlap():
     i=Inventory()
-    i.add(page([card('a'),card('b',x=.3),card('c',x=.5)],right=False))
-    i.add(page([card('c'),card('d',x=.3)],left=False))
-    assert i.complete and i.identities==('a','b','c','d')
+    with pytest.raises(DeploymentError,match='SINGLE_PAGE_COVERAGE_UNPROVED'):
+        i.add(page([card('a'),card('b',x=.3),card('c',x=.5)],right=False))
 
 
 def test_missing_overlap_is_not_end_of_bar():
-    i=Inventory(); i.add(page([card('a'),card('b',x=.4)],right=False))
-    with pytest.raises(DeploymentError): i.add(page([card('c')],left=False))
+    i=Inventory()
+    with pytest.raises(DeploymentError): i.add(page([card('a'),card('b',x=.4)],right=False))
 
 
 def test_repeated_portrait_overlap_is_ambiguous_not_guessed():
-    i=Inventory(); i.add(page([card('a'),card('a',x=.4)],right=False))
-    with pytest.raises(DeploymentError): i.add(page([card('a'),card('b',x=.4)],left=False))
+    i=Inventory()
+    with pytest.raises(DeploymentError): i.add(page([card('a'),card('a',x=.4)],right=False))
 
 @pytest.mark.parametrize('value',[True,float('nan'),float('inf'),-1.0])
 def test_invalid_clock_fails_closed(value):
@@ -276,10 +399,10 @@ def test_manual_result_between_last_decrement_and_exit_is_not_success():
     assert not any(e.verb=='end_battle' for e in w.events)
 
 
-def test_multiple_known_pages_use_actual_scrolling_without_skips():
+def test_multiple_known_pages_have_no_active_scrolling_authority():
     class ScrollingWorld(World):
         def __init__(self):
-            super().__init__([card(f't{i}',count=1,x=.1+i*.1) for i in range(7)])
+            super().__init__([card(f't{i}',count=1,x=.1+i*.1) for i in range(6)])
             self.page_index=0
         def observe(self):
             o=super().observe()
@@ -296,8 +419,8 @@ def test_multiple_known_pages_use_actual_scrolling_without_skips():
                 return True
             return super().deliver(intent,check)
     w=ScrollingWorld(); r=w.engine().run()
-    assert r.complete and r.cards_total==7
-    assert sorted(e.card_id for e in w.events if e.verb=='hold')==[f't{i}' for i in range(7)]
+    assert not r.complete and r.reason=='OBSERVATION_UNAVAILABLE'
+    assert not w.events
 
 
 def test_support_spell_waits_read_only_for_a_current_eligible_cohort():

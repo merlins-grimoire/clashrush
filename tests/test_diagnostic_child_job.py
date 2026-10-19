@@ -323,7 +323,7 @@ def test_timeout_terminates_job_before_any_bounded_pipe_drain() -> None:
         return Process()
 
     outcome = child_job.run_owned_diagnostic_child(
-        ["python", "-c", "private"],
+        [sys.executable, "-c", "private"],
         timeout=1,
         runtime_factory=lambda: runtime,
         popen_factory=popen,
@@ -373,7 +373,7 @@ def test_failed_cleanup_drain_and_blocking_stream_close_is_bounded_and_unsuccess
     worker = threading.Thread(
         target=lambda: result.append(
             child_job.run_owned_diagnostic_child(
-                ["python", "-c", "private"],
+                [sys.executable, "-c", "private"],
                 timeout=1,
                 runtime_factory=lambda: runtime,
                 popen_factory=popen,
@@ -575,7 +575,7 @@ def test_owned_child_thread_start_failure_returns_unsuccessful_cleanup_and_close
     monkeypatch.setattr(child_job.threading, "Thread", RetirementThread)
 
     outcome = child_job.run_owned_diagnostic_child(
-        ["python", "-c", "private"],
+        [sys.executable, "-c", "private"],
         timeout=1,
         runtime_factory=lambda: runtime,
         popen_factory=popen,
@@ -607,7 +607,7 @@ def test_constructor_failure_after_create_closes_raw_and_retained_handles(
         raise OSError("private pipe cleanup detail")
 
     outcome = child_job.run_owned_diagnostic_child(
-        ["python", "-c", "private"],
+        [sys.executable, "-c", "private"],
         timeout=1,
         runtime_factory=lambda: runtime,
         popen_factory=popen,
@@ -670,7 +670,7 @@ def test_popen_constructor_fault_closes_each_raw_handle_exactly_once(
         raise OSError("synthetic constructor fault")
 
     outcome = child_job.run_owned_diagnostic_child(
-        ["python", "-c", "private"],
+        [sys.executable, "-c", "private"],
         timeout=1,
         runtime_factory=lambda: runtime,
         popen_factory=popen,
@@ -705,7 +705,7 @@ def test_pre_spawn_setup_failure_never_calls_popen_and_returns_closed_failure(
             raise child_job.DiagnosticChildJobError("private")
 
     outcome = child_job.run_owned_diagnostic_child(
-        ["python", "-c", "private"],
+        [sys.executable, "-c", "private"],
         timeout=1,
         runtime_factory=lambda: runtime,
         popen_factory=lambda *_args, **_kwargs: popen_calls.append(object()),
@@ -851,7 +851,7 @@ def test_nested_run_is_rejected_before_runtime_or_child_creation() -> None:
     child_job._spawn_owner.owner = object()
     try:
         outcome = child_job.run_owned_diagnostic_child(
-            ["python", "-c", "private"],
+            [sys.executable, "-c", "private"],
             timeout=1,
             runtime_factory=lambda: (_ for _ in ()).throw(AssertionError("runtime")),
             popen_factory=lambda *_args, **_kwargs: (_ for _ in ()).throw(

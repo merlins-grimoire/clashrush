@@ -23,6 +23,8 @@ class Slot:
     framebuffer_width: int
     framebuffer_height: int
     dpi: int
+    # None identifies the legacy display-selected schema, never policy admission.
+    slot_id: str | None = None
 
 
 _CONFIG_LINE = re.compile(
@@ -103,4 +105,46 @@ def load_exact_five(
             raise RegistryError("instance geometry does not match pinned profile")
         used_internal.add(internal)
         slots.append(Slot(index, internal, display_name, *geometry))
+    return tuple(slots)
+
+
+def load_instance_slots(conf_text: str, registration: dict) -> tuple[Slot, ...]:
+    """Schema 2: exact-five stable slot/internal keys; labels are metadata only.
+
+    Reuses the pinned CoC_Bot-derived full-line parser and geometry restrictions.
+    No automatic migration or fallback to legacy display-name selection occurs.
+    """
+    if (type(conf_text) is not str or type(registration) is not dict
+            or set(registration) != {'schema', 'slots'}
+            or type(registration['schema']) is not int or registration['schema'] != 2
+            or type(registration['slots']) is not list or len(registration['slots']) != 5):
+        raise RegistryError('exactly five explicit instance slots required')
+    parsed = _parse(conf_text)
+    slots = []
+    ids, internals = set(), set()
+    for index, entry in enumerate(registration['slots']):
+        if type(entry) is not dict or set(entry) != {'slot_id', 'internal_name', 'display_label'}:
+            raise RegistryError('instance slot fields invalid')
+        slot_id, internal, label = (entry[k] for k in ('slot_id', 'internal_name', 'display_label'))
+        if (type(slot_id) is not str or re.fullmatch(r'slot-[a-z0-9][a-z0-9_-]{0,63}', slot_id) is None
+                or type(internal) is not str or re.fullmatch(r'Pie64(?:_[A-Za-z0-9_]+)?', internal) is None
+                or type(label) is not str or not label or label != label.strip()
+                or any(ord(c) < 32 or ord(c) == 127 for c in label)
+                or slot_id in ids or internal in internals or internal not in parsed):
+            raise RegistryError('instance slot identity invalid or ambiguous')
+        fields = parsed[internal]
+        try:
+            raw = tuple(fields[k] for k in ('fb_width', 'fb_height', 'dpi'))
+            if any(re.fullmatch(r'(?:0|[1-9][0-9]*)', v) is None for v in raw):
+                raise ValueError('noncanonical integer')
+            geometry = tuple(int(v) for v in raw)
+            title = fields['display_name']
+            if (geometry != _PINNED_GEOMETRY or not title or title != title.strip()
+                    or any(ord(c) < 32 or ord(c) == 127 for c in title)):
+                raise ValueError('unsupported instance')
+        except (KeyError, ValueError):
+            raise RegistryError('instance geometry or window metadata invalid') from None
+        ids.add(slot_id)
+        internals.add(internal)
+        slots.append(Slot(index, internal, title, *geometry, slot_id=slot_id))
     return tuple(slots)

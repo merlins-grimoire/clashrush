@@ -359,6 +359,44 @@ def _close_popen_resources(process: object) -> bool:
     return clean
 
 
+def _bounded_communicate(process, timeout, limit):
+    """Bound combined pipe memory; owner retires the Job on any read failure."""
+    deadline = time.monotonic() + timeout
+    lock, failed = threading.Lock(), threading.Event()
+    buffers = [bytearray(), bytearray()]
+    total = 0
+
+    def read(index, stream):
+        nonlocal total
+        try:
+            while not failed.is_set():
+                chunk = stream.read(1024)
+                if not chunk:
+                    return
+                with lock:
+                    if type(chunk) is not bytes or total + len(chunk) > limit:
+                        failed.set()
+                        return
+                    buffers[index].extend(chunk)
+                    total += len(chunk)
+        except BaseException:
+            failed.set()
+
+    readers = [threading.Thread(target=read, args=(i, stream), daemon=True)
+               for i, stream in enumerate((process.stdout, process.stderr))]
+    for reader in readers:
+        reader.start()
+    while any(reader.is_alive() for reader in readers):
+        if failed.wait(.005):
+            raise DiagnosticChildJobError('bounded child output denied')
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired('owned-child', timeout)
+    if failed.is_set():
+        raise DiagnosticChildJobError('bounded child output denied')
+    process.wait(timeout=max(0., deadline - time.monotonic()))
+    return bytes(buffers[0]), bytes(buffers[1])
+
+
 def run_owned_diagnostic_child(
     command: Sequence[str],
     *,
@@ -367,16 +405,36 @@ def run_owned_diagnostic_child(
     popen_factory: Callable[..., object] = subprocess.Popen,
     installer: Callable[[], None] = _install_job_owned_create_process_once,
     monotonic: Callable[[], float] = time.monotonic,
+    environment: dict[str, str] | None = None,
+    output_limit: int | None = None,
+    before_spawn: Callable[[], object] | None = None,
 ) -> DiagnosticChildOutcome:
     """Run one child under a private Job with finite communication and cleanup."""
     if (
         type(timeout) is not int
         or timeout <= 0
+        or (output_limit is not None and (type(output_limit) is not int or not 0 < output_limit <= 256 * 1024))
+        or (before_spawn is not None and not callable(before_spawn))
         or type(command) not in (list, tuple)
         or not command
         or any(type(part) is not str or not part for part in command)
+        or (environment is not None and (type(environment) is not dict
+            or any(type(k) is not str or type(v) is not str or not k
+                   or '=' in k or '\x00' in k or '\x00' in v
+                   for k,v in environment.items())))
         or getattr(_spawn_owner, "owner", None) is not None
     ):
+        return DiagnosticChildOutcome(None, None, None, False, False, reason=DiagnosticParentReason.OWNERSHIP)
+
+    # This auxiliary owner is not a second native-player launcher. Keep the
+    # existing Python composition and fixed package-observation executable only;
+    # their own command/approval gates still apply. Never accept a player or an
+    # arbitrary helper executable through this generic subprocess boundary.
+    from .mvp_installed_build import auxiliary_executable_is_pinned
+    import os
+    normalize = lambda value: os.path.normcase(os.path.abspath(value))
+    if (normalize(command[0]) not in {normalize(sys.executable), normalize(sys._base_executable)}
+            and auxiliary_executable_is_pinned(command[0]) is not True):
         return DiagnosticChildOutcome(None, None, None, False, False, reason=DiagnosticParentReason.OWNERSHIP)
     if runtime_factory is None:
         from .win32_runtime import NativeWin32Api, Win32Runtime
@@ -396,6 +454,8 @@ def run_owned_diagnostic_child(
         _spawn_owner.owner = owner
         try:
             reason = DiagnosticParentReason.SPAWN
+            if before_spawn is not None:
+                before_spawn()
             process = popen_factory(
                 list(command),
                 stdout=subprocess.PIPE,
@@ -404,6 +464,9 @@ def run_owned_diagnostic_child(
                 # Decode on this guarded thread, not Windows Popen reader
                 # threads (which otherwise print an uncaught raw traceback).
                 text=False,
+                shell=False,
+                close_fds=True,
+                **({'env':dict(environment)} if environment is not None else {}),
             )
             owner.raw_process = None
             owner.raw_thread = None
@@ -411,7 +474,8 @@ def run_owned_diagnostic_child(
             _spawn_owner.owner = None
         remaining = max(0.0, deadline - monotonic())
         reason = DiagnosticParentReason.COMMUNICATION
-        stdout, stderr = process.communicate(timeout=remaining)
+        stdout, stderr = (process.communicate(timeout=remaining) if output_limit is None
+                          else _bounded_communicate(process, remaining, output_limit))
         if type(stdout) is bytes:
             stdout = stdout.decode("utf-8", errors="strict").replace("\r\n", "\n")
         if type(stderr) is bytes:
@@ -456,7 +520,12 @@ def run_owned_diagnostic_child(
         if process is not None:
             drain_succeeded = True
             try:
-                process.communicate(timeout=1.0)
+                if output_limit is None:
+                    process.communicate(timeout=1.0)
+                else:
+                    # Record the real exit status before closing Popen's handle;
+                    # its destructor must not poll an already-closed handle.
+                    process.wait(timeout=1.0)
             except BaseException:
                 drain_succeeded = False
             resources_closed = _close_popen_resources(process)

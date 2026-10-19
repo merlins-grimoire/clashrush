@@ -15,16 +15,16 @@ def test_lease_is_metadata_only_and_tracks_only_its_mouse():
             with pytest.raises(DeploymentError):child.set_held(True)
 
 
-def test_parent_release_is_only_up_and_preserves_failed_ownership():
+def test_parent_never_takes_over_historical_release_ownership():
     calls=[]
     with MouseLease.create(time.monotonic()+5) as owner:
         owner.set_held(True)
         def fail(marker):calls.append(marker);raise RuntimeError('inert')
         assert retire_mouse(owner,fail) is False and owner.held
-        assert retire_mouse(owner,lambda marker:calls.append(marker)) is True
-        assert not owner.held and len(calls)==2
-        assert retire_mouse(owner,lambda marker:calls.append(marker)) is True
-        assert len(calls)==2
+        assert retire_mouse(owner,lambda marker:calls.append(marker)) is False
+        assert owner.held and calls==[]
+        assert retire_mouse(owner,lambda marker:calls.append(marker)) is False
+        assert calls==[]
 
 
 def test_unowned_or_stale_lease_cannot_authorize():

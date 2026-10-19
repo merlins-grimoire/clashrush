@@ -753,9 +753,18 @@ def test_attack_path_skips_export_readiness_after_exact_slot_home_proof() -> Non
     assert events == ["construct", "run:121.0"]
 
 
+@pytest.fixture
+def legacy_database(tmp_path):
+    # Exercise the real pre-construction fence before these injected old workers.
+    from clash_rush_rebuild.mvp_session_authority import DurableSessionAuthority
+    authority = DurableSessionAuthority(tmp_path / 'var' / 'mvp-session.sqlite3')
+    authority.setup(MvpConfiguration('synthetic-team','synthetic-account','slot-2',TAG_HASH))
+    authority.close()
+
+
 @pytest.mark.parametrize("readiness_fails", [False, True])
 def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, readiness_fails: bool,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, readiness_fails: bool, legacy_database,
 ) -> None:
     events: list[str] = []
     configuration = MvpConfiguration("synthetic-team", "synthetic-account", "slot-2", TAG_HASH)
@@ -913,7 +922,7 @@ def test_native_visit_dismisses_one_welcome_back_then_waits_for_home(
 
 @pytest.mark.parametrize("first_screen", ["non-home", "continue", "launcher", "loading"])
 def test_first_manual_home_negative_has_no_input(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, first_screen: str,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, first_screen: str, legacy_database,
 ) -> None:
     events: list[str] = []
     status = SimpleNamespace(
@@ -1005,7 +1014,7 @@ def test_first_manual_home_negative_has_no_input(
 
 
 def test_bookkeeping_failure_preserves_readiness_error_and_owned_cleanup_order(
-    tmp_path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, legacy_database,
 ) -> None:
     events: list[str] = []
     original = RuntimeError("original readiness failure")
@@ -1113,7 +1122,7 @@ def test_bookkeeping_failure_preserves_readiness_error_and_owned_cleanup_order(
 
 
 def test_pre_start_error_survives_bare_lease_release_failure(
-    tmp_path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, legacy_database,
 ) -> None:
     events: list[str] = []
     original = RuntimeError("original pre-start failure")

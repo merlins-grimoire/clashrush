@@ -1,3 +1,7 @@
+> **Status: HISTORICAL IMPLEMENTATION CONTRACT / PARTIALLY SUPERSEDED.**
+> The standard-subprocess prescription was replaced in later owned-child work.
+> See [CURRENT.md](../docs/architecture/CURRENT.md). No implementation is authorized by this document.
+
 # R11F ambiguous Windows launch evidence contract
 
 Status: frozen design only. Base commit `9bc356325bd39170ea7469fb2b486ff52d5b5661`. No production/test edit or live diagnostic is authorized.

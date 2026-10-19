@@ -506,6 +506,95 @@ def _mvp_session_store(project_root: str | Path) -> DurableSessionAuthority:
     return DurableSessionAuthority(Path(project_root) / "var" / "mvp-session.sqlite3")
 
 
+def _deny_legacy_policy_dispatch(project_root: str | Path) -> None:
+    """No legacy construction/reconciliation may touch a schema-3 generation.
+
+    Read-only probing never initializes/migrates a store. Corruption denies the
+    operation; a missing legacy store retains its existing command validation.
+    """
+    from .mvp_session_authority import require_legacy_command
+    require_legacy_command(Path(project_root)/'var'/'mvp-session.sqlite3',missing_allowed=True)
+
+
+def _print_mvp_status(project_root: str | Path) -> None:
+    import sqlite3
+    from .mvp_policy_ingress import read_runtime_dimensions
+    authority = None
+    schema = 'UNPROVED'
+    try:
+        authority=DurableSessionAuthority(Path(project_root)/'var'/'mvp-session.sqlite3',read_only=True)
+        version=authority._open().execute('PRAGMA user_version').fetchone()[0]
+        if version == 3:
+            schema = '3'
+        elif version in (1, 2):
+            state=authority.status()
+            from .mvp_deployment_receipt import autonomy_status
+            # Never upgrade a historical schema merely by asking Status.
+            autonomy=autonomy_status(authority) if version==2 else 'PENDING'
+            receipt='complete' if state.final_acknowledged else 'pending'
+            print(f"local MVP mode={state.mode.value} configured=yes "
+                  f"game={state.game_outcome or 'PENDING'} retirement={state.retirement_outcome or 'PENDING'} "
+                  f"receipt={receipt} autonomy={autonomy}")
+            return
+    except (RuntimeError, OSError, ValueError, sqlite3.Error):
+        pass
+    finally:
+        if authority is not None:
+            authority.close()
+    dimensions = read_runtime_dimensions(project_root)
+    print(f"local MVP schema={schema} outcome={dimensions['outcome']} "
+          f"reason={dimensions['reason']} lifecycle={dimensions['lifecycle']} "
+          f"host={dimensions['host']} runtime=DENIED")
+
+
+def _policy_finalizer_mutex():
+    return Win32Runtime(NativeWin32Api()).acquire_mutex()
+
+
+def finalize_policy_command(project_root, *, generation, binding_digest, runner_manifest_path,
+                            outcome, reason):
+    """Administrative only: exact durable facts, no clock/capture/retirement repair."""
+    from .mvp_runner_manifest import verify_runner_manifest
+    from .mvp_session_authority import SessionAuthorityError
+    project=Path(project_root).resolve(strict=True)
+    var=project/'var'
+    if var.resolve(strict=True)!=var or not var.is_dir():
+        raise SessionAuthorityError('POLICY_PRIVATE_PATH')
+    path=var/'mvp-session.sqlite3'
+    manifest=Path(runner_manifest_path)
+    if (type(generation) is not int or generation<1 or type(binding_digest) is not str
+            or len(binding_digest)!=64 or any(c not in '0123456789abcdef' for c in binding_digest)
+            or manifest.resolve(strict=True)!=manifest or manifest.parent!=var
+            or path.resolve(strict=True)!=path):
+        raise SessionAuthorityError('POLICY_FINALIZER_BINDING')
+    with manifest.open('rb') as stream:
+        raw=stream.read(2_000_001)
+    if len(raw)>2_000_000:raise SessionAuthorityError('POLICY_MANIFEST_SIZE')
+    probe=DurableSessionAuthority(path,read_only=True)
+    try:
+        probe.status_v3()
+        run=probe.read_run_v3(generation)
+        if run.digest!=binding_digest:raise SessionAuthorityError('POLICY_FINALIZER_BINDING')
+        verify_runner_manifest(raw,approved_sha256=run.runner_manifest_digest,
+            approved_tree=run.source_tree,package_root=Path(__file__).parent)
+    finally:probe.close()
+    mutex=_policy_finalizer_mutex()
+    try:
+        if mutex.abandoned is not False:raise SessionAuthorityError('POLICY_MUTEX_ABANDONED')
+        mutex.require_usable()
+        authority=DurableSessionAuthority(path)
+        try:
+            status=authority.status_v3()
+            if authority.read_run_v3(generation)!=run:
+                raise SessionAuthorityError('POLICY_FINALIZER_BINDING')
+            result=authority.finalize_v3(run,writer_epoch=status.writer_epoch,outcome=outcome,reason=reason)
+            # A historical outcome never grants input, changes ACTIVE, or closes
+            # a retained player. Only the independent closure ingress can do so.
+            return result
+        finally:authority.close()
+    finally:mutex.release()
+
+
 def _start_mvp_session(
     project_root: str | Path, *, resume: bool, purpose: str
 ):
@@ -517,6 +606,7 @@ def _start_mvp_session(
     ):
         raise RuntimeSafetyError("MVP run purpose is malformed")
     project = Path(project_root).resolve(strict=True)
+    _deny_legacy_policy_dispatch(project)
     lifecycle = build_native_state_store(project).load()
     if type(lifecycle) is not Ready:
         raise RuntimeSafetyError("MVP run requires exact READY lifecycle state")
@@ -663,6 +753,21 @@ def _parser() -> argparse.ArgumentParser:
         help="write a public-safe synthetic installation configuration",
     )
     export.add_argument("--output", required=True)
+    instance_setup = subcommands.add_parser('mvp-setup-instance',
+        help='explicit fresh stopped schema-3 instance setup; no tag, no run')
+    instance_setup.add_argument('--project-root', required=True)
+    instance_setup.add_argument('--registry', required=True)
+    instance_setup.add_argument('--team-ref', required=True)
+    instance_setup.add_argument('--source-tree', required=True)
+    instance_setup.add_argument('--approve-instance-setup', action='store_true')
+    policy_approval = subcommands.add_parser('issue-policy-approval',
+        help='explicit stopped migration/calibration approval; never launches')
+    policy_approval.add_argument('--project-root', required=True)
+    policy_approval.add_argument('--source-tree', required=True)
+    policy_approval.add_argument('--purpose', required=True,
+        choices=('MIGRATE_SCHEMA3','CALIBRATION_READ_ONLY'))
+    policy_approval.add_argument('--lifetime-seconds', type=int, default=300)
+    policy_approval.add_argument('--approve-purpose', action='store_true')
     mvp_setup = subcommands.add_parser(
         "mvp-setup", help="configure exactly one local Team/account/instance"
     )
@@ -738,6 +843,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     diagnose_child.add_argument("--project-root", required=True)
     diagnose_child.add_argument("--slots", required=True)
+    finalize=subcommands.add_parser('mvp-finalize',help='finalize exact durable schema-3 facts without gameplay or closure')
+    finalize.add_argument('--project-root',required=True)
+    finalize.add_argument('--generation',type=int,required=True)
+    finalize.add_argument('--binding-digest',required=True)
+    finalize.add_argument('--runner-manifest',required=True)
+    finalize.add_argument('--outcome',choices=('SUCCESS','FAILED','BLOCKED','UNCERTAIN','CANCELED'),required=True)
+    finalize.add_argument('--reason',required=True)
+    calibrate=subcommands.add_parser('mvp-calibrate',help='one protected read-only calibration; no input, navigation or player retirement',
+        description='Requires stopped schema-3 authority, protected CALIBRATION_READ_ONLY approval, exact installed runner manifest, calibration descriptor/specification, fresh host measurement and protected evidence directory. Missing prerequisites deny; this command never creates approval, navigates, attacks or retires the player.')
+    calibrate.add_argument('--project-root',required=True)
+    migrate=subcommands.add_parser('mvp-migrate-policy',help='explicit protected stopped-only schema-3 migration')
+    migrate.add_argument('--project-root',required=True)
+    migrate.add_argument('--backup-name',required=True)
     return parser
 
 
@@ -764,6 +882,9 @@ def main(
 ) -> int:
     diagnostic_argv = sys.argv[1:] if argv is None else argv
     sanitized_commands = {
+        "mvp-finalize",
+        "mvp-migrate-policy",
+        "mvp-calibrate",
         "build-readiness-profile",
         "diagnose-home",
         "startup-debug-one",
@@ -801,6 +922,58 @@ def main(
         return 2
 
     try:
+        if args.command in ('mvp-setup-instance','issue-policy-approval'):
+            from .mvp_policy_ingress import PolicyIngress
+            from .mvp_policy_setup import bootstrap, issue_approval
+            policy = PolicyIngress(args.project_root)
+            if args.command == 'mvp-setup-instance':
+                bootstrap(policy,registry=args.registry,team_ref=args.team_ref,
+                    source_tree=args.source_tree,approve=args.approve_instance_setup)
+                print('instance policy configured schema=3 mode=STOPPED runtime=DENIED')
+            else:
+                issue_approval(policy,purpose=args.purpose,source_tree=args.source_tree,
+                    lifetime_seconds=args.lifetime_seconds,approve=args.approve_purpose)
+                print('scoped policy approval issued runtime=NOT_STARTED')
+            return 0
+        if args.command=='mvp-calibrate':
+            from .mvp_policy_run import run_policy_command
+            result=run_policy_command(args.project_root,purpose='CALIBRATION_READ_ONLY')
+            status='SOURCE_UNAVAILABLE' if result is None else result.status
+            from .mvp_policy_ingress import read_runtime_dimensions
+            dimensions = read_runtime_dimensions(args.project_root)
+            print(f"calibration={status} gameplay=DENIED lifecycle={dimensions['lifecycle']} "
+                  f"outcome={dimensions['outcome']} reason={dimensions['reason']} host={dimensions['host']}")
+            return 0 if status=='CAPTURED' else 1
+        if args.command=='mvp-migrate-policy':
+            from .mvp_policy_ingress import PolicyIngress
+            PolicyIngress(args.project_root).migrate_stopped(backup_name=args.backup_name)
+            print('local MVP schema=3 runtime=DENIED')
+            return 0
+        if args.command=='mvp-run':
+            path=Path(args.project_root)/'var'/'mvp-session.sqlite3'
+            if path.exists():
+                probe=DurableSessionAuthority(path,read_only=True)
+                try: policy=probe._open().execute('PRAGMA user_version').fetchone()[0]==3
+                finally: probe.close()
+                if policy:
+                    from .mvp_policy_run import run_policy_command
+                    result=run_policy_command(args.project_root)
+                    print(f'local MVP historical={result.outcome} eligibility=BLOCKED runtime=DENIED')
+                    return 0
+        if args.command=='mvp-finalize':
+            result=finalize_policy_command(args.project_root,generation=args.generation,
+                binding_digest=args.binding_digest,runner_manifest_path=args.runner_manifest,
+                outcome=args.outcome,reason=args.reason)
+            print(f'local MVP historical={result.outcome} eligibility=BLOCKED runtime=DENIED')
+            return 0
+        if args.command in {
+            'visit-one','visit-one-child','donor-visit-one','diagnose-home','diagnose-home-child',
+            'startup-debug-one','startup-debug-child','startup-continue-one','initialize',
+            'reconcile-window-binding','issue-reconciliation-approval','issue-startup-continue-approval',
+            'issue-startup-debug-approval','mvp-rebind-ready-instance','mvp-account-ready-one',
+            'mvp-run-readiness','mvp-run','mvp-resume','mvp-visit-one',
+        }:
+            _deny_legacy_policy_dispatch(args.project_root)
         if args.command == "visit-one":
             command = [
                 sys.executable,
@@ -990,20 +1163,7 @@ def main(
             print(f"local MVP mode={state.mode.value}")
             return 0
         if args.command == "mvp-status":
-            state = _mvp_session_store(args.project_root).status()
-            from .mvp_deployment_receipt import autonomy_status
-            proof_store = _mvp_session_store(args.project_root)
-            try:
-                autonomy = autonomy_status(proof_store)
-            finally:
-                proof_store.close()
-            receipt = "complete" if state.final_acknowledged else "pending"
-            game = state.game_outcome or "PENDING"
-            retirement = state.retirement_outcome or "PENDING"
-            print(
-                f"local MVP mode={state.mode.value} configured=yes "
-                f"game={game} retirement={retirement} receipt={receipt} autonomy={autonomy}"
-            )
+            _print_mvp_status(args.project_root)
             return 0
         if args.command == "mvp-visit-one":
             result = run_native_mvp_visit(

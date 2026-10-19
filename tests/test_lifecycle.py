@@ -30,6 +30,11 @@ class FakeStateStore:
         self.events.append("state:load")
         return self.state
 
+    def load_with_bytes(self):
+        from clash_rush_rebuild.lifecycle_state import encode_state
+        state = self.load()
+        return state, encode_state(state)
+
     def commit(self, state: Ready | Active) -> Ready | Active:
         self.events.append(f"state:commit:{state.state_name}")
         if type(state) is Ready and self.fail_ready_commit is not None:
